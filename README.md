@@ -15,6 +15,13 @@ fix a few rough edges on first build.
 - `backend/config/sessions.go` — saved connection profiles as plain JSON (host/user/port/keyPath only, no passwords, see rationale in that file)
 - `frontend/` — xterm.js terminal + Monaco editor pane, split-pane layout, plain **TypeScript** + Vite (no framework)
 
+## A note on performance
+
+If Specter feels sluggish while developing (typing lag, general UI slowness),
+test with a production build (`wails build`) before assuming it's a real bug.
+`wails dev` carries real overhead (unminified assets, dev server round-trips,
+hot-reload machinery) that doesn't reflect the actual app's performance.
+
 ## Setup
 
 You'll need Go 1.22+, Node 18+, and the Wails CLI installed locally:

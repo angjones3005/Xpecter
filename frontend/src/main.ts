@@ -159,12 +159,16 @@ function createTerminalForTab(tab: Tab) {
   tab.container = container;
 }
 
+let resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 window.addEventListener('resize', () => {
-  const tab = activeTabId ? tabs.get(activeTabId) : null;
-  if (!tab || !tab.fitAddon || !tab.term) return;
-  tab.fitAddon.fit();
-  if (tab.mode === 'local' && tab.backendId) App.ResizeLocalTerminal(tab.backendId, tab.term.cols, tab.term.rows);
-  if (tab.mode === 'ssh' && tab.backendId) App.ResizeSSH(tab.backendId, tab.term.cols, tab.term.rows);
+  if (resizeDebounceTimer) clearTimeout(resizeDebounceTimer);
+  resizeDebounceTimer = setTimeout(() => {
+    const tab = activeTabId ? tabs.get(activeTabId) : null;
+    if (!tab || !tab.fitAddon || !tab.term) return;
+    tab.fitAddon.fit();
+    if (tab.mode === 'local' && tab.backendId) App.ResizeLocalTerminal(tab.backendId, tab.term.cols, tab.term.rows);
+    if (tab.mode === 'ssh' && tab.backendId) App.ResizeSSH(tab.backendId, tab.term.cols, tab.term.rows);
+  }, 100);
 });
 
 // --- Editor setup (shared across all tabs, VS Code-style) ---
