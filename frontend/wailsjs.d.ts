@@ -21,6 +21,15 @@ export interface ConnectResult {
   needsPassphrase?: boolean;
 }
 
+export interface SessionProfile {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  user: string;
+  keyPath?: string;
+}
+
 export interface RemoteFile {
   name: string;
   path: string;
@@ -35,6 +44,10 @@ export interface AppBindings {
 
   Connect(req: ConnectRequest): Promise<ConnectResult>;
   SelectKeyFile(): Promise<string>;
+
+  ListSessions(): Promise<SessionProfile[]>;
+  SaveSession(profile: SessionProfile): Promise<void>;
+  DeleteSession(id: string): Promise<void>;
   TrustHost(host: string): Promise<void>;
   TrustHostDespiteChange(host: string): Promise<void>;
   WriteSSH(id: string, data: string): Promise<void>;

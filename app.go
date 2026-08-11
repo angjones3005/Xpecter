@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
+	"specter/backend/config"
 	"specter/backend/pty"
 	"specter/backend/sftpclient"
 	"specter/backend/sshclient"
@@ -142,6 +145,60 @@ func (a *App) SelectKeyFile() (string, error) {
 	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
 		Title: "Select SSH Private Key",
 	})
+}
+
+// --- Saved sessions ---
+
+func (a *App) ListSessions() ([]config.SessionProfile, error) {
+	return config.LoadSessions()
+}
+
+// SaveSession appends a new session profile (or updates one with a matching
+// ID) and persists it. Never accepts or stores a password — only host/user/
+// port/keyPath, consistent with sessions.go's no-password-storage rationale.
+func (a *App) SaveSession(profile config.SessionProfile) error {
+	sessions, err := config.LoadSessions()
+	if err != nil {
+		return err
+	}
+
+	if profile.ID == "" {
+		profile.ID = newSessionID()
+	}
+
+	replaced := false
+	for i, s := range sessions {
+		if s.ID == profile.ID {
+			sessions[i] = profile
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		sessions = append(sessions, profile)
+	}
+
+	return config.SaveSessions(sessions)
+}
+
+func (a *App) DeleteSession(id string) error {
+	sessions, err := config.LoadSessions()
+	if err != nil {
+		return err
+	}
+	kept := sessions[:0]
+	for _, s := range sessions {
+		if s.ID != id {
+			kept = append(kept, s)
+		}
+	}
+	return config.SaveSessions(kept)
+}
+
+func newSessionID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 func (a *App) WriteSSH(id string, data string) error {

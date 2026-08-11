@@ -2,13 +2,14 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import * as monaco from 'monaco-editor';
 import '@xterm/xterm/css/xterm.css';
-import type { RemoteFile, ConnectRequest } from '../wailsjs.d.ts';
+import type { RemoteFile, ConnectRequest, SessionProfile } from '../wailsjs.d.ts';
 
 const App = window.go.main.App;
 const runtime = window.runtime;
 
 let currentSessionId: string | null = null;
 let currentMode: 'local' | 'ssh' | null = null;
+let skipSavePrompt = false; // true when connecting via an already-saved session
 
 // --- Terminal setup ---
 
@@ -76,6 +77,62 @@ async function refreshFileList(path = '.') {
     div.textContent = (e.isDir ? '📁 ' : '📄 ') + e.name;
     div.onclick = () => (e.isDir ? refreshFileList(e.path) : openRemoteFile(e.path));
     list.appendChild(div);
+  }
+}
+
+// --- Saved sessions ---
+
+function setAuthMode(mode: 'password' | 'key') {
+  const radio = document.querySelector(`input[name="authmode"][value="${mode}"]`) as HTMLInputElement;
+  radio.checked = true;
+  const isKey = mode === 'key';
+  document.getElementById('auth-password-fields')!.style.display = isKey ? 'none' : 'inline';
+  document.getElementById('auth-key-fields')!.style.display = isKey ? 'inline' : 'none';
+}
+
+async function useSession(s: SessionProfile) {
+  (document.getElementById('host') as HTMLInputElement).value = s.host;
+  (document.getElementById('user') as HTMLInputElement).value = s.user;
+
+  if (s.keyPath) {
+    setAuthMode('key');
+    (document.getElementById('keyPath') as HTMLInputElement).value = s.keyPath;
+    (document.getElementById('passphrase') as HTMLInputElement).value = '';
+    skipSavePrompt = true;
+    await attemptConnect({ host: s.host, port: s.port, user: s.user, keyPath: s.keyPath });
+    skipSavePrompt = false;
+  } else {
+    setAuthMode('password');
+    const pwField = document.getElementById('password') as HTMLInputElement;
+    pwField.value = '';
+    pwField.focus();
+  }
+}
+
+async function renderSessionList() {
+  const sessions = await App.ListSessions();
+  const list = document.getElementById('session-list')!;
+  list.innerHTML = '';
+  for (const s of sessions) {
+    const row = document.createElement('div');
+    row.className = 'session-entry';
+
+    const label = document.createElement('span');
+    label.textContent = (s.keyPath ? '🔑 ' : '🔒 ') + s.name;
+    label.onclick = () => useSession(s);
+
+    const del = document.createElement('span');
+    del.textContent = '✕';
+    del.className = 'delete-btn';
+    del.onclick = async (e) => {
+      e.stopPropagation();
+      await App.DeleteSession(s.id);
+      renderSessionList();
+    };
+
+    row.appendChild(label);
+    row.appendChild(del);
+    list.appendChild(row);
   }
 }
 
@@ -163,6 +220,21 @@ async function attemptConnect(req: ConnectRequest) {
     currentMode = 'ssh';
     runtime.EventsOn('ssh:data:' + result.sessionId, (data: unknown) => term.write(data as string));
     refreshFileList('.');
+
+    if (!skipSavePrompt) {
+      const name = `${req.user}@${req.host}`;
+      if (confirm(`Save this session as "${name}"?`)) {
+        await App.SaveSession({
+          id: '',
+          name,
+          host: req.host,
+          port: req.port,
+          user: req.user,
+          keyPath: req.keyPath,
+        });
+        renderSessionList();
+      }
+    }
   }
 }
 
@@ -209,3 +281,5 @@ document.getElementById('local')!.addEventListener('click', async () => {
   currentMode = 'local';
   runtime.EventsOn('local:data', (data: unknown) => term.write(data as string));
 });
+
+renderSessionList();
