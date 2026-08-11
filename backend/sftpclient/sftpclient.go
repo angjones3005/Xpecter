@@ -24,7 +24,7 @@ func ListDir(client *ssh.Client, dir string) ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	if dir == "" {
 		dir = "."
@@ -52,13 +52,13 @@ func ReadFile(client *ssh.Client, filePath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	f, err := c.Open(filePath)
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	buf := new(bytes.Buffer)
 	if _, err := io.Copy(buf, f); err != nil {
@@ -72,14 +72,15 @@ func WriteFile(client *ssh.Client, filePath string, content string) error {
 	if err != nil {
 		return err
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	f, err := c.Create(filePath)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-
-	_, err = f.Write([]byte(content))
-	return err
+	if _, err := f.Write([]byte(content)); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }

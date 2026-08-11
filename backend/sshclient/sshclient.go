@@ -93,7 +93,7 @@ func knownHostsPath() (string, error) {
 		if ferr != nil {
 			return "", ferr
 		}
-		f.Close()
+		_ = f.Close()
 	}
 	return path, nil
 }
@@ -174,9 +174,11 @@ func writeTrustedKey(hostname string, replacing bool) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = f.WriteString(line + "\n")
-	return err
+	if _, err := f.WriteString(line + "\n"); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // removeHostLines strips existing known_hosts lines for hostname before a
@@ -260,21 +262,21 @@ func (s *Session) StartShell(onData func([]byte)) error {
 	}
 	modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
 	if err := sess.RequestPty("xterm-256color", 40, 120, modes); err != nil {
-		sess.Close()
+		_ = sess.Close()
 		return err
 	}
 	stdout, err := sess.StdoutPipe()
 	if err != nil {
-		sess.Close()
+		_ = sess.Close()
 		return err
 	}
 	stdin, err := sess.StdinPipe()
 	if err != nil {
-		sess.Close()
+		_ = sess.Close()
 		return err
 	}
 	if err := sess.Shell(); err != nil {
-		sess.Close()
+		_ = sess.Close()
 		return err
 	}
 	s.sess = sess
@@ -313,7 +315,7 @@ func (s *Session) Resize(cols, rows int) error {
 
 func (s *Session) Close() error {
 	if s.sess != nil {
-		s.sess.Close()
+		_ = s.sess.Close()
 	}
 	return s.client.Close()
 }

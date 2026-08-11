@@ -59,7 +59,7 @@ func (t *unixTerminal) Resize(cols, rows int) error {
 }
 
 func (t *unixTerminal) Close() error {
-	t.f.Close()
+	_ = t.f.Close()
 	if t.cmd.Process != nil {
 		return t.cmd.Process.Kill()
 	}
