@@ -55,7 +55,7 @@ jobs:
       - name: Build (Linux)
         if: matrix.platform == 'linux'
         run: |
-          wails build -platform linux/amd64
+          wails build -platform linux/amd64 -tags webkit2_41
           tar -czf ${{ matrix.artifact }} -C build/bin .
 
       - name: Build (Windows)
