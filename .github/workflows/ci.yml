@@ -28,7 +28,7 @@ jobs:
           fi
 
       - name: go vet
-        run: go vet ./...
+        run: go vet ./backend/...
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
