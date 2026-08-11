@@ -9,7 +9,6 @@ const runtime = window.runtime;
 
 let currentSessionId: string | null = null;
 let currentMode: 'local' | 'ssh' | null = null;
-let pendingConnectReq: ConnectRequest | null = null;
 
 // --- Terminal setup ---
 
@@ -202,7 +201,6 @@ document.getElementById('connect')!.addEventListener('click', async () => {
     req = { host, port: 22, user, password };
   }
 
-  pendingConnectReq = req;
   await attemptConnect(req);
 });
 
