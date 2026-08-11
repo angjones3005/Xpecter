@@ -128,6 +128,16 @@ function showTrustPrompt(opts: {
 async function attemptConnect(req: ConnectRequest) {
   const result = await App.Connect(req);
 
+  if (result.needsPassphrase) {
+    const passphrase = prompt('This key is encrypted. Enter its passphrase:');
+    if (passphrase === null) {
+      term.write('\r\n[Connection cancelled: passphrase required]\r\n');
+      return;
+    }
+    await attemptConnect({ ...req, passphrase });
+    return;
+  }
+
   if (result.needsTrust) {
     showTrustPrompt({
       host: result.host!,
@@ -157,15 +167,43 @@ async function attemptConnect(req: ConnectRequest) {
   }
 }
 
+// --- Auth mode toggle ---
+
+const authRadios = document.querySelectorAll('input[name="authmode"]') as NodeListOf<HTMLInputElement>;
+authRadios.forEach((radio) => {
+  radio.addEventListener('change', () => {
+    const isKey = radio.value === 'key' && radio.checked;
+    document.getElementById('auth-password-fields')!.style.display = isKey ? 'none' : 'inline';
+    document.getElementById('auth-key-fields')!.style.display = isKey ? 'inline' : 'none';
+  });
+});
+
+document.getElementById('browse-key')!.addEventListener('click', async () => {
+  const path = await App.SelectKeyFile();
+  if (path) {
+    (document.getElementById('keyPath') as HTMLInputElement).value = path;
+  }
+});
+
 // --- Connection controls ---
 
 document.getElementById('connect')!.addEventListener('click', async () => {
   const host = (document.getElementById('host') as HTMLInputElement).value;
   const user = (document.getElementById('user') as HTMLInputElement).value;
-  const password = (document.getElementById('password') as HTMLInputElement).value;
+  const authMode = (document.querySelector('input[name="authmode"]:checked') as HTMLInputElement).value;
 
-  pendingConnectReq = { host, port: 22, user, password };
-  await attemptConnect(pendingConnectReq);
+  let req: ConnectRequest;
+  if (authMode === 'key') {
+    const keyPath = (document.getElementById('keyPath') as HTMLInputElement).value;
+    const passphrase = (document.getElementById('passphrase') as HTMLInputElement).value;
+    req = { host, port: 22, user, keyPath, passphrase };
+  } else {
+    const password = (document.getElementById('password') as HTMLInputElement).value;
+    req = { host, port: 22, user, password };
+  }
+
+  pendingConnectReq = req;
+  await attemptConnect(req);
 });
 
 document.getElementById('local')!.addEventListener('click', async () => {

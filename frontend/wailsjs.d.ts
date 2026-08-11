@@ -8,6 +8,7 @@ export interface ConnectRequest {
   user: string;
   password?: string;
   keyPath?: string;
+  passphrase?: string;
 }
 
 export interface ConnectResult {
@@ -17,6 +18,7 @@ export interface ConnectResult {
   host?: string;
   fingerprint?: string;
   keyType?: string;
+  needsPassphrase?: boolean;
 }
 
 export interface RemoteFile {
@@ -32,6 +34,7 @@ export interface AppBindings {
   ResizeLocalTerminal(cols: number, rows: number): Promise<void>;
 
   Connect(req: ConnectRequest): Promise<ConnectResult>;
+  SelectKeyFile(): Promise<string>;
   TrustHost(host: string): Promise<void>;
   TrustHostDespiteChange(host: string): Promise<void>;
   WriteSSH(id: string, data: string): Promise<void>;

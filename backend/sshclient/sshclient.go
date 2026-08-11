@@ -20,12 +20,15 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
+var ErrPassphraseRequired = errors.New("private key is encrypted, passphrase required")
+
 type Config struct {
-	Host     string
-	Port     int
-	User     string
-	Password string
-	KeyPath  string
+	Host       string
+	Port       int
+	User       string
+	Password   string
+	KeyPath    string
+	Passphrase string
 }
 
 type Session struct {
@@ -207,7 +210,18 @@ func Dial(cfg Config) (*Session, error) {
 		}
 		signer, err := ssh.ParsePrivateKey(key)
 		if err != nil {
-			return nil, fmt.Errorf("parsing key: %w", err)
+			var passErr *ssh.PassphraseMissingError
+			if errors.As(err, &passErr) {
+				if cfg.Passphrase == "" {
+					return nil, ErrPassphraseRequired
+				}
+				signer, err = ssh.ParsePrivateKeyWithPassphrase(key, []byte(cfg.Passphrase))
+				if err != nil {
+					return nil, fmt.Errorf("parsing key with passphrase: %w", err)
+				}
+			} else {
+				return nil, fmt.Errorf("parsing key: %w", err)
+			}
 		}
 		authMethods = append(authMethods, ssh.PublicKeys(signer))
 	}

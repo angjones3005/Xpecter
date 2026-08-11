@@ -63,31 +63,36 @@ func (a *App) ResizeLocalTerminal(cols, rows int) error {
 // --- SSH sessions ---
 
 type ConnectRequest struct {
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	User     string `json:"user"`
-	Password string `json:"password,omitempty"`
-	KeyPath  string `json:"keyPath,omitempty"`
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	User       string `json:"user"`
+	Password   string `json:"password,omitempty"`
+	KeyPath    string `json:"keyPath,omitempty"`
+	Passphrase string `json:"passphrase,omitempty"`
 }
 
 // ConnectResult is returned instead of a bare error so the frontend can
 // distinguish "connected fine" from "needs a host key trust decision"
 // without parsing error strings.
 type ConnectResult struct {
-	SessionID   string `json:"sessionId,omitempty"`
-	NeedsTrust  bool   `json:"needsTrust,omitempty"`
-	Changed     bool   `json:"changed,omitempty"` // true = existing key MISMATCH (danger), false = new host
-	Host        string `json:"host,omitempty"`
-	Fingerprint string `json:"fingerprint,omitempty"`
-	KeyType     string `json:"keyType,omitempty"`
+	SessionID       string `json:"sessionId,omitempty"`
+	NeedsTrust      bool   `json:"needsTrust,omitempty"`
+	Changed         bool   `json:"changed,omitempty"` // true = existing key MISMATCH (danger), false = new host
+	Host            string `json:"host,omitempty"`
+	Fingerprint     string `json:"fingerprint,omitempty"`
+	KeyType         string `json:"keyType,omitempty"`
+	NeedsPassphrase bool   `json:"needsPassphrase,omitempty"`
 }
 
 func (a *App) Connect(req ConnectRequest) (ConnectResult, error) {
 	sess, err := sshclient.Dial(sshclient.Config{
 		Host: req.Host, Port: req.Port, User: req.User,
-		Password: req.Password, KeyPath: req.KeyPath,
+		Password: req.Password, KeyPath: req.KeyPath, Passphrase: req.Passphrase,
 	})
 	if err != nil {
+		if errors.Is(err, sshclient.ErrPassphraseRequired) {
+			return ConnectResult{NeedsPassphrase: true}, nil
+		}
 		var unknown *sshclient.HostKeyUnknownError
 		if errors.As(err, &unknown) {
 			return ConnectResult{
@@ -129,6 +134,14 @@ func (a *App) TrustHost(host string) error {
 // the override for a potential man-in-the-middle signal.
 func (a *App) TrustHostDespiteChange(host string) error {
 	return sshclient.TrustHostDespiteChange(host)
+}
+
+// SelectKeyFile opens a native OS file picker for choosing an SSH private key.
+// Returns an empty string if the user cancels.
+func (a *App) SelectKeyFile() (string, error) {
+	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Select SSH Private Key",
+	})
 }
 
 func (a *App) WriteSSH(id string, data string) error {

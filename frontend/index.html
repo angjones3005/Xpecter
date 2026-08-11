@@ -30,7 +30,16 @@
       <div class="toolbar">
         <input id="host" placeholder="host" />
         <input id="user" placeholder="user" />
-        <input id="password" placeholder="password" type="password" />
+        <label style="margin-right:6px;"><input type="radio" name="authmode" value="password" checked /> Password</label>
+        <label style="margin-right:6px;"><input type="radio" name="authmode" value="key" /> Key</label>
+        <span id="auth-password-fields">
+          <input id="password" placeholder="password" type="password" />
+        </span>
+        <span id="auth-key-fields" style="display:none;">
+          <input id="keyPath" placeholder="key path" readonly style="width:160px;" />
+          <button id="browse-key">Browse…</button>
+          <input id="passphrase" placeholder="passphrase (if any)" type="password" />
+        </span>
         <button id="connect">Connect</button>
         <button id="local">Local shell</button>
       </div>
