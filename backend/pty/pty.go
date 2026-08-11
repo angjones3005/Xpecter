@@ -24,6 +24,6 @@ func New(onData func([]byte)) (*LocalTerminal, error) {
 	return &LocalTerminal{impl: impl}, nil
 }
 
-func (l *LocalTerminal) Write(data []byte) error       { return l.impl.Write(data) }
-func (l *LocalTerminal) Resize(cols, rows int) error    { return l.impl.Resize(cols, rows) }
-func (l *LocalTerminal) Close() error                   { return l.impl.Close() }
+func (l *LocalTerminal) Write(data []byte) error     { return l.impl.Write(data) }
+func (l *LocalTerminal) Resize(cols, rows int) error { return l.impl.Resize(cols, rows) }
+func (l *LocalTerminal) Close() error                { return l.impl.Close() }
