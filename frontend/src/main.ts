@@ -7,35 +7,167 @@ import type { RemoteFile, ConnectRequest, SessionProfile } from '../wailsjs.d.ts
 const App = window.go.main.App;
 const runtime = window.runtime;
 
-let currentSessionId: string | null = null;
-let currentMode: 'local' | 'ssh' | null = null;
-let skipSavePrompt = false; // true when connecting via an already-saved session
+// --- Tab model ---
+// Each tab owns its own xterm.js Terminal + backend session (SSH session ID
+// or local terminal ID). 'pending' tabs show the connect form instead of a
+// live terminal, until Connect/StartLocalTerminal resolves them.
 
-// --- Terminal setup ---
+type TabMode = 'pending' | 'local' | 'ssh';
+type TabStatus = 'connecting' | 'connected' | 'disconnected';
 
-const term = new Terminal({
-  fontFamily: 'Menlo, Consolas, monospace',
-  fontSize: 13,
-  theme: { background: '#1e1e1e' },
-});
-const fitAddon = new FitAddon();
-term.loadAddon(fitAddon);
-term.open(document.getElementById('terminal')!);
-fitAddon.fit();
+interface Tab {
+  id: string;
+  mode: TabMode;
+  backendId: string | null; // sessionId (ssh) or local terminal id
+  label: string;
+  status: TabStatus;
+  term: Terminal | null;
+  fitAddon: FitAddon | null;
+  container: HTMLDivElement | null;
+}
+
+const tabs = new Map<string, Tab>();
+let activeTabId: string | null = null;
+let tabCounter = 0;
+
+function newTabId(): string {
+  tabCounter += 1;
+  return `tab-${tabCounter}`;
+}
+
+function createPendingTab(): Tab {
+  const tab: Tab = {
+    id: newTabId(),
+    mode: 'pending',
+    backendId: null,
+    label: 'New Tab',
+    status: 'disconnected',
+    term: null,
+    fitAddon: null,
+    container: null,
+  };
+  tabs.set(tab.id, tab);
+  return tab;
+}
+
+function renderTabBar() {
+  const bar = document.getElementById('tab-bar')!;
+  bar.innerHTML = '';
+  for (const tab of tabs.values()) {
+    const el = document.createElement('div');
+    el.className = 'tab' + (tab.id === activeTabId ? ' active' : '');
+    el.onclick = () => switchToTab(tab.id);
+
+    const dot = document.createElement('span');
+    dot.className = 'status-dot ' + tab.status;
+    el.appendChild(dot);
+
+    const label = document.createElement('span');
+    label.textContent = (tab.mode === 'local' ? '💻 ' : tab.mode === 'ssh' ? '🌐 ' : '') + tab.label;
+    el.appendChild(label);
+
+    const close = document.createElement('span');
+    close.className = 'tab-close';
+    close.textContent = '✕';
+    close.onclick = (e) => { e.stopPropagation(); closeTab(tab.id); };
+    el.appendChild(close);
+
+    bar.appendChild(el);
+  }
+
+  const addBtn = document.createElement('div');
+  addBtn.className = 'tab-add';
+  addBtn.textContent = '+';
+  addBtn.onclick = () => {
+    const tab = createPendingTab();
+    switchToTab(tab.id);
+  };
+  bar.appendChild(addBtn);
+}
+
+function switchToTab(id: string) {
+  activeTabId = id;
+  const tab = tabs.get(id)!;
+
+  // Hide all terminal containers, show only the active one (or the connect
+  // form if this tab hasn't connected yet).
+  document.querySelectorAll('.term-instance').forEach((el) => {
+    (el as HTMLElement).style.display = 'none';
+  });
+  document.getElementById('connect-form')!.style.display = tab.mode === 'pending' ? 'flex' : 'none';
+
+  if (tab.container) {
+    tab.container.style.display = 'block';
+    tab.fitAddon?.fit();
+    if (tab.mode === 'ssh' && tab.backendId) App.ResizeSSH(tab.backendId, tab.term!.cols, tab.term!.rows);
+    if (tab.mode === 'local' && tab.backendId) App.ResizeLocalTerminal(tab.backendId, tab.term!.cols, tab.term!.rows);
+  }
+
+  if (tab.mode === 'ssh' && tab.backendId) {
+    refreshFileList('.', tab.backendId);
+  }
+
+  renderTabBar();
+}
+
+async function closeTab(id: string) {
+  const tab = tabs.get(id);
+  if (!tab) return;
+
+  if (tab.mode === 'ssh' && tab.backendId) await App.CloseSSH(tab.backendId);
+  if (tab.mode === 'local' && tab.backendId) await App.CloseLocalTerminal(tab.backendId);
+  tab.term?.dispose();
+  tab.container?.remove();
+  tabs.delete(id);
+
+  if (activeTabId === id) {
+    const remaining = Array.from(tabs.keys());
+    if (remaining.length > 0) {
+      switchToTab(remaining[remaining.length - 1]);
+    } else {
+      const fresh = createPendingTab();
+      switchToTab(fresh.id);
+    }
+  } else {
+    renderTabBar();
+  }
+}
+
+function createTerminalForTab(tab: Tab) {
+  const container = document.createElement('div');
+  container.className = 'term-instance';
+  container.style.cssText = 'height:100%;padding:4px;box-sizing:border-box;';
+  document.getElementById('terminal')!.appendChild(container);
+
+  const term = new Terminal({
+    fontFamily: 'Menlo, Consolas, monospace',
+    fontSize: 13,
+    theme: { background: '#1e1e1e' },
+  });
+  const fitAddon = new FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(container);
+  fitAddon.fit();
+
+  term.onData((data) => {
+    if (tab.mode === 'local' && tab.backendId) App.WriteLocalTerminal(tab.backendId, data);
+    if (tab.mode === 'ssh' && tab.backendId) App.WriteSSH(tab.backendId, data);
+  });
+
+  tab.term = term;
+  tab.fitAddon = fitAddon;
+  tab.container = container;
+}
 
 window.addEventListener('resize', () => {
-  fitAddon.fit();
-  const { cols, rows } = term;
-  if (currentMode === 'local') App.ResizeLocalTerminal(cols, rows);
-  if (currentMode === 'ssh' && currentSessionId) App.ResizeSSH(currentSessionId, cols, rows);
+  const tab = activeTabId ? tabs.get(activeTabId) : null;
+  if (!tab || !tab.fitAddon || !tab.term) return;
+  tab.fitAddon.fit();
+  if (tab.mode === 'local' && tab.backendId) App.ResizeLocalTerminal(tab.backendId, tab.term.cols, tab.term.rows);
+  if (tab.mode === 'ssh' && tab.backendId) App.ResizeSSH(tab.backendId, tab.term.cols, tab.term.rows);
 });
 
-term.onData((data) => {
-  if (currentMode === 'local') App.WriteLocalTerminal(data);
-  if (currentMode === 'ssh' && currentSessionId) App.WriteSSH(currentSessionId, data);
-});
-
-// --- Editor setup ---
+// --- Editor setup (shared across all tabs, VS Code-style) ---
 
 const editor = monaco.editor.create(document.getElementById('editor')!, {
   value: '',
@@ -45,11 +177,12 @@ const editor = monaco.editor.create(document.getElementById('editor')!, {
 });
 
 let openFilePath: string | null = null;
+let openFileSessionId: string | null = null;
 
-async function openRemoteFile(path: string) {
-  if (!currentSessionId) return;
-  const content = await App.ReadRemoteFile(currentSessionId, path);
+async function openRemoteFile(sessionId: string, path: string) {
+  const content = await App.ReadRemoteFile(sessionId, path);
   openFilePath = path;
+  openFileSessionId = sessionId;
   document.getElementById('editor-path')!.textContent = path;
   const ext = path.split('.').pop() ?? '';
   const langMap: Record<string, string> = {
@@ -60,22 +193,23 @@ async function openRemoteFile(path: string) {
 }
 
 editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, async () => {
-  if (!currentSessionId || !openFilePath) return;
-  await App.WriteRemoteFile(currentSessionId, openFilePath, editor.getValue());
+  if (!openFileSessionId || !openFilePath) return;
+  await App.WriteRemoteFile(openFileSessionId, openFilePath, editor.getValue());
 });
 
-// --- File browser ---
+// --- File browser (scoped to whichever SSH tab is active) ---
 
-async function refreshFileList(path = '.') {
-  if (!currentSessionId) return;
-  const entries: RemoteFile[] = await App.ListRemoteDir(currentSessionId, path);
+async function refreshFileList(path = '.', sessionId?: string) {
+  const id = sessionId ?? (activeTabId ? tabs.get(activeTabId)?.backendId : null);
+  if (!id) return;
+  const entries: RemoteFile[] = await App.ListRemoteDir(id, path);
   const list = document.getElementById('file-list')!;
   list.innerHTML = '';
   for (const e of entries) {
     const div = document.createElement('div');
     div.className = 'entry';
     div.textContent = (e.isDir ? '📁 ' : '📄 ') + e.name;
-    div.onclick = () => (e.isDir ? refreshFileList(e.path) : openRemoteFile(e.path));
+    div.onclick = () => (e.isDir ? refreshFileList(e.path, id) : openRemoteFile(id, e.path));
     list.appendChild(div);
   }
 }
@@ -90,6 +224,8 @@ function setAuthMode(mode: 'password' | 'key') {
   document.getElementById('auth-key-fields')!.style.display = isKey ? 'inline' : 'none';
 }
 
+let skipSavePrompt = false;
+
 async function useSession(s: SessionProfile) {
   (document.getElementById('host') as HTMLInputElement).value = s.host;
   (document.getElementById('user') as HTMLInputElement).value = s.user;
@@ -99,7 +235,7 @@ async function useSession(s: SessionProfile) {
     (document.getElementById('keyPath') as HTMLInputElement).value = s.keyPath;
     (document.getElementById('passphrase') as HTMLInputElement).value = '';
     skipSavePrompt = true;
-    await attemptConnect({ host: s.host, port: s.port, user: s.user, keyPath: s.keyPath });
+    await connectActiveTab({ host: s.host, port: s.port, user: s.user, keyPath: s.keyPath });
     skipSavePrompt = false;
   } else {
     setAuthMode('password');
@@ -116,11 +252,9 @@ async function renderSessionList() {
   for (const s of sessions) {
     const row = document.createElement('div');
     row.className = 'session-entry';
-
     const label = document.createElement('span');
     label.textContent = (s.keyPath ? '🔑 ' : '🔒 ') + s.name;
     label.onclick = () => useSession(s);
-
     const del = document.createElement('span');
     del.textContent = '✕';
     del.className = 'delete-btn';
@@ -129,7 +263,6 @@ async function renderSessionList() {
       await App.DeleteSession(s.id);
       renderSessionList();
     };
-
     row.appendChild(label);
     row.appendChild(del);
     list.appendChild(row);
@@ -144,14 +277,9 @@ function showTrustPrompt(opts: {
 }) {
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:1000;';
-
   const box = document.createElement('div');
   box.style.cssText = `background:#1e1e1e;border:2px solid ${opts.changed ? '#e5484d' : '#3a3a3a'};border-radius:8px;padding:24px;max-width:480px;color:#ddd;font-family:sans-serif;`;
-
-  const title = opts.changed
-    ? '⚠️ Host key has CHANGED — possible security risk'
-    : 'Unknown host — verify before connecting';
-
+  const title = opts.changed ? '⚠️ Host key has CHANGED — possible security risk' : 'Unknown host — verify before connecting';
   box.innerHTML = `
     <h3 style="margin-top:0;color:${opts.changed ? '#e5484d' : '#ddd'}">${title}</h3>
     <p><strong>Host:</strong> ${opts.host}</p>
@@ -161,19 +289,15 @@ function showTrustPrompt(opts: {
       ? '<p style="color:#e5484d;">This host previously presented a different key. This could mean the server was reinstalled — or that your connection is being intercepted. Only proceed if you\'re certain.</p>'
       : '<p>Verify this fingerprint matches what the server administrator provided before trusting it.</p>'}
   `;
-
   const btnRow = document.createElement('div');
   btnRow.style.cssText = 'display:flex;gap:8px;margin-top:16px;';
-
   const rejectBtn = document.createElement('button');
   rejectBtn.textContent = 'Cancel';
   rejectBtn.onclick = () => { document.body.removeChild(overlay); opts.onReject(); };
-
   const acceptBtn = document.createElement('button');
   acceptBtn.textContent = opts.changed ? 'I understand the risk — trust anyway' : 'Trust and connect';
   acceptBtn.style.cssText = opts.changed ? 'background:#e5484d;color:white;' : 'background:#3178c6;color:white;';
   acceptBtn.onclick = () => { document.body.removeChild(overlay); opts.onAccept(); };
-
   btnRow.appendChild(rejectBtn);
   btnRow.appendChild(acceptBtn);
   box.appendChild(btnRow);
@@ -181,82 +305,82 @@ function showTrustPrompt(opts: {
   document.body.appendChild(overlay);
 }
 
-async function attemptConnect(req: ConnectRequest) {
-  const result = await App.Connect(req);
+function showConnectError(message: string) {
+  let el = document.getElementById('connect-error');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'connect-error';
+    el.style.cssText = 'width:100%;color:#e5484d;font-size:12px;padding:2px 0;';
+    document.getElementById('connect-form')!.appendChild(el);
+  }
+  el.textContent = message;
+}
+
+function clearConnectError() {
+  document.getElementById('connect-error')?.remove();
+}
+
+// --- Connect flow (targets the currently active pending tab) ---
+
+async function connectActiveTab(req: ConnectRequest) {
+  const tab = tabs.get(activeTabId!)!;
+  tab.status = 'connecting';
+  tab.label = `${req.user}@${req.host}`;
+  renderTabBar();
+  clearConnectError();
+
+  let result;
+  try {
+    result = await App.Connect(req);
+  } catch (err) {
+    tab.status = 'disconnected';
+    renderTabBar();
+    showConnectError(String(err));
+    return;
+  }
 
   if (result.needsPassphrase) {
     const passphrase = prompt('This key is encrypted. Enter its passphrase:');
     if (passphrase === null) {
-      term.write('\r\n[Connection cancelled: passphrase required]\r\n');
+      tab.status = 'disconnected';
+      renderTabBar();
       return;
     }
-    await attemptConnect({ ...req, passphrase });
+    await connectActiveTab({ ...req, passphrase });
     return;
   }
 
   if (result.needsTrust) {
     showTrustPrompt({
-      host: result.host!,
-      fingerprint: result.fingerprint!,
-      keyType: result.keyType!,
-      changed: !!result.changed,
+      host: result.host!, fingerprint: result.fingerprint!, keyType: result.keyType!, changed: !!result.changed,
       onAccept: async () => {
-        if (result.changed) {
-          await App.TrustHostDespiteChange(result.host!);
-        } else {
-          await App.TrustHost(result.host!);
-        }
-        await attemptConnect(req); // retry now that the key is trusted
+        if (result.changed) await App.TrustHostDespiteChange(result.host!);
+        else await App.TrustHost(result.host!);
+        await connectActiveTab(req);
       },
-      onReject: () => {
-        term.write('\r\n[Connection cancelled: host key not trusted]\r\n');
-      },
+      onReject: () => { tab.status = 'disconnected'; renderTabBar(); },
     });
     return;
   }
 
   if (result.sessionId) {
-    currentSessionId = result.sessionId;
-    currentMode = 'ssh';
-    runtime.EventsOn('ssh:data:' + result.sessionId, (data: unknown) => term.write(data as string));
-    refreshFileList('.');
+    tab.mode = 'ssh';
+    tab.backendId = result.sessionId;
+    tab.status = 'connected';
+    createTerminalForTab(tab);
+    runtime.EventsOn('ssh:data:' + result.sessionId, (data: unknown) => tab.term!.write(data as string));
+    switchToTab(tab.id);
+    refreshFileList('.', result.sessionId);
 
     if (!skipSavePrompt) {
       const name = `${req.user}@${req.host}`;
       if (confirm(`Save this session as "${name}"?`)) {
-        await App.SaveSession({
-          id: '',
-          name,
-          host: req.host,
-          port: req.port,
-          user: req.user,
-          keyPath: req.keyPath,
-        });
+        await App.SaveSession({ id: '', name, host: req.host, port: req.port, user: req.user, keyPath: req.keyPath });
         renderSessionList();
       }
     }
   }
 }
-
-// --- Auth mode toggle ---
-
-const authRadios = document.querySelectorAll('input[name="authmode"]') as NodeListOf<HTMLInputElement>;
-authRadios.forEach((radio) => {
-  radio.addEventListener('change', () => {
-    const isKey = radio.value === 'key' && radio.checked;
-    document.getElementById('auth-password-fields')!.style.display = isKey ? 'none' : 'inline';
-    document.getElementById('auth-key-fields')!.style.display = isKey ? 'inline' : 'none';
-  });
-});
-
-document.getElementById('browse-key')!.addEventListener('click', async () => {
-  const path = await App.SelectKeyFile();
-  if (path) {
-    (document.getElementById('keyPath') as HTMLInputElement).value = path;
-  }
-});
-
-// --- Connection controls ---
 
 document.getElementById('connect')!.addEventListener('click', async () => {
   const host = (document.getElementById('host') as HTMLInputElement).value;
@@ -273,13 +397,37 @@ document.getElementById('connect')!.addEventListener('click', async () => {
     req = { host, port: 22, user, password };
   }
 
-  await attemptConnect(req);
+  await connectActiveTab(req);
 });
 
 document.getElementById('local')!.addEventListener('click', async () => {
-  await App.StartLocalTerminal();
-  currentMode = 'local';
-  runtime.EventsOn('local:data', (data: unknown) => term.write(data as string));
+  const tab = tabs.get(activeTabId!)!;
+  tab.label = 'Local shell';
+  const id = await App.StartLocalTerminal();
+  tab.mode = 'local';
+  tab.backendId = id;
+  tab.status = 'connected';
+  createTerminalForTab(tab);
+  runtime.EventsOn('local:data:' + id, (data: unknown) => tab.term!.write(data as string));
+  switchToTab(tab.id);
 });
 
+document.getElementById('browse-key')!.addEventListener('click', async () => {
+  const path = await App.SelectKeyFile();
+  if (path) (document.getElementById('keyPath') as HTMLInputElement).value = path;
+});
+
+const authRadios = document.querySelectorAll('input[name="authmode"]') as NodeListOf<HTMLInputElement>;
+authRadios.forEach((radio) => {
+  radio.addEventListener('change', () => {
+    const isKey = radio.value === 'key' && radio.checked;
+    document.getElementById('auth-password-fields')!.style.display = isKey ? 'none' : 'inline';
+    document.getElementById('auth-key-fields')!.style.display = isKey ? 'inline' : 'none';
+  });
+});
+
+// --- Init: start with one pending tab ---
+
+const initialTab = createPendingTab();
+switchToTab(initialTab.id);
 renderSessionList();

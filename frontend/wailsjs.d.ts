@@ -38,9 +38,10 @@ export interface RemoteFile {
 }
 
 export interface AppBindings {
-  StartLocalTerminal(): Promise<void>;
-  WriteLocalTerminal(data: string): Promise<void>;
-  ResizeLocalTerminal(cols: number, rows: number): Promise<void>;
+  StartLocalTerminal(): Promise<string>;
+  WriteLocalTerminal(id: string, data: string): Promise<void>;
+  ResizeLocalTerminal(id: string, cols: number, rows: number): Promise<void>;
+  CloseLocalTerminal(id: string): Promise<void>;
 
   Connect(req: ConnectRequest): Promise<ConnectResult>;
   SelectKeyFile(): Promise<string>;

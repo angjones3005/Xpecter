@@ -17,9 +17,19 @@
     #editor-pane { min-width: 0; }
     #terminal { height: 100%; padding: 4px; box-sizing: border-box; }
     #editor { height: 100%; }
-    .toolbar { padding: 6px 10px; font-size: 13px; background: #252525; border-bottom: 1px solid #333; }
-    .toolbar input { background: #1a1a1a; border: 1px solid #333; color: #ddd; padding: 3px 6px; margin-right: 4px; }
+    .toolbar { padding: 6px 10px; font-size: 13px; background: #252525; border-bottom: 1px solid #333; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+    .toolbar input { background: #1a1a1a; border: 1px solid #333; color: #ddd; padding: 3px 6px; width: 90px; min-width: 0; }
     .toolbar button { padding: 3px 8px; }
+    .tab { display: flex; align-items: center; gap: 6px; padding: 6px 10px; font-size: 12px; border-right: 1px solid #333; cursor: pointer; white-space: nowrap; color: #999; }
+    .tab.active { background: #252525; color: #ddd; border-top: 2px solid #3178c6; }
+    .tab .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #666; }
+    .tab .status-dot.connected { background: #2ea043; }
+    .tab .status-dot.connecting { background: #d29922; }
+    .tab .status-dot.disconnected { background: #e5484d; }
+    .tab .tab-close { opacity: 0.5; margin-left: 4px; }
+    .tab .tab-close:hover { opacity: 1; color: #e5484d; }
+    .tab-add { padding: 6px 10px; cursor: pointer; color: #999; font-size: 14px; }
+    .tab-add:hover { color: #ddd; }
   </style>
 </head>
 <body>
@@ -35,7 +45,8 @@
       <div id="file-list"></div>
     </div>
     <div id="terminal-pane">
-      <div class="toolbar">
+      <div id="tab-bar" style="display:flex;background:#1a1a1a;border-bottom:1px solid #333;overflow-x:auto;"></div>
+      <div id="connect-form" class="toolbar">
         <input id="host" placeholder="host" />
         <input id="user" placeholder="user" />
         <label style="margin-right:6px;"><input type="radio" name="authmode" value="password" checked /> Password</label>

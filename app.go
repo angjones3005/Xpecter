@@ -18,11 +18,14 @@ import (
 type App struct {
 	ctx      context.Context
 	sessions map[string]*sshclient.Session
-	local    *pty.LocalTerminal
+	locals   map[string]*pty.LocalTerminal
 }
 
 func NewApp() *App {
-	return &App{sessions: make(map[string]*sshclient.Session)}
+	return &App{
+		sessions: make(map[string]*sshclient.Session),
+		locals:   make(map[string]*pty.LocalTerminal),
+	}
 }
 
 func (a *App) startup(ctx context.Context) { a.ctx = ctx }
@@ -31,36 +34,51 @@ func (a *App) shutdown(ctx context.Context) {
 	for _, s := range a.sessions {
 		s.Close()
 	}
-	if a.local != nil {
-		a.local.Close()
+	for _, l := range a.locals {
+		l.Close()
 	}
 }
 
-// --- Local terminal ---
+// --- Local terminals (one per tab) ---
 
-func (a *App) StartLocalTerminal() error {
+// StartLocalTerminal spawns a new local shell PTY and returns its ID.
+// Output streams to the frontend via the "local:data:<id>" event, matching
+// the "ssh:data:<id>" pattern already used for SSH sessions.
+func (a *App) StartLocalTerminal() (string, error) {
+	id := newID()
 	lt, err := pty.New(func(data []byte) {
-		runtime.EventsEmit(a.ctx, "local:data", string(data))
+		runtime.EventsEmit(a.ctx, "local:data:"+id, string(data))
 	})
 	if err != nil {
-		return err
+		return "", err
 	}
-	a.local = lt
-	return nil
+	a.locals[id] = lt
+	return id, nil
 }
 
-func (a *App) WriteLocalTerminal(data string) error {
-	if a.local == nil {
-		return fmt.Errorf("local terminal not started")
+func (a *App) WriteLocalTerminal(id string, data string) error {
+	lt, ok := a.locals[id]
+	if !ok {
+		return fmt.Errorf("no such local terminal: %s", id)
 	}
-	return a.local.Write([]byte(data))
+	return lt.Write([]byte(data))
 }
 
-func (a *App) ResizeLocalTerminal(cols, rows int) error {
-	if a.local == nil {
-		return fmt.Errorf("local terminal not started")
+func (a *App) ResizeLocalTerminal(id string, cols, rows int) error {
+	lt, ok := a.locals[id]
+	if !ok {
+		return fmt.Errorf("no such local terminal: %s", id)
 	}
-	return a.local.Resize(cols, rows)
+	return lt.Resize(cols, rows)
+}
+
+func (a *App) CloseLocalTerminal(id string) error {
+	lt, ok := a.locals[id]
+	if !ok {
+		return nil
+	}
+	delete(a.locals, id)
+	return lt.Close()
 }
 
 // --- SSH sessions ---
@@ -74,13 +92,10 @@ type ConnectRequest struct {
 	Passphrase string `json:"passphrase,omitempty"`
 }
 
-// ConnectResult is returned instead of a bare error so the frontend can
-// distinguish "connected fine" from "needs a host key trust decision"
-// without parsing error strings.
 type ConnectResult struct {
 	SessionID       string `json:"sessionId,omitempty"`
 	NeedsTrust      bool   `json:"needsTrust,omitempty"`
-	Changed         bool   `json:"changed,omitempty"` // true = existing key MISMATCH (danger), false = new host
+	Changed         bool   `json:"changed,omitempty"`
 	Host            string `json:"host,omitempty"`
 	Fingerprint     string `json:"fingerprint,omitempty"`
 	KeyType         string `json:"keyType,omitempty"`
@@ -126,21 +141,14 @@ func (a *App) Connect(req ConnectRequest) (ConnectResult, error) {
 	return ConnectResult{SessionID: id}, nil
 }
 
-// TrustHost accepts a genuinely new host's key (first connection ever).
 func (a *App) TrustHost(host string) error {
 	return sshclient.TrustHost(host)
 }
 
-// TrustHostDespiteChange overrides a CHANGED host key. This should only be
-// reachable from a frontend flow that makes the user work for it — a
-// distinct warning screen, not a casual one-click default — since this is
-// the override for a potential man-in-the-middle signal.
 func (a *App) TrustHostDespiteChange(host string) error {
 	return sshclient.TrustHostDespiteChange(host)
 }
 
-// SelectKeyFile opens a native OS file picker for choosing an SSH private key.
-// Returns an empty string if the user cancels.
 func (a *App) SelectKeyFile() (string, error) {
 	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
 		Title: "Select SSH Private Key",
@@ -153,19 +161,14 @@ func (a *App) ListSessions() ([]config.SessionProfile, error) {
 	return config.LoadSessions()
 }
 
-// SaveSession appends a new session profile (or updates one with a matching
-// ID) and persists it. Never accepts or stores a password — only host/user/
-// port/keyPath, consistent with sessions.go's no-password-storage rationale.
 func (a *App) SaveSession(profile config.SessionProfile) error {
 	sessions, err := config.LoadSessions()
 	if err != nil {
 		return err
 	}
-
 	if profile.ID == "" {
-		profile.ID = newSessionID()
+		profile.ID = newID()
 	}
-
 	replaced := false
 	for i, s := range sessions {
 		if s.ID == profile.ID {
@@ -177,7 +180,6 @@ func (a *App) SaveSession(profile config.SessionProfile) error {
 	if !replaced {
 		sessions = append(sessions, profile)
 	}
-
 	return config.SaveSessions(sessions)
 }
 
@@ -195,7 +197,7 @@ func (a *App) DeleteSession(id string) error {
 	return config.SaveSessions(kept)
 }
 
-func newSessionID() string {
+func newID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
