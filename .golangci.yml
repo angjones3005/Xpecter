@@ -7,14 +7,16 @@ linters:
     - unused
     - errcheck
     - ineffassign
+  exclusions:
+    paths:
+      - build
+      - frontend/node_modules
+      - frontend/dist
+
+formatters:
+  enable:
     - gofmt
     - goimports
 
 run:
   timeout: 5m
-
-issues:
-  exclude-dirs:
-    - build
-    - frontend/node_modules
-    - frontend/dist
