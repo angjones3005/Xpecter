@@ -34,6 +34,7 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: latest
+          args: ./backend/...
 
       - name: go build (non-GUI packages)
         # Skips the main Wails package here since it needs GTK/webkit system
