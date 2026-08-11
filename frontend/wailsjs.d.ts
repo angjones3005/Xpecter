@@ -10,6 +10,15 @@ export interface ConnectRequest {
   keyPath?: string;
 }
 
+export interface ConnectResult {
+  sessionId?: string;
+  needsTrust?: boolean;
+  changed?: boolean;
+  host?: string;
+  fingerprint?: string;
+  keyType?: string;
+}
+
 export interface RemoteFile {
   name: string;
   path: string;
@@ -22,7 +31,9 @@ export interface AppBindings {
   WriteLocalTerminal(data: string): Promise<void>;
   ResizeLocalTerminal(cols: number, rows: number): Promise<void>;
 
-  Connect(req: ConnectRequest): Promise<string>;
+  Connect(req: ConnectRequest): Promise<ConnectResult>;
+  TrustHost(host: string): Promise<void>;
+  TrustHostDespiteChange(host: string): Promise<void>;
   WriteSSH(id: string, data: string): Promise<void>;
   ResizeSSH(id: string, cols: number, rows: number): Promise<void>;
   CloseSSH(id: string): Promise<void>;

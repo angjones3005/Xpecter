@@ -2,13 +2,14 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import * as monaco from 'monaco-editor';
 import '@xterm/xterm/css/xterm.css';
-import type { RemoteFile } from '../wailsjs.d.ts';
+import type { RemoteFile, ConnectRequest } from '../wailsjs.d.ts';
 
 const App = window.go.main.App;
 const runtime = window.runtime;
 
 let currentSessionId: string | null = null;
 let currentMode: 'local' | 'ssh' | null = null;
+let pendingConnectReq: ConnectRequest | null = null;
 
 // --- Terminal setup ---
 
@@ -50,15 +51,9 @@ async function openRemoteFile(path: string) {
   const content = await App.ReadRemoteFile(currentSessionId, path);
   openFilePath = path;
   document.getElementById('editor-path')!.textContent = path;
-
   const ext = path.split('.').pop() ?? '';
   const langMap: Record<string, string> = {
-    go: 'go',
-    hs: 'haskell',
-    js: 'javascript',
-    ts: 'typescript',
-    json: 'json',
-    md: 'markdown',
+    go: 'go', hs: 'haskell', js: 'javascript', ts: 'typescript', json: 'json', md: 'markdown',
   };
   monaco.editor.setModelLanguage(editor.getModel()!, langMap[ext] ?? 'plaintext');
   editor.setValue(content);
@@ -85,6 +80,83 @@ async function refreshFileList(path = '.') {
   }
 }
 
+// --- Host key trust modal ---
+
+function showTrustPrompt(opts: {
+  host: string; fingerprint: string; keyType: string; changed: boolean;
+  onAccept: () => void; onReject: () => void;
+}) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:1000;';
+
+  const box = document.createElement('div');
+  box.style.cssText = `background:#1e1e1e;border:2px solid ${opts.changed ? '#e5484d' : '#3a3a3a'};border-radius:8px;padding:24px;max-width:480px;color:#ddd;font-family:sans-serif;`;
+
+  const title = opts.changed
+    ? '⚠️ Host key has CHANGED — possible security risk'
+    : 'Unknown host — verify before connecting';
+
+  box.innerHTML = `
+    <h3 style="margin-top:0;color:${opts.changed ? '#e5484d' : '#ddd'}">${title}</h3>
+    <p><strong>Host:</strong> ${opts.host}</p>
+    <p><strong>Key type:</strong> ${opts.keyType}</p>
+    <p><strong>Fingerprint:</strong> <code style="word-break:break-all;">${opts.fingerprint}</code></p>
+    ${opts.changed
+      ? '<p style="color:#e5484d;">This host previously presented a different key. This could mean the server was reinstalled — or that your connection is being intercepted. Only proceed if you\'re certain.</p>'
+      : '<p>Verify this fingerprint matches what the server administrator provided before trusting it.</p>'}
+  `;
+
+  const btnRow = document.createElement('div');
+  btnRow.style.cssText = 'display:flex;gap:8px;margin-top:16px;';
+
+  const rejectBtn = document.createElement('button');
+  rejectBtn.textContent = 'Cancel';
+  rejectBtn.onclick = () => { document.body.removeChild(overlay); opts.onReject(); };
+
+  const acceptBtn = document.createElement('button');
+  acceptBtn.textContent = opts.changed ? 'I understand the risk — trust anyway' : 'Trust and connect';
+  acceptBtn.style.cssText = opts.changed ? 'background:#e5484d;color:white;' : 'background:#3178c6;color:white;';
+  acceptBtn.onclick = () => { document.body.removeChild(overlay); opts.onAccept(); };
+
+  btnRow.appendChild(rejectBtn);
+  btnRow.appendChild(acceptBtn);
+  box.appendChild(btnRow);
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+}
+
+async function attemptConnect(req: ConnectRequest) {
+  const result = await App.Connect(req);
+
+  if (result.needsTrust) {
+    showTrustPrompt({
+      host: result.host!,
+      fingerprint: result.fingerprint!,
+      keyType: result.keyType!,
+      changed: !!result.changed,
+      onAccept: async () => {
+        if (result.changed) {
+          await App.TrustHostDespiteChange(result.host!);
+        } else {
+          await App.TrustHost(result.host!);
+        }
+        await attemptConnect(req); // retry now that the key is trusted
+      },
+      onReject: () => {
+        term.write('\r\n[Connection cancelled: host key not trusted]\r\n');
+      },
+    });
+    return;
+  }
+
+  if (result.sessionId) {
+    currentSessionId = result.sessionId;
+    currentMode = 'ssh';
+    runtime.EventsOn('ssh:data:' + result.sessionId, (data: unknown) => term.write(data as string));
+    refreshFileList('.');
+  }
+}
+
 // --- Connection controls ---
 
 document.getElementById('connect')!.addEventListener('click', async () => {
@@ -92,12 +164,8 @@ document.getElementById('connect')!.addEventListener('click', async () => {
   const user = (document.getElementById('user') as HTMLInputElement).value;
   const password = (document.getElementById('password') as HTMLInputElement).value;
 
-  const id = await App.Connect({ host, port: 22, user, password });
-  currentSessionId = id;
-  currentMode = 'ssh';
-
-  runtime.EventsOn('ssh:data:' + id, (data: unknown) => term.write(data as string));
-  refreshFileList('.');
+  pendingConnectReq = { host, port: 22, user, password };
+  await attemptConnect(pendingConnectReq);
 });
 
 document.getElementById('local')!.addEventListener('click', async () => {

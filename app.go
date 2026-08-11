@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"specter/backend/pty"
@@ -11,24 +12,17 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// App is the main struct bound to the frontend. Every exported method
-// here becomes callable from JavaScript via window.go.main.App.<Method>.
 type App struct {
-	ctx context.Context
-
-	sessions map[string]*sshclient.Session // keyed by session ID
+	ctx      context.Context
+	sessions map[string]*sshclient.Session
 	local    *pty.LocalTerminal
 }
 
 func NewApp() *App {
-	return &App{
-		sessions: make(map[string]*sshclient.Session),
-	}
+	return &App{sessions: make(map[string]*sshclient.Session)}
 }
 
-func (a *App) startup(ctx context.Context) {
-	a.ctx = ctx
-}
+func (a *App) startup(ctx context.Context) { a.ctx = ctx }
 
 func (a *App) shutdown(ctx context.Context) {
 	for _, s := range a.sessions {
@@ -41,8 +35,6 @@ func (a *App) shutdown(ctx context.Context) {
 
 // --- Local terminal ---
 
-// StartLocalTerminal spawns a local shell PTY and streams output to the
-// frontend via the "local:data" event.
 func (a *App) StartLocalTerminal() error {
 	lt, err := pty.New(func(data []byte) {
 		runtime.EventsEmit(a.ctx, "local:data", string(data))
@@ -78,18 +70,39 @@ type ConnectRequest struct {
 	KeyPath  string `json:"keyPath,omitempty"`
 }
 
-// Connect opens a new SSH session and an interactive shell over it.
-// Returns a session ID used for subsequent Write/Resize/Close/SFTP calls.
-func (a *App) Connect(req ConnectRequest) (string, error) {
+// ConnectResult is returned instead of a bare error so the frontend can
+// distinguish "connected fine" from "needs a host key trust decision"
+// without parsing error strings.
+type ConnectResult struct {
+	SessionID   string `json:"sessionId,omitempty"`
+	NeedsTrust  bool   `json:"needsTrust,omitempty"`
+	Changed     bool   `json:"changed,omitempty"` // true = existing key MISMATCH (danger), false = new host
+	Host        string `json:"host,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
+	KeyType     string `json:"keyType,omitempty"`
+}
+
+func (a *App) Connect(req ConnectRequest) (ConnectResult, error) {
 	sess, err := sshclient.Dial(sshclient.Config{
-		Host:     req.Host,
-		Port:     req.Port,
-		User:     req.User,
-		Password: req.Password,
-		KeyPath:  req.KeyPath,
+		Host: req.Host, Port: req.Port, User: req.User,
+		Password: req.Password, KeyPath: req.KeyPath,
 	})
 	if err != nil {
-		return "", err
+		var unknown *sshclient.HostKeyUnknownError
+		if errors.As(err, &unknown) {
+			return ConnectResult{
+				NeedsTrust: true, Changed: false,
+				Host: unknown.Host, Fingerprint: unknown.Fingerprint, KeyType: unknown.KeyType,
+			}, nil
+		}
+		var changed *sshclient.HostKeyChangedError
+		if errors.As(err, &changed) {
+			return ConnectResult{
+				NeedsTrust: true, Changed: true,
+				Host: changed.Host, Fingerprint: changed.NewFingerprint, KeyType: changed.KeyType,
+			}, nil
+		}
+		return ConnectResult{}, err
 	}
 
 	id := sess.ID()
@@ -99,10 +112,23 @@ func (a *App) Connect(req ConnectRequest) (string, error) {
 		runtime.EventsEmit(a.ctx, "ssh:data:"+id, string(data))
 	})
 	if err != nil {
-		return "", err
+		return ConnectResult{}, err
 	}
 
-	return id, nil
+	return ConnectResult{SessionID: id}, nil
+}
+
+// TrustHost accepts a genuinely new host's key (first connection ever).
+func (a *App) TrustHost(host string) error {
+	return sshclient.TrustHost(host)
+}
+
+// TrustHostDespiteChange overrides a CHANGED host key. This should only be
+// reachable from a frontend flow that makes the user work for it — a
+// distinct warning screen, not a casual one-click default — since this is
+// the override for a potential man-in-the-middle signal.
+func (a *App) TrustHostDespiteChange(host string) error {
+	return sshclient.TrustHostDespiteChange(host)
 }
 
 func (a *App) WriteSSH(id string, data string) error {
@@ -150,12 +176,7 @@ func (a *App) ListRemoteDir(id string, path string) ([]RemoteFile, error) {
 	}
 	out := make([]RemoteFile, 0, len(entries))
 	for _, e := range entries {
-		out = append(out, RemoteFile{
-			Name:  e.Name,
-			Path:  e.Path,
-			IsDir: e.IsDir,
-			Size:  e.Size,
-		})
+		out = append(out, RemoteFile{Name: e.Name, Path: e.Path, IsDir: e.IsDir, Size: e.Size})
 	}
 	return out, nil
 }
