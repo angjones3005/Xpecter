@@ -7,3 +7,4 @@ frontend/dist/
 
 # OS
 .DS_Store
+/specter
