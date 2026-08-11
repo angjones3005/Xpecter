@@ -1,0 +1,20 @@
+version: "2"
+
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - unused
+    - errcheck
+    - ineffassign
+    - gofmt
+    - goimports
+
+run:
+  timeout: 5m
+
+issues:
+  exclude-dirs:
+    - build
+    - frontend/node_modules
+    - frontend/dist

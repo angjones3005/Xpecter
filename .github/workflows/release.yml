@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            artifact: specter-linux-amd64.tar.gz
+          - os: windows-latest
+            platform: windows
+            artifact: specter-windows-amd64.zip
+          - os: macos-latest
+            platform: darwin
+            artifact: specter-macos-universal.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      # Wails needs GTK3 + WebKit2GTK on Linux to build/run the webview.
+      # Windows and macOS runners already ship what's needed (WebView2 is
+      # preinstalled on windows-latest; macOS uses the system WebKit).
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          wails build -platform linux/amd64
+          tar -czf ${{ matrix.artifact }} -C build/bin .
+
+      - name: Build (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          wails build -platform windows/amd64
+          Compress-Archive -Path build/bin/* -DestinationPath ${{ matrix.artifact }}
+        shell: pwsh
+
+      - name: Build (macOS)
+        if: matrix.platform == 'darwin'
+        run: |
+          wails build -platform darwin/universal
+          cd build/bin
+          zip -r ../../${{ matrix.artifact }} .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish release with artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
