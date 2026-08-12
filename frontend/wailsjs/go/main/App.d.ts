@@ -7,15 +7,25 @@ export function CloseLocalTerminal(arg1:string):Promise<void>;
 
 export function CloseSSH(arg1:string):Promise<void>;
 
+export function CloseSerial(arg1:string):Promise<void>;
+
 export function Connect(arg1:main.ConnectRequest):Promise<main.ConnectResult>;
+
+export function ConnectSerial(arg1:string,arg2:number):Promise<string>;
 
 export function DeleteGroup(arg1:string):Promise<void>;
 
 export function DeleteSession(arg1:string):Promise<void>;
 
+export function GetClipboardText():Promise<string>;
+
+export function GetPlatform():Promise<string>;
+
 export function ListGroups():Promise<Array<config.SessionGroup>>;
 
 export function ListRemoteDir(arg1:string,arg2:string):Promise<Array<main.RemoteFile>>;
+
+export function ListSerialPorts():Promise<Array<string>>;
 
 export function ListSessions():Promise<Array<config.SessionProfile>>;
 
@@ -31,14 +41,18 @@ export function SaveSession(arg1:config.SessionProfile):Promise<void>;
 
 export function SelectKeyFile():Promise<string>;
 
-export function StartLocalTerminal():Promise<string>;
+export function StartLocalTerminal(arg1:string):Promise<string>;
 
 export function TrustHost(arg1:string):Promise<void>;
 
 export function TrustHostDespiteChange(arg1:string):Promise<void>;
+
+export function UploadRemoteFile(arg1:string,arg2:string,arg3:string):Promise<void>;
 
 export function WriteLocalTerminal(arg1:string,arg2:string):Promise<void>;
 
 export function WriteRemoteFile(arg1:string,arg2:string,arg3:string):Promise<void>;
 
 export function WriteSSH(arg1:string,arg2:string):Promise<void>;
+
+export function WriteSerial(arg1:string,arg2:string):Promise<void>;

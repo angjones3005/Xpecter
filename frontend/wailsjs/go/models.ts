@@ -19,10 +19,13 @@ export namespace config {
 	export class SessionProfile {
 	    id: string;
 	    name: string;
-	    host: string;
-	    port: number;
-	    user: string;
+	    type?: string;
+	    host?: string;
+	    port?: number;
+	    user?: string;
 	    keyPath?: string;
+	    serialPort?: string;
+	    baud?: number;
 	    groupId?: string;
 	    tags?: string[];
 	    lastUsed?: string;
@@ -35,10 +38,13 @@ export namespace config {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
 	        this.name = source["name"];
+	        this.type = source["type"];
 	        this.host = source["host"];
 	        this.port = source["port"];
 	        this.user = source["user"];
 	        this.keyPath = source["keyPath"];
+	        this.serialPort = source["serialPort"];
+	        this.baud = source["baud"];
 	        this.groupId = source["groupId"];
 	        this.tags = source["tags"];
 	        this.lastUsed = source["lastUsed"];

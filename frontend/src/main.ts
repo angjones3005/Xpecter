@@ -292,12 +292,16 @@ const editor = monaco.editor.create(document.getElementById('editor')!, {
 });
 
 document.getElementById('editor-close')!.addEventListener('click', () => {
+  document.getElementById('app')!.style.gridTemplateColumns = '';
+  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
   document.getElementById('app')!.classList.toggle('editor-collapsed');
   refitActiveTerminal();
 });
 
 document.getElementById('menu-toggle-editor')!.addEventListener('click', () => {
   closeAllMenus();
+  document.getElementById('app')!.style.gridTemplateColumns = '';
+  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
   document.getElementById('app')!.classList.toggle('editor-collapsed');
   refitActiveTerminal();
 });
@@ -628,7 +632,8 @@ function showGroupContextMenu(x: number, y: number, group: SessionGroup) {
 
 let sessionSearchQuery = '';
 const collapsedGroups = new Set<string>();
-let recentCollapsed = false;
+let foldersInitialized = false;
+let recentCollapsed = true;
 let osc52Enabled = localStorage.getItem('specter-osc52') !== 'off';
 let copyOnSelectEnabled = localStorage.getItem('specter-copy-on-select') === 'on';
 let rightClickPasteEnabled = localStorage.getItem('specter-rclick-paste') !== 'off';
@@ -641,12 +646,32 @@ const HIGHLIGHT_RULES: [RegExp, string][] = [
   [/\b(?:Gi|Te|Fa|Fo|Hu|Po|Eth|Vlan)\d+(?:\/\d+)*\b/g, '38;2;198;120;221'], // magenta, interface/port identifiers
 ];
 
-function applyOutputHighlighting(text: string): string {
-  if (!highlightEnabled) return text;
+// Matches existing ANSI/OSC escape sequences so they can be preserved
+// untouched. Covers CSI (colors, cursor movement: \x1b[...m etc.), OSC
+// (window title: \x1b]...BEL or \x1b]...ST), and simple single-char
+// escapes. Highlighting must never modify bytes inside these, doing so
+// previously corrupted real prompts that use ANSI color codes (SPE-45).
+const ANSI_SEQUENCE_RE = /\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-9;?]*[a-zA-Z]|[a-zA-Z0-9])/g;
+
+function highlightPlainText(text: string): string {
   let result = text;
   for (const [pattern, code] of HIGHLIGHT_RULES) {
     result = result.replace(pattern, (match) => `\x1b[${code}m${match}\x1b[0m`);
   }
+  return result;
+}
+
+function applyOutputHighlighting(text: string): string {
+  if (!highlightEnabled) return text;
+  let result = '';
+  let lastIndex = 0;
+  for (const match of text.matchAll(ANSI_SEQUENCE_RE)) {
+    const idx = match.index!;
+    result += highlightPlainText(text.slice(lastIndex, idx));
+    result += match[0]; // pass existing escape sequences through untouched
+    lastIndex = idx + match[0].length;
+  }
+  result += highlightPlainText(text.slice(lastIndex));
   return result;
 }
 
@@ -673,6 +698,10 @@ async function createNewFolder() {
 
 async function renderSessionList() {
   const [sessions, groups] = await Promise.all([App.ListSessions(), App.ListGroups()]);
+  if (!foldersInitialized) {
+    for (const g of groups) collapsedGroups.add(g.id);
+    foldersInitialized = true;
+  }
   const list = document.getElementById('session-list')!;
   list.innerHTML = '';
 
@@ -918,6 +947,14 @@ authRadios.forEach((radio) => {
 });
 
 // --- Init: start with one pending tab ---
+document.getElementById('app')!.classList.add('editor-collapsed');
+let remoteFilesCollapsed = false;
+document.getElementById('remote-files-header')!.addEventListener('click', () => {
+  remoteFilesCollapsed = !remoteFilesCollapsed;
+  document.getElementById('file-list')!.style.display = remoteFilesCollapsed ? 'none' : 'block';
+  document.getElementById('remote-files-label')!.textContent = (remoteFilesCollapsed ? '\u25b8 ' : '\u25be ') + 'Remote files';
+});
+document.getElementById('remote-files-label')!.textContent = '\u25be Remote files';
 
 const initialTab = createPendingTab();
 switchToTab(initialTab.id);
@@ -1070,6 +1107,8 @@ document.getElementById('menu-new-folder')!.addEventListener('click', () => {
 // View menu
 document.getElementById('menu-toggle-sidebar')!.addEventListener('click', () => {
   closeAllMenus();
+  document.getElementById('app')!.style.gridTemplateColumns = '';
+  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
   document.getElementById('app')!.classList.toggle('sidebar-collapsed');
   refitActiveTerminal();
 });
@@ -1102,5 +1141,41 @@ document.getElementById('menu-tool-text-editor')!.addEventListener('click', () =
   editor.setValue('');
   monaco.editor.setModelLanguage(editor.getModel()!, 'plaintext');
 });
+
+renderSessionList();let currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
+
+function setupPaneResize(handleId: string, columnIndex: number, minWidth: number) {
+  const handle = document.getElementById(handleId)!;
+  handle.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const app = document.getElementById('app')!;
+    const startX = e.clientX;
+    // Only read the starting width of the column actually being dragged.
+    // Reading/pinning ALL columns here would destroy the editor column's
+    // 1fr flexibility on the very first drag, causing it to stop
+    // absorbing remaining space and instead shift/shrink unexpectedly
+    // whenever the OTHER handle was dragged afterward.
+    const startWidth = parseFloat(getComputedStyle(app).gridTemplateColumns.split(' ')[columnIndex]);
+    handle.classList.add('dragging');
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      const delta = moveEvent.clientX - startX;
+      const newWidth = Math.max(minWidth, startWidth + delta);
+      currentColumnTemplate[columnIndex] = `${newWidth}px`;
+      app.style.gridTemplateColumns = currentColumnTemplate.join(' ');
+      refitActiveTerminal();
+    };
+    const onMouseUp = () => {
+      handle.classList.remove('dragging');
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  });
+}
+
+setupPaneResize('resize-sidebar', 0, 150);
+setupPaneResize('resize-editor', 2, 200);
 
 renderSessionList();renderSessionList();

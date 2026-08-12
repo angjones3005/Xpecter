@@ -10,8 +10,16 @@ export function CloseSSH(arg1) {
   return window['go']['main']['App']['CloseSSH'](arg1);
 }
 
+export function CloseSerial(arg1) {
+  return window['go']['main']['App']['CloseSerial'](arg1);
+}
+
 export function Connect(arg1) {
   return window['go']['main']['App']['Connect'](arg1);
+}
+
+export function ConnectSerial(arg1, arg2) {
+  return window['go']['main']['App']['ConnectSerial'](arg1, arg2);
 }
 
 export function DeleteGroup(arg1) {
@@ -22,12 +30,24 @@ export function DeleteSession(arg1) {
   return window['go']['main']['App']['DeleteSession'](arg1);
 }
 
+export function GetClipboardText() {
+  return window['go']['main']['App']['GetClipboardText']();
+}
+
+export function GetPlatform() {
+  return window['go']['main']['App']['GetPlatform']();
+}
+
 export function ListGroups() {
   return window['go']['main']['App']['ListGroups']();
 }
 
 export function ListRemoteDir(arg1, arg2) {
   return window['go']['main']['App']['ListRemoteDir'](arg1, arg2);
+}
+
+export function ListSerialPorts() {
+  return window['go']['main']['App']['ListSerialPorts']();
 }
 
 export function ListSessions() {
@@ -58,8 +78,8 @@ export function SelectKeyFile() {
   return window['go']['main']['App']['SelectKeyFile']();
 }
 
-export function StartLocalTerminal() {
-  return window['go']['main']['App']['StartLocalTerminal']();
+export function StartLocalTerminal(arg1) {
+  return window['go']['main']['App']['StartLocalTerminal'](arg1);
 }
 
 export function TrustHost(arg1) {
@@ -68,6 +88,10 @@ export function TrustHost(arg1) {
 
 export function TrustHostDespiteChange(arg1) {
   return window['go']['main']['App']['TrustHostDespiteChange'](arg1);
+}
+
+export function UploadRemoteFile(arg1, arg2, arg3) {
+  return window['go']['main']['App']['UploadRemoteFile'](arg1, arg2, arg3);
 }
 
 export function WriteLocalTerminal(arg1, arg2) {
@@ -80,4 +104,8 @@ export function WriteRemoteFile(arg1, arg2, arg3) {
 
 export function WriteSSH(arg1, arg2) {
   return window['go']['main']['App']['WriteSSH'](arg1, arg2);
+}
+
+export function WriteSerial(arg1, arg2) {
+  return window['go']['main']['App']['WriteSerial'](arg1, arg2);
 }
