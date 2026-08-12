@@ -15,12 +15,23 @@ import (
 )
 
 type SessionProfile struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Host    string `json:"host"`
-	Port    int    `json:"port"`
-	User    string `json:"user"`
-	KeyPath string `json:"keyPath,omitempty"`
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Host     string   `json:"host"`
+	Port     int      `json:"port"`
+	User     string   `json:"user"`
+	KeyPath  string   `json:"keyPath,omitempty"`
+	GroupID  string   `json:"groupId,omitempty"`
+	Tags     []string `json:"tags,omitempty"`
+	LastUsed string   `json:"lastUsed,omitempty"`
+}
+
+// SessionGroup is a folder for organizing sessions. ParentID enables
+// nesting, empty ParentID means a top-level folder.
+type SessionGroup struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	ParentID string `json:"parentId,omitempty"`
 }
 
 func configDir() (string, error) {
@@ -41,6 +52,14 @@ func sessionsPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "sessions.json"), nil
+}
+
+func groupsPath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "groups.json"), nil
 }
 
 func LoadSessions() ([]SessionProfile, error) {
@@ -68,6 +87,37 @@ func SaveSessions(sessions []SessionProfile) error {
 		return err
 	}
 	data, err := json.MarshalIndent(sessions, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+func LoadGroups() ([]SessionGroup, error) {
+	path, err := groupsPath()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return []SessionGroup{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var groups []SessionGroup
+	if err := json.Unmarshal(data, &groups); err != nil {
+		return nil, err
+	}
+	return groups, nil
+}
+
+func SaveGroups(groups []SessionGroup) error {
+	path, err := groupsPath()
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(groups, "", "  ")
 	if err != nil {
 		return err
 	}

@@ -197,6 +197,69 @@ func (a *App) DeleteSession(id string) error {
 	return config.SaveSessions(kept)
 }
 
+// --- Session groups (folders) ---
+
+func (a *App) ListGroups() ([]config.SessionGroup, error) {
+	return config.LoadGroups()
+}
+
+// SaveGroup creates a new group, or updates one with a matching ID.
+func (a *App) SaveGroup(group config.SessionGroup) error {
+	groups, err := config.LoadGroups()
+	if err != nil {
+		return err
+	}
+	if group.ID == "" {
+		group.ID = newID()
+	}
+	replaced := false
+	for i, g := range groups {
+		if g.ID == group.ID {
+			groups[i] = group
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		groups = append(groups, group)
+	}
+	return config.SaveGroups(groups)
+}
+
+// DeleteGroup removes a group and ungroups any sessions inside it
+// (sets their GroupID back to empty) rather than deleting those sessions.
+func (a *App) DeleteGroup(id string) error {
+	groups, err := config.LoadGroups()
+	if err != nil {
+		return err
+	}
+	kept := groups[:0]
+	for _, g := range groups {
+		if g.ID != id {
+			kept = append(kept, g)
+		}
+	}
+	if err := config.SaveGroups(kept); err != nil {
+		return err
+	}
+
+	sessions, err := config.LoadSessions()
+	if err != nil {
+		return err
+	}
+	changed := false
+	for i, s := range sessions {
+		if s.GroupID == id {
+			sessions[i].GroupID = ""
+			changed = true
+		}
+	}
+	if changed {
+		return config.SaveSessions(sessions)
+	}
+	return nil
+}
+
 func newID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
