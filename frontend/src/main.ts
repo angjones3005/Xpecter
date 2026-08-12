@@ -404,12 +404,21 @@ function setAuthMode(mode: 'password' | 'key') {
 }
 
 let skipSavePrompt = false;
+let skipSerialSavePrompt = false;
 
 async function useSession(s: SessionProfile) {
+  if (s.type === 'serial') {
+    await useSerialSession(s);
+    return;
+  }
+  await useSSHSession(s);
+}
+
+async function useSSHSession(s: SessionProfile) {
   await App.SaveSession({ ...s, lastUsed: new Date().toISOString() });
   ensurePendingTab();
-  (document.getElementById('host') as HTMLInputElement).value = s.host;
-  (document.getElementById('user') as HTMLInputElement).value = s.user;
+  (document.getElementById('host') as HTMLInputElement).value = s.host ?? '';
+  (document.getElementById('user') as HTMLInputElement).value = s.user ?? '';
 
   skipSavePrompt = true;
 
@@ -417,7 +426,7 @@ async function useSession(s: SessionProfile) {
     setAuthMode('key');
     (document.getElementById('keyPath') as HTMLInputElement).value = s.keyPath;
     (document.getElementById('passphrase') as HTMLInputElement).value = '';
-    await connectActiveTab({ host: s.host, port: s.port, user: s.user, keyPath: s.keyPath });
+    await connectActiveTab({ host: s.host ?? '', port: s.port ?? 22, user: s.user ?? '', keyPath: s.keyPath });
   } else {
     setAuthMode('password');
     openSessionPicker();
@@ -427,6 +436,13 @@ async function useSession(s: SessionProfile) {
     pwField.value = '';
     pwField.focus();
   }
+}
+
+async function useSerialSession(s: SessionProfile) {
+  await App.SaveSession({ ...s, lastUsed: new Date().toISOString() });
+  ensurePendingTab();
+  skipSerialSavePrompt = true;
+  await connectSerialInActiveTab(s.serialPort ?? '', s.baud ?? 9600);
 }
 
 function renderSessionRow(s: SessionProfile): HTMLElement {
@@ -439,7 +455,7 @@ function renderSessionRow(s: SessionProfile): HTMLElement {
   });
 
   const label = document.createElement('span');
-  label.textContent = (s.keyPath ? '\ud83d\udd11 ' : '\ud83d\udd12 ') + s.name;
+  label.textContent = (s.type === 'serial' ? '\ud83d\udd0c ' : s.keyPath ? '\ud83d\udd11 ' : '\ud83d\udd12 ') + s.name;
   label.onclick = () => useSession(s);
   label.style.flex = '1';
 
@@ -641,7 +657,8 @@ function sessionMatchesQuery(s: SessionProfile, query: string): boolean {
   if (!query) return true;
   const q = query.toLowerCase();
   if (s.name.toLowerCase().includes(q)) return true;
-  if (s.host.toLowerCase().includes(q)) return true;
+  if (s.host && s.host.toLowerCase().includes(q)) return true;
+  if (s.serialPort && s.serialPort.toLowerCase().includes(q)) return true;
   if (s.tags && s.tags.some((t) => t.toLowerCase().includes(q))) return true;
   return false;
 }
@@ -859,6 +876,14 @@ async function connectSerialInActiveTab(portName: string, baud: number) {
   createTerminalForTab(tab);
   runtime.EventsOn('serial:data:' + id, (data: unknown) => writeToTerminal(tab, data as string));
   switchToTab(tab.id);
+
+  if (!skipSerialSavePrompt) {
+    if (confirm(`Save this serial session as "${portName}"?`)) {
+      await App.SaveSession({ id: '', name: portName, type: 'serial', serialPort: portName, baud });
+      renderSessionList();
+    }
+  }
+  skipSerialSavePrompt = false;
 }
 
 

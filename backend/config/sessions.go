@@ -15,15 +15,18 @@ import (
 )
 
 type SessionProfile struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	Host     string   `json:"host"`
-	Port     int      `json:"port"`
-	User     string   `json:"user"`
-	KeyPath  string   `json:"keyPath,omitempty"`
-	GroupID  string   `json:"groupId,omitempty"`
-	Tags     []string `json:"tags,omitempty"`
-	LastUsed string   `json:"lastUsed,omitempty"`
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	Type       string   `json:"type,omitempty"` // "" or "ssh" (default), or "serial"
+	Host       string   `json:"host,omitempty"`
+	Port       int      `json:"port,omitempty"`
+	User       string   `json:"user,omitempty"`
+	KeyPath    string   `json:"keyPath,omitempty"`
+	SerialPort string   `json:"serialPort,omitempty"`
+	Baud       int      `json:"baud,omitempty"`
+	GroupID    string   `json:"groupId,omitempty"`
+	Tags       []string `json:"tags,omitempty"`
+	LastUsed   string   `json:"lastUsed,omitempty"`
 }
 
 // SessionGroup is a folder for organizing sessions. ParentID enables

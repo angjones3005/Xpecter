@@ -21,10 +21,13 @@ export interface ConnectResult {
 export interface SessionProfile {
   id: string;
   name: string;
-  host: string;
-  port: number;
-  user: string;
+  type?: string;
+  host?: string;
+  port?: number;
+  user?: string;
   keyPath?: string;
+  serialPort?: string;
+  baud?: number;
   groupId?: string;
   tags?: string[];
   lastUsed?: string;
