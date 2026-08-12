@@ -409,6 +409,23 @@ function setAuthMode(mode: 'password' | 'key') {
 
 let skipSavePrompt = false;
 let skipSerialSavePrompt = false;
+let pendingSessionName: string | null = null;
+
+// In-memory only, never persisted to disk, cleared on app restart.
+
+// Distinct from the deliberate "never save passwords to disk" design
+
+// principle in backend/config/sessions.go, this just avoids re-prompting
+
+// within a single running session.
+
+const passwordCache = new Map<string, string>();
+
+function passwordCacheKey(host: string, port: number, user: string): string {
+
+  return `${user}@${host}:${port}`;
+
+}
 
 async function useSession(s: SessionProfile) {
   if (s.type === 'serial') {
@@ -419,27 +436,83 @@ async function useSession(s: SessionProfile) {
 }
 
 async function useSSHSession(s: SessionProfile) {
+
   await App.SaveSession({ ...s, lastUsed: new Date().toISOString() });
+
   ensurePendingTab();
+
   (document.getElementById('host') as HTMLInputElement).value = s.host ?? '';
+
   (document.getElementById('user') as HTMLInputElement).value = s.user ?? '';
+
+
 
   skipSavePrompt = true;
 
+
+
   if (s.keyPath) {
+
     setAuthMode('key');
+
     (document.getElementById('keyPath') as HTMLInputElement).value = s.keyPath;
+
     (document.getElementById('passphrase') as HTMLInputElement).value = '';
+
     await connectActiveTab({ host: s.host ?? '', port: s.port ?? 22, user: s.user ?? '', keyPath: s.keyPath });
+
+    const tab = tabs.get(activeTabId!);
+
+    if (tab) {
+
+      tab.label = s.name;
+
+      renderTabBar();
+
+    }
+
   } else {
+
     setAuthMode('password');
-    openSessionPicker();
-    document.getElementById('picker-grid')!.style.display = 'none';
-    document.getElementById('picker-ssh-fields')!.style.display = 'flex';
-    const pwField = document.getElementById('password') as HTMLInputElement;
-    pwField.value = '';
-    pwField.focus();
+
+    const cacheKey = passwordCacheKey(s.host ?? '', s.port ?? 22, s.user ?? '');
+
+    const cachedPassword = passwordCache.get(cacheKey);
+
+    if (cachedPassword) {
+
+      await connectActiveTab({ host: s.host ?? '', port: s.port ?? 22, user: s.user ?? '', password: cachedPassword });
+
+      const tab = tabs.get(activeTabId!);
+
+      if (tab) {
+
+        tab.label = s.name;
+
+        renderTabBar();
+
+      }
+
+    } else {
+
+      pendingSessionName = s.name;
+
+      openSessionPicker();
+
+      document.getElementById('picker-grid')!.style.display = 'none';
+
+      document.getElementById('picker-ssh-fields')!.style.display = 'flex';
+
+      const pwField = document.getElementById('password') as HTMLInputElement;
+
+      pwField.value = '';
+
+      pwField.focus();
+
+    }
+
   }
+
 }
 
 async function useSerialSession(s: SessionProfile) {
@@ -790,14 +863,23 @@ function showTrustPrompt(opts: {
 }
 
 function showConnectError(message: string) {
+
   let el = document.getElementById('connect-error');
+
   if (!el) {
+
     el = document.createElement('div');
+
     el.id = 'connect-error';
+
     el.style.cssText = 'width:100%;color:#e5484d;font-size:12px;padding:2px 0;';
-    document.getElementById('connect-form')!.appendChild(el);
+
+    document.getElementById('picker-ssh-fields')!.appendChild(el);
+
   }
+
   el.textContent = message;
+
 }
 
 function clearConnectError() {
@@ -883,6 +965,36 @@ document.getElementById('connect')!.addEventListener('click', async () => {
   }
 
   await connectActiveTab(req);
+
+  if (authMode !== 'key') {
+
+    const tab = tabs.get(activeTabId!);
+
+    if (tab && tab.status === 'connected') {
+
+      const password = (document.getElementById('password') as HTMLInputElement).value;
+
+      passwordCache.set(passwordCacheKey(host, 22, user), password);
+
+    }
+
+  }
+  if (pendingSessionName) {
+
+    const tab = tabs.get(activeTabId!);
+
+    if (tab) {
+
+      tab.label = pendingSessionName;
+
+      renderTabBar();
+
+    }
+
+    pendingSessionName = null;
+
+  }
+
   closeSessionPicker();
 });
 
@@ -923,6 +1035,32 @@ async function connectSerialInActiveTab(portName: string, baud: number) {
   }
   skipSerialSavePrompt = false;
 }
+
+
+
+function checkCapsLock(e: KeyboardEvent) {
+
+  const isCapsOn = e.getModifierState && e.getModifierState('CapsLock');
+
+  document.getElementById('caps-lock-warning')!.style.display = isCapsOn ? 'block' : 'none';
+
+}
+
+document.addEventListener('keydown', checkCapsLock);
+
+document.addEventListener('keyup', checkCapsLock);
+
+document.getElementById('password')!.addEventListener('focus', (e) => {
+
+  // Chrome/WebKit don't expose getModifierState on a plain focus event,
+
+  // so send a synthetic check on the next keydown; also immediately hide
+
+  // any stale warning left over from before this field was focused.
+
+  document.getElementById('caps-lock-warning')!.style.display = 'none';
+
+});
 
 
 
