@@ -180,6 +180,15 @@ const editor = monaco.editor.create(document.getElementById('editor')!, {
   automaticLayout: true,
 });
 
+document.getElementById('editor-close')!.addEventListener('click', () => {
+  document.getElementById('app')!.classList.toggle('editor-collapsed');
+});
+
+document.getElementById('editor-toggle')!.addEventListener('click', () => {
+  document.getElementById('app')!.classList.toggle('editor-collapsed');
+});
+
+
 let openFilePath: string | null = null;
 let openFileSessionId: string | null = null;
 
@@ -188,6 +197,7 @@ async function openRemoteFile(sessionId: string, path: string) {
   openFilePath = path;
   openFileSessionId = sessionId;
   document.getElementById('editor-path')!.textContent = path;
+  document.getElementById('editor-close')!.style.display = 'inline';
   const ext = path.split('.').pop() ?? '';
   const langMap: Record<string, string> = {
     go: 'go', hs: 'haskell', js: 'javascript', ts: 'typescript', json: 'json', md: 'markdown',
