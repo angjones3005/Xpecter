@@ -198,6 +198,14 @@ function createTerminalForTab(tab: Tab) {
     return true;
   });
 
+  // Auto-copy on selection (classic X11/xterm/PuTTY-style behavior),
+  // gated by copyOnSelectEnabled toggle since not everyone wants this.
+  term.onSelectionChange(() => {
+    if (!copyOnSelectEnabled) return;
+    const sel = term.getSelection();
+    if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+  });
+
   // Explicit paste keybind (Ctrl+Shift+V / Cmd+Shift+V), separate from
   // native browser paste, as a reliable fallback across platforms/webviews.
   term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
@@ -557,6 +565,7 @@ function showGroupContextMenu(x: number, y: number, group: SessionGroup) {
 let sessionSearchQuery = '';
 const collapsedGroups = new Set<string>();
 let osc52Enabled = localStorage.getItem('specter-osc52') !== 'off';
+let copyOnSelectEnabled = localStorage.getItem('specter-copy-on-select') === 'on';
 
 function sessionMatchesQuery(s: SessionProfile, query: string): boolean {
   if (!query) return true;
@@ -795,6 +804,13 @@ osc52Toggle.checked = osc52Enabled;
 osc52Toggle.addEventListener('change', () => {
   osc52Enabled = osc52Toggle.checked;
   localStorage.setItem('specter-osc52', osc52Enabled ? 'on' : 'off');
+});
+
+const copyOnSelectToggle = document.getElementById('copy-on-select-toggle') as HTMLInputElement;
+copyOnSelectToggle.checked = copyOnSelectEnabled;
+copyOnSelectToggle.addEventListener('change', () => {
+  copyOnSelectEnabled = copyOnSelectToggle.checked;
+  localStorage.setItem('specter-copy-on-select', copyOnSelectEnabled ? 'on' : 'off');
 });
 
 renderSessionList();
