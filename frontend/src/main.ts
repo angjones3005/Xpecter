@@ -293,7 +293,7 @@ async function useSession(s: SessionProfile) {
   }
 }
 
-function renderSessionRow(s: SessionProfile, groups: SessionGroup[]): HTMLElement {
+function renderSessionRow(s: SessionProfile): HTMLElement {
   const row = document.createElement('div');
   row.className = 'session-entry';
   row.style.paddingLeft = '18px';
@@ -424,7 +424,7 @@ function renderGroupNode(
     renderGroupNode(cg, groups, sessions, container);
   }
   for (const s of childSessions) {
-    container.appendChild(renderSessionRow(s, groups));
+    container.appendChild(renderSessionRow(s));
   }
 }
 
@@ -506,7 +506,7 @@ async function renderSessionList() {
       header.textContent = '\u23f1\ufe0f Recent';
       list.appendChild(header);
       for (const s of recent) {
-        list.appendChild(renderSessionRow(s, groups));
+        list.appendChild(renderSessionRow(s));
       }
     }
   }
@@ -518,7 +518,7 @@ async function renderSessionList() {
 
   const ungrouped = visibleSessions.filter((s) => !s.groupId);
   for (const s of ungrouped) {
-    list.appendChild(renderSessionRow(s, groups));
+    list.appendChild(renderSessionRow(s));
   }
 
   if (!query) {
