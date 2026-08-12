@@ -10,6 +10,7 @@ import (
 
 	"specter/backend/config"
 	"specter/backend/pty"
+	"specter/backend/serialclient"
 	"specter/backend/sftpclient"
 	"specter/backend/sshclient"
 
@@ -20,12 +21,14 @@ type App struct {
 	ctx      context.Context
 	sessions map[string]*sshclient.Session
 	locals   map[string]*pty.LocalTerminal
+	serials  map[string]*serialclient.Session
 }
 
 func NewApp() *App {
 	return &App{
 		sessions: make(map[string]*sshclient.Session),
 		locals:   make(map[string]*pty.LocalTerminal),
+		serials:  make(map[string]*serialclient.Session),
 	}
 }
 
@@ -37,6 +40,9 @@ func (a *App) shutdown(ctx context.Context) {
 	}
 	for _, l := range a.locals {
 		l.Close()
+	}
+	for _, sc := range a.serials {
+		sc.Close()
 	}
 }
 
@@ -80,6 +86,46 @@ func (a *App) CloseLocalTerminal(id string) error {
 	}
 	delete(a.locals, id)
 	return lt.Close()
+}
+
+// --- Serial/COM port console (direct hardware console access) ---
+
+// ConnectSerial opens a serial port at the given baud rate (8N1, no flow
+// control) and returns a session ID, following the same one-per-tab
+// pattern as StartLocalTerminal.
+func (a *App) ConnectSerial(portName string, baud int) (string, error) {
+	id := newID()
+	sc, err := serialclient.Open(portName, baud, func(data []byte) {
+		runtime.EventsEmit(a.ctx, "serial:data:"+id, string(data))
+	})
+	if err != nil {
+		return "", err
+	}
+	a.serials[id] = sc
+	return id, nil
+}
+
+func (a *App) WriteSerial(id string, data string) error {
+	sc, ok := a.serials[id]
+	if !ok {
+		return fmt.Errorf("no such serial session: %s", id)
+	}
+	return sc.Write([]byte(data))
+}
+
+func (a *App) CloseSerial(id string) error {
+	sc, ok := a.serials[id]
+	if !ok {
+		return nil
+	}
+	delete(a.serials, id)
+	return sc.Close()
+}
+
+// ListSerialPorts returns available serial port device paths for a
+// future port-picker UI (manual entry is used for now).
+func (a *App) ListSerialPorts() ([]string, error) {
+	return serialclient.ListPorts()
 }
 
 // --- SSH sessions ---
