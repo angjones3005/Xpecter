@@ -52,12 +52,12 @@
     .session-entry:hover { background: var(--hover); }
     .session-entry .delete-btn { opacity: 0.5; font-size: 11px; }
     .session-entry .delete-btn:hover { opacity: 1; color: var(--danger); }
-    #terminal-pane { border-right: 1px solid var(--border); min-width: 0; }
+    #terminal-pane { border-right: 1px solid var(--border); min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
     #editor-pane { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
     #app.editor-collapsed { grid-template-columns: 220px 1fr 0px; }
     #app.editor-collapsed.sidebar-collapsed { grid-template-columns: 0px 1fr 0px; }
     #app.editor-collapsed #editor-pane { display: none; }
-    #terminal { height: 100%; padding: 4px; box-sizing: border-box; }
+    #terminal { flex: 1; min-height: 0; padding: 4px; box-sizing: border-box; }
     #editor { flex: 1; min-height: 0; }
     .toolbar { padding: 6px 10px; font-size: 13px; background: var(--bg-alt); border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
     .toolbar input { background: var(--bg-input); border: 1px solid var(--border); color: var(--text); padding: 3px 6px; width: 90px; min-width: 0; }

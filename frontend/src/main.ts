@@ -6,9 +6,23 @@ import type { RemoteFile, ConnectRequest, SessionProfile, SessionGroup } from '.
 
 type ThemeName = 'dark' | 'light';
 
-const XTERM_THEMES: Record<ThemeName, { background: string; foreground: string }> = {
-  dark: { background: '#1e1e1e', foreground: '#dddddd' },
-  light: { background: '#ffffff', foreground: '#1e1e1e' },
+const XTERM_THEMES: Record<ThemeName, Record<string, string>> = {
+  dark: {
+    background: '#1e1e1e', foreground: '#dddddd', cursor: '#dddddd',
+    black: '#1e1e1e', red: '#e5484d', green: '#2ea043', yellow: '#d29922',
+    blue: '#3178c6', magenta: '#bc7cf0', cyan: '#39c5cf', white: '#dddddd',
+    brightBlack: '#666666', brightRed: '#ff6b6b', brightGreen: '#3fb950',
+    brightYellow: '#e3b341', brightBlue: '#58a6ff', brightMagenta: '#d2a8ff',
+    brightCyan: '#56d4dd', brightWhite: '#ffffff',
+  },
+  light: {
+    background: '#ffffff', foreground: '#1e1e1e', cursor: '#1e1e1e',
+    black: '#1e1e1e', red: '#cf3d3e', green: '#1f8a3d', yellow: '#a06800',
+    blue: '#3178c6', magenta: '#8250df', cyan: '#1b7c83', white: '#6e7781',
+    brightBlack: '#57606a', brightRed: '#e5484d', brightGreen: '#2ea043',
+    brightYellow: '#d29922', brightBlue: '#4184e4', brightMagenta: '#a475f9',
+    brightCyan: '#3192aa', brightWhite: '#1e1e1e',
+  },
 };
 
 const MONACO_THEMES: Record<ThemeName, string> = {
