@@ -297,30 +297,15 @@ function renderSessionRow(s: SessionProfile, groups: SessionGroup[]): HTMLElemen
   const row = document.createElement('div');
   row.className = 'session-entry';
   row.style.paddingLeft = '18px';
+  row.draggable = true;
+  row.addEventListener('dragstart', (e) => {
+    e.dataTransfer?.setData('text/specter-session-id', s.id);
+  });
 
   const label = document.createElement('span');
   label.textContent = (s.keyPath ? '\ud83d\udd11 ' : '\ud83d\udd12 ') + s.name;
   label.onclick = () => useSession(s);
   label.style.flex = '1';
-
-  const groupSelect = document.createElement('select');
-  groupSelect.style.cssText = 'font-size:11px;background:#1a1a1a;color:#999;border:1px solid #333;max-width:70px;margin-right:4px;';
-  groupSelect.onclick = (e) => e.stopPropagation();
-  const noneOpt = document.createElement('option');
-  noneOpt.value = '';
-  noneOpt.textContent = '(none)';
-  groupSelect.appendChild(noneOpt);
-  for (const g of groups) {
-    const opt = document.createElement('option');
-    opt.value = g.id;
-    opt.textContent = g.name;
-    if (s.groupId === g.id) opt.selected = true;
-    groupSelect.appendChild(opt);
-  }
-  groupSelect.onchange = async () => {
-    await App.SaveSession({ ...s, groupId: groupSelect.value });
-    renderSessionList();
-  };
 
   const del = document.createElement('span');
   del.textContent = '\u2715';
@@ -332,9 +317,59 @@ function renderSessionRow(s: SessionProfile, groups: SessionGroup[]): HTMLElemen
   };
 
   row.appendChild(label);
-  row.appendChild(groupSelect);
   row.appendChild(del);
+
+  row.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    showSessionContextMenu(e.clientX, e.clientY, s);
+  });
+
   return row;
+}
+
+function showSessionContextMenu(x: number, y: number, s: SessionProfile) {
+  const existing = document.getElementById('session-context-menu');
+  if (existing) existing.remove();
+
+  const menu = document.createElement('div');
+  menu.id = 'session-context-menu';
+  menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;background:var(--bg-alt);border:1px solid var(--border);border-radius:4px;padding:4px 0;z-index:2000;min-width:120px;font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,0.4);`;
+
+  const renameItem = document.createElement('div');
+  renameItem.textContent = 'Rename';
+  renameItem.style.cssText = 'padding:6px 12px;cursor:pointer;';
+  renameItem.onmouseenter = () => { renameItem.style.background = 'var(--hover)'; };
+  renameItem.onmouseleave = () => { renameItem.style.background = ''; };
+  renameItem.onclick = async () => {
+    menu.remove();
+    const newName = prompt('Rename session:', s.name);
+    if (!newName || newName === s.name) return;
+    await App.SaveSession({ ...s, name: newName });
+    renderSessionList();
+  };
+
+  const deleteItem = document.createElement('div');
+  deleteItem.textContent = 'Delete';
+  deleteItem.style.cssText = 'padding:6px 12px;cursor:pointer;color:var(--danger);';
+  deleteItem.onmouseenter = () => { deleteItem.style.background = 'var(--hover)'; };
+  deleteItem.onmouseleave = () => { deleteItem.style.background = ''; };
+  deleteItem.onclick = async () => {
+    menu.remove();
+    await App.DeleteSession(s.id);
+    renderSessionList();
+  };
+
+  menu.appendChild(renameItem);
+  menu.appendChild(deleteItem);
+  document.body.appendChild(menu);
+
+  const closeMenu = (ev: MouseEvent) => {
+    if (!menu.contains(ev.target as Node)) {
+      menu.remove();
+      document.removeEventListener('click', closeMenu);
+    }
+  };
+  setTimeout(() => document.addEventListener('click', closeMenu), 0);
 }
 
 function renderGroupNode(
@@ -343,15 +378,48 @@ function renderGroupNode(
   sessions: SessionProfile[],
   container: HTMLElement,
 ) {
+  const isCollapsed = collapsedGroups.has(group.id);
   const header = document.createElement('div');
   header.className = 'entry';
   header.style.fontWeight = 'bold';
-  header.textContent = '\ud83d\udcc1 ' + group.name;
+  header.style.userSelect = 'none';
+  header.textContent = (isCollapsed ? '\u25b8 ' : '\u25be ') + '\ud83d\udcc1 ' + group.name;
+  header.addEventListener('click', () => {
+    if (collapsedGroups.has(group.id)) {
+      collapsedGroups.delete(group.id);
+    } else {
+      collapsedGroups.add(group.id);
+    }
+    renderSessionList();
+  });
+  header.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    header.style.background = 'var(--hover)';
+  });
+  header.addEventListener('dragleave', () => {
+    header.style.background = '';
+  });
+  header.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    header.style.background = '';
+    const sessionId = e.dataTransfer?.getData('text/specter-session-id');
+    if (!sessionId) return;
+    const sessions = await App.ListSessions();
+    const s = sessions.find((x) => x.id === sessionId);
+    if (!s) return;
+    await App.SaveSession({ ...s, groupId: group.id });
+    collapsedGroups.add(group.id);
+    renderSessionList();
+  });
+  header.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    showGroupContextMenu(e.clientX, e.clientY, group);
+  });
   container.appendChild(header);
-
+  if (isCollapsed) return;
   const childGroups = groups.filter((g) => g.parentId === group.id);
   const childSessions = sessions.filter((s) => s.groupId === group.id);
-
   for (const cg of childGroups) {
     renderGroupNode(cg, groups, sessions, container);
   }
@@ -360,7 +428,54 @@ function renderGroupNode(
   }
 }
 
+function showGroupContextMenu(x: number, y: number, group: SessionGroup) {
+  const existing = document.getElementById('session-context-menu');
+  if (existing) existing.remove();
+
+  const menu = document.createElement('div');
+  menu.id = 'session-context-menu';
+  menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;background:var(--bg-alt);border:1px solid var(--border);border-radius:4px;padding:4px 0;z-index:2000;min-width:140px;font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,0.4);`;
+
+  const renameItem = document.createElement('div');
+  renameItem.textContent = 'Rename folder';
+  renameItem.style.cssText = 'padding:6px 12px;cursor:pointer;';
+  renameItem.onmouseenter = () => { renameItem.style.background = 'var(--hover)'; };
+  renameItem.onmouseleave = () => { renameItem.style.background = ''; };
+  renameItem.onclick = async () => {
+    menu.remove();
+    const newName = prompt('Rename folder:', group.name);
+    if (!newName || newName === group.name) return;
+    await App.SaveGroup({ ...group, name: newName });
+    renderSessionList();
+  };
+
+  const deleteItem = document.createElement('div');
+  deleteItem.textContent = 'Delete folder';
+  deleteItem.style.cssText = 'padding:6px 12px;cursor:pointer;color:var(--danger);';
+  deleteItem.onmouseenter = () => { deleteItem.style.background = 'var(--hover)'; };
+  deleteItem.onmouseleave = () => { deleteItem.style.background = ''; };
+  deleteItem.onclick = async () => {
+    menu.remove();
+    if (!confirm(`Delete folder "${group.name}"? Sessions inside will be moved out, not deleted.`)) return;
+    await App.DeleteGroup(group.id);
+    renderSessionList();
+  };
+
+  menu.appendChild(renameItem);
+  menu.appendChild(deleteItem);
+  document.body.appendChild(menu);
+
+  const closeMenu = (ev: MouseEvent) => {
+    if (!menu.contains(ev.target as Node)) {
+      menu.remove();
+      document.removeEventListener('click', closeMenu);
+    }
+  };
+  setTimeout(() => document.addEventListener('click', closeMenu), 0);
+}
+
 let sessionSearchQuery = '';
+const collapsedGroups = new Set<string>();
 
 function sessionMatchesQuery(s: SessionProfile, query: string): boolean {
   if (!query) return true;
