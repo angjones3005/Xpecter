@@ -202,6 +202,15 @@ func (a *App) GetPlatform() string {
 	return runtime.Environment(a.ctx).Platform
 }
 
+// GetClipboardText reads the OS clipboard via Wails' native runtime,
+// bypassing the browser Clipboard API entirely. Some WebKitGTK builds
+// deny navigator.clipboard.readText() when triggered from a contextmenu
+// (right-click) event, even though the identical API call succeeds from
+// a keypress, this sidesteps that permission quirk completely.
+func (a *App) GetClipboardText() (string, error) {
+	return runtime.ClipboardGetText(a.ctx)
+}
+
 func (a *App) SelectKeyFile() (string, error) {
 	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
 		Title: "Select SSH Private Key",

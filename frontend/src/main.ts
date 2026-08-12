@@ -252,7 +252,7 @@ function createTerminalForTab(tab: Tab) {
   container.addEventListener('contextmenu', (e) => {
     if (!rightClickPasteEnabled) return;
     e.preventDefault();
-    navigator.clipboard.readText().then((text) => {
+    App.GetClipboardText().then((text) => {
       if (tab.mode === 'local' && tab.backendId) App.WriteLocalTerminal(tab.backendId, text);
       if (tab.mode === 'ssh' && tab.backendId) App.WriteSSH(tab.backendId, text);
       if (tab.mode === 'serial' && tab.backendId) App.WriteSerial(tab.backendId, text);

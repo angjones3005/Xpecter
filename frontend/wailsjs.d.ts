@@ -50,6 +50,7 @@ export interface AppBindings {
   CloseLocalTerminal(id: string): Promise<void>;
   Connect(req: ConnectRequest): Promise<ConnectResult>;
   SelectKeyFile(): Promise<string>;
+  GetClipboardText(): Promise<string>;
   GetPlatform(): Promise<string>;
   ConnectSerial(portName: string, baud: number): Promise<string>;
   WriteSerial(id: string, data: string): Promise<void>;
