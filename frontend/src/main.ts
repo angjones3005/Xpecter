@@ -182,6 +182,35 @@ function createTerminalForTab(tab: Tab) {
   term.open(container);
   fitAddon.fit();
 
+  // OSC 52: let remote programs (xclip, pbcopy, tmux, vim, etc.) sync
+  // their copy into the local OS clipboard, gated by osc52Enabled since
+  // this lets a remote process silently write to the local clipboard.
+  term.parser.registerOscHandler(52, (data: string) => {
+    if (!osc52Enabled) return true;
+    const parts = data.split(';');
+    if (parts.length < 2) return true;
+    try {
+      const text = atob(parts[1]);
+      navigator.clipboard.writeText(text).catch(() => {});
+    } catch {
+      // ignore malformed OSC 52 payloads
+    }
+    return true;
+  });
+
+  // Explicit paste keybind (Ctrl+Shift+V / Cmd+Shift+V), separate from
+  // native browser paste, as a reliable fallback across platforms/webviews.
+  term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+    if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+      navigator.clipboard.readText().then((text) => {
+        if (tab.mode === 'local' && tab.backendId) App.WriteLocalTerminal(tab.backendId, text);
+        if (tab.mode === 'ssh' && tab.backendId) App.WriteSSH(tab.backendId, text);
+      }).catch(() => {});
+      return false;
+    }
+    return true;
+  });
+
   term.onData((data) => {
     if (tab.mode === 'local' && tab.backendId) App.WriteLocalTerminal(tab.backendId, data);
     if (tab.mode === 'ssh' && tab.backendId) App.WriteSSH(tab.backendId, data);
@@ -476,6 +505,7 @@ function showGroupContextMenu(x: number, y: number, group: SessionGroup) {
 
 let sessionSearchQuery = '';
 const collapsedGroups = new Set<string>();
+let osc52Enabled = localStorage.getItem('specter-osc52') !== 'off';
 
 function sessionMatchesQuery(s: SessionProfile, query: string): boolean {
   if (!query) return true;
@@ -707,6 +737,13 @@ themeSelect.value = currentTheme();
 applyTheme(currentTheme());
 themeSelect.addEventListener('change', () => {
   applyTheme(themeSelect.value as ThemeName);
+});
+
+const osc52Toggle = document.getElementById('osc52-toggle') as HTMLInputElement;
+osc52Toggle.checked = osc52Enabled;
+osc52Toggle.addEventListener('change', () => {
+  osc52Enabled = osc52Toggle.checked;
+  localStorage.setItem('specter-osc52', osc52Enabled ? 'on' : 'off');
 });
 
 renderSessionList();

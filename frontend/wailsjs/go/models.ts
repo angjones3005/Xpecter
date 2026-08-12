@@ -1,5 +1,21 @@
 export namespace config {
 	
+	export class SessionGroup {
+	    id: string;
+	    name: string;
+	    parentId?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SessionGroup(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.parentId = source["parentId"];
+	    }
+	}
 	export class SessionProfile {
 	    id: string;
 	    name: string;
@@ -7,6 +23,9 @@ export namespace config {
 	    port: number;
 	    user: string;
 	    keyPath?: string;
+	    groupId?: string;
+	    tags?: string[];
+	    lastUsed?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new SessionProfile(source);
@@ -20,6 +39,9 @@ export namespace config {
 	        this.port = source["port"];
 	        this.user = source["user"];
 	        this.keyPath = source["keyPath"];
+	        this.groupId = source["groupId"];
+	        this.tags = source["tags"];
+	        this.lastUsed = source["lastUsed"];
 	    }
 	}
 

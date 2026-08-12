@@ -9,7 +9,11 @@ export function CloseSSH(arg1:string):Promise<void>;
 
 export function Connect(arg1:main.ConnectRequest):Promise<main.ConnectResult>;
 
+export function DeleteGroup(arg1:string):Promise<void>;
+
 export function DeleteSession(arg1:string):Promise<void>;
+
+export function ListGroups():Promise<Array<config.SessionGroup>>;
 
 export function ListRemoteDir(arg1:string,arg2:string):Promise<Array<main.RemoteFile>>;
 
@@ -20,6 +24,8 @@ export function ReadRemoteFile(arg1:string,arg2:string):Promise<string>;
 export function ResizeLocalTerminal(arg1:string,arg2:number,arg3:number):Promise<void>;
 
 export function ResizeSSH(arg1:string,arg2:number,arg3:number):Promise<void>;
+
+export function SaveGroup(arg1:config.SessionGroup):Promise<void>;
 
 export function SaveSession(arg1:config.SessionProfile):Promise<void>;
 

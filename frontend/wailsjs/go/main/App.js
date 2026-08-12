@@ -14,8 +14,16 @@ export function Connect(arg1) {
   return window['go']['main']['App']['Connect'](arg1);
 }
 
+export function DeleteGroup(arg1) {
+  return window['go']['main']['App']['DeleteGroup'](arg1);
+}
+
 export function DeleteSession(arg1) {
   return window['go']['main']['App']['DeleteSession'](arg1);
+}
+
+export function ListGroups() {
+  return window['go']['main']['App']['ListGroups']();
 }
 
 export function ListRemoteDir(arg1, arg2) {
@@ -36,6 +44,10 @@ export function ResizeLocalTerminal(arg1, arg2, arg3) {
 
 export function ResizeSSH(arg1, arg2, arg3) {
   return window['go']['main']['App']['ResizeSSH'](arg1, arg2, arg3);
+}
+
+export function SaveGroup(arg1) {
+  return window['go']['main']['App']['SaveGroup'](arg1);
 }
 
 export function SaveSession(arg1) {
