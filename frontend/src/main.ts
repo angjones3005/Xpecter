@@ -259,13 +259,35 @@ async function useSession(s: SessionProfile) {
   }
 }
 
-function renderSessionRow(s: SessionProfile): HTMLElement {
+function renderSessionRow(s: SessionProfile, groups: SessionGroup[]): HTMLElement {
   const row = document.createElement('div');
   row.className = 'session-entry';
   row.style.paddingLeft = '18px';
+
   const label = document.createElement('span');
   label.textContent = (s.keyPath ? '\ud83d\udd11 ' : '\ud83d\udd12 ') + s.name;
   label.onclick = () => useSession(s);
+  label.style.flex = '1';
+
+  const groupSelect = document.createElement('select');
+  groupSelect.style.cssText = 'font-size:11px;background:#1a1a1a;color:#999;border:1px solid #333;max-width:70px;margin-right:4px;';
+  groupSelect.onclick = (e) => e.stopPropagation();
+  const noneOpt = document.createElement('option');
+  noneOpt.value = '';
+  noneOpt.textContent = '(none)';
+  groupSelect.appendChild(noneOpt);
+  for (const g of groups) {
+    const opt = document.createElement('option');
+    opt.value = g.id;
+    opt.textContent = g.name;
+    if (s.groupId === g.id) opt.selected = true;
+    groupSelect.appendChild(opt);
+  }
+  groupSelect.onchange = async () => {
+    await App.SaveSession({ ...s, groupId: groupSelect.value });
+    renderSessionList();
+  };
+
   const del = document.createElement('span');
   del.textContent = '\u2715';
   del.className = 'delete-btn';
@@ -274,7 +296,9 @@ function renderSessionRow(s: SessionProfile): HTMLElement {
     await App.DeleteSession(s.id);
     renderSessionList();
   };
+
   row.appendChild(label);
+  row.appendChild(groupSelect);
   row.appendChild(del);
   return row;
 }
@@ -298,7 +322,7 @@ function renderGroupNode(
     renderGroupNode(cg, groups, sessions, container);
   }
   for (const s of childSessions) {
-    container.appendChild(renderSessionRow(s));
+    container.appendChild(renderSessionRow(s, groups));
   }
 }
 
@@ -314,7 +338,7 @@ async function renderSessionList() {
 
   const ungrouped = sessions.filter((s) => !s.groupId);
   for (const s of ungrouped) {
-    list.appendChild(renderSessionRow(s));
+    list.appendChild(renderSessionRow(s, groups));
   }
 
   const addFolder = document.createElement('div');
