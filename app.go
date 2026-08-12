@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -330,4 +331,20 @@ func (a *App) WriteRemoteFile(id string, path string, content string) error {
 		return fmt.Errorf("no such session: %s", id)
 	}
 	return sftpclient.WriteFile(sess.SSHClient(), path, content)
+}
+
+// UploadRemoteFile writes a base64-encoded file to a remote path. Base64
+// is used because Wails bindings serialize over JSON, which requires
+// valid UTF-8 strings, arbitrary binary data (images, executables, etc.)
+// is not valid UTF-8 and would be corrupted if sent as a raw string.
+func (a *App) UploadRemoteFile(id string, path string, base64Content string) error {
+	sess, ok := a.sessions[id]
+	if !ok {
+		return fmt.Errorf("no such session: %s", id)
+	}
+	data, err := base64.StdEncoding.DecodeString(base64Content)
+	if err != nil {
+		return fmt.Errorf("invalid base64 upload payload: %w", err)
+	}
+	return sftpclient.UploadFile(sess.SSHClient(), path, data)
 }

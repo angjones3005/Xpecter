@@ -84,3 +84,23 @@ func WriteFile(client *ssh.Client, filePath string, content string) error {
 	}
 	return f.Close()
 }
+
+// UploadFile writes raw bytes to a remote path, used for binary-safe
+// file uploads (drag-and-drop from the local OS), as distinct from
+// WriteFile which is used for the text-based Monaco editor save path.
+func UploadFile(client *ssh.Client, filePath string, data []byte) error {
+	c, err := sftp.NewClient(client)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = c.Close() }()
+	f, err := c.Create(filePath)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
