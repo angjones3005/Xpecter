@@ -2,7 +2,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import * as monaco from 'monaco-editor';
 import '@xterm/xterm/css/xterm.css';
-import type { RemoteFile, ConnectRequest, SessionProfile } from '../wailsjs.d.ts';
+import type { RemoteFile, ConnectRequest, SessionProfile, SessionGroup } from '../wailsjs.d.ts';
 
 const App = window.go.main.App;
 const runtime = window.runtime;
@@ -259,28 +259,75 @@ async function useSession(s: SessionProfile) {
   }
 }
 
+function renderSessionRow(s: SessionProfile): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'session-entry';
+  row.style.paddingLeft = '18px';
+  const label = document.createElement('span');
+  label.textContent = (s.keyPath ? '\ud83d\udd11 ' : '\ud83d\udd12 ') + s.name;
+  label.onclick = () => useSession(s);
+  const del = document.createElement('span');
+  del.textContent = '\u2715';
+  del.className = 'delete-btn';
+  del.onclick = async (e) => {
+    e.stopPropagation();
+    await App.DeleteSession(s.id);
+    renderSessionList();
+  };
+  row.appendChild(label);
+  row.appendChild(del);
+  return row;
+}
+
+function renderGroupNode(
+  group: SessionGroup,
+  groups: SessionGroup[],
+  sessions: SessionProfile[],
+  container: HTMLElement,
+) {
+  const header = document.createElement('div');
+  header.className = 'entry';
+  header.style.fontWeight = 'bold';
+  header.textContent = '\ud83d\udcc1 ' + group.name;
+  container.appendChild(header);
+
+  const childGroups = groups.filter((g) => g.parentId === group.id);
+  const childSessions = sessions.filter((s) => s.groupId === group.id);
+
+  for (const cg of childGroups) {
+    renderGroupNode(cg, groups, sessions, container);
+  }
+  for (const s of childSessions) {
+    container.appendChild(renderSessionRow(s));
+  }
+}
+
 async function renderSessionList() {
-  const sessions = await App.ListSessions();
+  const [sessions, groups] = await Promise.all([App.ListSessions(), App.ListGroups()]);
   const list = document.getElementById('session-list')!;
   list.innerHTML = '';
-  for (const s of sessions) {
-    const row = document.createElement('div');
-    row.className = 'session-entry';
-    const label = document.createElement('span');
-    label.textContent = (s.keyPath ? '🔑 ' : '🔒 ') + s.name;
-    label.onclick = () => useSession(s);
-    const del = document.createElement('span');
-    del.textContent = '✕';
-    del.className = 'delete-btn';
-    del.onclick = async (e) => {
-      e.stopPropagation();
-      await App.DeleteSession(s.id);
-      renderSessionList();
-    };
-    row.appendChild(label);
-    row.appendChild(del);
-    list.appendChild(row);
+
+  const topGroups = groups.filter((g) => !g.parentId);
+  for (const g of topGroups) {
+    renderGroupNode(g, groups, sessions, list);
   }
+
+  const ungrouped = sessions.filter((s) => !s.groupId);
+  for (const s of ungrouped) {
+    list.appendChild(renderSessionRow(s));
+  }
+
+  const addFolder = document.createElement('div');
+  addFolder.className = 'entry';
+  addFolder.style.cssText = 'opacity:0.6;cursor:pointer;font-size:12px;';
+  addFolder.textContent = '+ New folder';
+  addFolder.onclick = async () => {
+    const name = prompt('Folder name:');
+    if (!name) return;
+    await App.SaveGroup({ id: '', name, parentId: '' });
+    renderSessionList();
+  };
+  list.appendChild(addFolder);
 }
 
 // --- Host key trust modal ---
