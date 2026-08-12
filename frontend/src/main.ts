@@ -326,32 +326,48 @@ function renderGroupNode(
   }
 }
 
+let sessionSearchQuery = '';
+
+function sessionMatchesQuery(s: SessionProfile, query: string): boolean {
+  if (!query) return true;
+  const q = query.toLowerCase();
+  if (s.name.toLowerCase().includes(q)) return true;
+  if (s.host.toLowerCase().includes(q)) return true;
+  if (s.tags && s.tags.some((t) => t.toLowerCase().includes(q))) return true;
+  return false;
+}
+
 async function renderSessionList() {
   const [sessions, groups] = await Promise.all([App.ListSessions(), App.ListGroups()]);
   const list = document.getElementById('session-list')!;
   list.innerHTML = '';
 
+  const query = sessionSearchQuery;
+  const visibleSessions = sessions.filter((s) => sessionMatchesQuery(s, query));
+
   const topGroups = groups.filter((g) => !g.parentId);
   for (const g of topGroups) {
-    renderGroupNode(g, groups, sessions, list);
+    renderGroupNode(g, groups, visibleSessions, list);
   }
 
-  const ungrouped = sessions.filter((s) => !s.groupId);
+  const ungrouped = visibleSessions.filter((s) => !s.groupId);
   for (const s of ungrouped) {
     list.appendChild(renderSessionRow(s, groups));
   }
 
-  const addFolder = document.createElement('div');
-  addFolder.className = 'entry';
-  addFolder.style.cssText = 'opacity:0.6;cursor:pointer;font-size:12px;';
-  addFolder.textContent = '+ New folder';
-  addFolder.onclick = async () => {
-    const name = prompt('Folder name:');
-    if (!name) return;
-    await App.SaveGroup({ id: '', name, parentId: '' });
-    renderSessionList();
-  };
-  list.appendChild(addFolder);
+  if (!query) {
+    const addFolder = document.createElement('div');
+    addFolder.className = 'entry';
+    addFolder.style.cssText = 'opacity:0.6;cursor:pointer;font-size:12px;';
+    addFolder.textContent = '+ New folder';
+    addFolder.onclick = async () => {
+      const name = prompt('Folder name:');
+      if (!name) return;
+      await App.SaveGroup({ id: '', name, parentId: '' });
+      renderSessionList();
+    };
+    list.appendChild(addFolder);
+  }
 }
 
 // --- Host key trust modal ---
@@ -515,4 +531,9 @@ authRadios.forEach((radio) => {
 
 const initialTab = createPendingTab();
 switchToTab(initialTab.id);
+document.getElementById('session-search')!.addEventListener('input', (e) => {
+  sessionSearchQuery = (e.target as HTMLInputElement).value;
+  renderSessionList();
+});
+
 renderSessionList();
