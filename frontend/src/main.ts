@@ -275,20 +275,71 @@ editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, async () => {
 
 // --- File browser (scoped to whichever SSH tab is active) ---
 
+let currentRemotePath = '.';
+let currentRemoteSessionId: string | null = null;
+
 async function refreshFileList(path = '.', sessionId?: string) {
   const id = sessionId ?? (activeTabId ? tabs.get(activeTabId)?.backendId : null);
   if (!id) return;
+  currentRemotePath = path;
+  currentRemoteSessionId = id;
   const entries: RemoteFile[] = await App.ListRemoteDir(id, path);
   const list = document.getElementById('file-list')!;
   list.innerHTML = '';
   for (const e of entries) {
     const div = document.createElement('div');
     div.className = 'entry';
-    div.textContent = (e.isDir ? '📁 ' : '📄 ') + e.name;
+    div.textContent = (e.isDir ? '\ud83d\udcc1 ' : '\ud83d\udcc4 ') + e.name;
     div.onclick = () => (e.isDir ? refreshFileList(e.path, id) : openRemoteFile(id, e.path));
     list.appendChild(div);
   }
 }
+
+async function uploadFilesToCurrentDir(files: FileList) {
+  if (!currentRemoteSessionId) return;
+  const list = document.getElementById('file-list')!;
+  const status = document.createElement('div');
+  status.className = 'entry';
+  status.style.opacity = '0.7';
+  status.style.fontStyle = 'italic';
+  list.appendChild(status);
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    status.textContent = `Uploading ${file.name}...`;
+    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    for (let j = 0; j < bytes.length; j++) binary += String.fromCharCode(bytes[j]);
+    const base64 = btoa(binary);
+    const remotePath = currentRemotePath === '.' ? file.name : `${currentRemotePath}/${file.name}`;
+    try {
+      await App.UploadRemoteFile(currentRemoteSessionId, remotePath, base64);
+    } catch (err) {
+      console.error('Upload failed for', file.name, err);
+    }
+  }
+
+  refreshFileList(currentRemotePath, currentRemoteSessionId);
+}
+
+(() => {
+  const fileList = document.getElementById('file-list')!;
+  fileList.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer?.types.includes('Files')) return;
+    e.preventDefault();
+    fileList.style.background = 'var(--hover)';
+  });
+  fileList.addEventListener('dragleave', () => {
+    fileList.style.background = '';
+  });
+  fileList.addEventListener('drop', (e) => {
+    if (!e.dataTransfer?.files || e.dataTransfer.files.length === 0) return;
+    e.preventDefault();
+    fileList.style.background = '';
+    uploadFilesToCurrentDir(e.dataTransfer.files);
+  });
+})();
 
 // --- Saved sessions ---
 

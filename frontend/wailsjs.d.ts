@@ -61,6 +61,7 @@ export interface AppBindings {
   ListRemoteDir(id: string, path: string): Promise<RemoteFile[]>;
   ReadRemoteFile(id: string, path: string): Promise<string>;
   WriteRemoteFile(id: string, path: string, content: string): Promise<void>;
+  UploadRemoteFile(id: string, path: string, base64Content: string): Promise<void>;
 }
 interface WailsRuntime {
   EventsOn(eventName: string, callback: (...data: unknown[]) => void): void;
