@@ -2,6 +2,8 @@
 
 Cross-platform terminal + SSH client + remote file editor. A **Dawnrail** project.
 
+Licensed under [GPLv3](LICENSE).
+
 This is a starter scaffold, not a finished app. It was written without a live
 Go/Wails toolchain available, so it hasn't been compiled or run yet. Expect to
 fix a few rough edges on first build.
