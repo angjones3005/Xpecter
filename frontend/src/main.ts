@@ -628,6 +628,7 @@ function showGroupContextMenu(x: number, y: number, group: SessionGroup) {
 
 let sessionSearchQuery = '';
 const collapsedGroups = new Set<string>();
+let recentCollapsed = false;
 let osc52Enabled = localStorage.getItem('specter-osc52') !== 'off';
 let copyOnSelectEnabled = localStorage.getItem('specter-copy-on-select') === 'on';
 let rightClickPasteEnabled = localStorage.getItem('specter-rclick-paste') !== 'off';
@@ -687,10 +688,17 @@ async function renderSessionList() {
       const header = document.createElement('div');
       header.className = 'entry';
       header.style.fontWeight = 'bold';
-      header.textContent = '\u23f1\ufe0f Recent';
+      header.style.userSelect = 'none';
+      header.textContent = (recentCollapsed ? '\u25b8 ' : '\u25be ') + '\u23f1\ufe0f Recent';
+      header.addEventListener('click', () => {
+        recentCollapsed = !recentCollapsed;
+        renderSessionList();
+      });
       list.appendChild(header);
-      for (const s of recent) {
-        list.appendChild(renderSessionRow(s));
+      if (!recentCollapsed) {
+        for (const s of recent) {
+          list.appendChild(renderSessionRow(s));
+        }
       }
     }
   }
