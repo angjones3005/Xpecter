@@ -651,6 +651,7 @@ const HIGHLIGHT_RULES: [RegExp, string][] = [
 // (window title: \x1b]...BEL or \x1b]...ST), and simple single-char
 // escapes. Highlighting must never modify bytes inside these, doing so
 // previously corrupted real prompts that use ANSI color codes (SPE-45).
+// eslint-disable-next-line no-control-regex -- intentional: matching real ANSI/OSC escape sequences requires literal control chars
 const ANSI_SEQUENCE_RE = /\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-9;?]*[a-zA-Z]|[a-zA-Z0-9])/g;
 
 function highlightPlainText(text: string): string {
