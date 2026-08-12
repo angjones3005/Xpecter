@@ -150,6 +150,12 @@ func (a *App) TrustHostDespiteChange(host string) error {
 	return sshclient.TrustHostDespiteChange(host)
 }
 
+// GetPlatform returns "windows", "darwin", or "linux", used by the
+// frontend Tools menu to show Command Prompt/PowerShell only on Windows.
+func (a *App) GetPlatform() string {
+	return runtime.Environment(a.ctx).Platform
+}
+
 func (a *App) SelectKeyFile() (string, error) {
 	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
 		Title: "Select SSH Private Key",

@@ -31,6 +31,19 @@ function applyTheme(name: ThemeName) {
   }
 }
 
+function refitActiveTerminal() {
+  // CSS class toggles (sidebar/editor collapse) don't fire a browser
+  // resize event, so xterm.js never re-measures its container on its
+  // own. Force it after any layout change that affects terminal width.
+  requestAnimationFrame(() => {
+    const tab = activeTabId ? tabs.get(activeTabId) : null;
+    if (!tab?.fitAddon || !tab.term) return;
+    tab.fitAddon.fit();
+    if (tab.mode === 'local' && tab.backendId) App.ResizeLocalTerminal(tab.backendId, tab.term.cols, tab.term.rows);
+    if (tab.mode === 'ssh' && tab.backendId) App.ResizeSSH(tab.backendId, tab.term.cols, tab.term.rows);
+  });
+}
+
 function currentTheme(): ThemeName {
   const saved = localStorage.getItem('specter-theme');
   return saved === 'light' ? 'light' : 'dark';
@@ -252,10 +265,13 @@ const editor = monaco.editor.create(document.getElementById('editor')!, {
 
 document.getElementById('editor-close')!.addEventListener('click', () => {
   document.getElementById('app')!.classList.toggle('editor-collapsed');
+  refitActiveTerminal();
 });
 
-document.getElementById('editor-toggle')!.addEventListener('click', () => {
+document.getElementById('menu-toggle-editor')!.addEventListener('click', () => {
+  closeAllMenus();
   document.getElementById('app')!.classList.toggle('editor-collapsed');
+  refitActiveTerminal();
 });
 
 
@@ -576,6 +592,13 @@ function sessionMatchesQuery(s: SessionProfile, query: string): boolean {
   return false;
 }
 
+async function createNewFolder() {
+  const name = prompt('Folder name:');
+  if (!name) return;
+  await App.SaveGroup({ id: '', name, parentId: '' });
+  renderSessionList();
+}
+
 async function renderSessionList() {
   const [sessions, groups] = await Promise.all([App.ListSessions(), App.ListGroups()]);
   const list = document.getElementById('session-list')!;
@@ -616,12 +639,7 @@ async function renderSessionList() {
     addFolder.className = 'entry';
     addFolder.style.cssText = 'opacity:0.6;cursor:pointer;font-size:12px;';
     addFolder.textContent = '+ New folder';
-    addFolder.onclick = async () => {
-      const name = prompt('Folder name:');
-      if (!name) return;
-      await App.SaveGroup({ id: '', name, parentId: '' });
-      renderSessionList();
-    };
+    addFolder.onclick = createNewFolder;
     list.appendChild(addFolder);
   }
 }
@@ -757,16 +775,26 @@ document.getElementById('connect')!.addEventListener('click', async () => {
   await connectActiveTab(req);
 });
 
-document.getElementById('local')!.addEventListener('click', async () => {
+async function startLocalShellInActiveTab(shell: string, label: string) {
   const tab = tabs.get(activeTabId!)!;
-  tab.label = 'Local shell';
-  const id = await App.StartLocalTerminal('');
+  tab.label = label;
+  const id = await App.StartLocalTerminal(shell);
   tab.mode = 'local';
   tab.backendId = id;
   tab.status = 'connected';
   createTerminalForTab(tab);
   runtime.EventsOn('local:data:' + id, (data: unknown) => tab.term!.write(data as string));
   switchToTab(tab.id);
+}
+
+async function newLocalShellTab(shell: string, label: string) {
+  const tab = createPendingTab();
+  switchToTab(tab.id);
+  await startLocalShellInActiveTab(shell, label);
+}
+
+document.getElementById('local')!.addEventListener('click', () => {
+  startLocalShellInActiveTab('', 'Local shell');
 });
 
 document.getElementById('browse-key')!.addEventListener('click', async () => {
@@ -813,4 +841,93 @@ copyOnSelectToggle.addEventListener('change', () => {
   localStorage.setItem('specter-copy-on-select', copyOnSelectEnabled ? 'on' : 'off');
 });
 
-renderSessionList();
+// --- Menu bar ---
+
+function closeAllMenus() {
+  document.querySelectorAll('#menubar .menu-dropdown').forEach((el) => el.classList.remove('open'));
+  document.querySelectorAll('#menubar .menu-item').forEach((el) => el.classList.remove('open'));
+}
+
+document.querySelectorAll('#menubar .menu-item').forEach((item) => {
+  item.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const dropdown = item.querySelector('.menu-dropdown')!;
+    const wasOpen = dropdown.classList.contains('open');
+    closeAllMenus();
+    if (!wasOpen) {
+      dropdown.classList.add('open');
+      item.classList.add('open');
+    }
+  });
+});
+
+document.addEventListener('click', () => closeAllMenus());
+
+// Terminal menu
+document.getElementById('menu-new-tab')!.addEventListener('click', () => {
+  closeAllMenus();
+  const tab = createPendingTab();
+  switchToTab(tab.id);
+});
+document.getElementById('menu-new-local-shell')!.addEventListener('click', () => {
+  closeAllMenus();
+  newLocalShellTab('', 'Local shell');
+});
+document.getElementById('menu-close-tab')!.addEventListener('click', () => {
+  closeAllMenus();
+  if (activeTabId) closeTab(activeTabId);
+});
+document.getElementById('menu-clear-screen')!.addEventListener('click', () => {
+  closeAllMenus();
+  const tab = activeTabId ? tabs.get(activeTabId) : null;
+  tab?.term?.clear();
+});
+
+// Sessions menu
+document.getElementById('menu-new-session')!.addEventListener('click', () => {
+  closeAllMenus();
+  const tab = createPendingTab();
+  switchToTab(tab.id);
+});
+document.getElementById('menu-new-folder')!.addEventListener('click', () => {
+  closeAllMenus();
+  createNewFolder();
+});
+
+// View menu
+document.getElementById('menu-toggle-sidebar')!.addEventListener('click', () => {
+  closeAllMenus();
+  document.getElementById('app')!.classList.toggle('sidebar-collapsed');
+  refitActiveTerminal();
+});
+
+// Tools menu: platform-aware, hide Command Prompt/PowerShell on non-Windows
+App.GetPlatform().then((platform) => {
+  if (platform !== 'windows') {
+    document.getElementById('menu-tool-cmd')!.classList.add('disabled');
+    document.getElementById('menu-tool-powershell')!.classList.add('disabled');
+  }
+});
+document.getElementById('menu-tool-terminal')!.addEventListener('click', () => {
+  closeAllMenus();
+  newLocalShellTab('', 'Terminal');
+});
+document.getElementById('menu-tool-cmd')!.addEventListener('click', () => {
+  closeAllMenus();
+  newLocalShellTab('cmd.exe', 'Command Prompt');
+});
+document.getElementById('menu-tool-powershell')!.addEventListener('click', () => {
+  closeAllMenus();
+  newLocalShellTab('powershell.exe', 'PowerShell');
+});
+document.getElementById('menu-tool-text-editor')!.addEventListener('click', () => {
+  closeAllMenus();
+  document.getElementById('app')!.classList.remove('editor-collapsed');
+  openFilePath = null;
+  openFileSessionId = null;
+  document.getElementById('editor-path')!.textContent = 'Untitled';
+  editor.setValue('');
+  monaco.editor.setModelLanguage(editor.getModel()!, 'plaintext');
+});
+
+renderSessionList();renderSessionList();

@@ -47,6 +47,7 @@ export interface AppBindings {
   CloseLocalTerminal(id: string): Promise<void>;
   Connect(req: ConnectRequest): Promise<ConnectResult>;
   SelectKeyFile(): Promise<string>;
+  GetPlatform(): Promise<string>;
   ListSessions(): Promise<SessionProfile[]>;
   SaveSession(profile: SessionProfile): Promise<void>;
   DeleteSession(id: string): Promise<void>;
