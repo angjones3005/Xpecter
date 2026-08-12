@@ -159,6 +159,18 @@
       <div class="picker-grid" id="picker-grid">
         <div class="picker-item" id="picker-ssh"><span class="icon">🔑</span><span>SSH</span></div>
         <div class="picker-item" id="picker-shell"><span class="icon">&gt;_</span><span>Shell</span></div>
+        <div class="picker-item" id="picker-serial"><span class="icon">🔌</span><span>Serial</span></div>
+      </div>
+      <div id="picker-serial-fields" style="display:none;flex-direction:column;gap:8px;padding:16px;">
+        <input id="serial-port" placeholder="/dev/ttyUSB0 or COM3" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <select id="serial-baud" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;">
+          <option value="9600" selected>9600</option>
+          <option value="19200">19200</option>
+          <option value="38400">38400</option>
+          <option value="57600">57600</option>
+          <option value="115200">115200</option>
+        </select>
+        <button id="serial-connect" style="padding:6px;">Connect</button>
       </div>
       <div id="picker-ssh-fields" style="display:none;padding:16px;display:none;flex-direction:column;gap:8px;">
         <input id="host" placeholder="host" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />

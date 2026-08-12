@@ -58,7 +58,7 @@ const runtime = window.runtime;
 // or local terminal ID). 'pending' tabs show the connect form instead of a
 // live terminal, until Connect/StartLocalTerminal resolves them.
 
-type TabMode = 'pending' | 'local' | 'ssh';
+type TabMode = 'pending' | 'local' | 'ssh' | 'serial';
 type TabStatus = 'connecting' | 'connected' | 'disconnected';
 
 interface Tab {
@@ -109,7 +109,7 @@ function renderTabBar() {
     el.appendChild(dot);
 
     const label = document.createElement('span');
-    label.textContent = (tab.mode === 'local' ? '💻 ' : tab.mode === 'ssh' ? '🌐 ' : '') + tab.label;
+    label.textContent = (tab.mode === 'local' ? '💻 ' : tab.mode === 'ssh' ? '🌐 ' : tab.mode === 'serial' ? '🔌 ' : '') + tab.label;
     el.appendChild(label);
 
     const close = document.createElement('span');
@@ -162,6 +162,7 @@ async function closeTab(id: string) {
 
   if (tab.mode === 'ssh' && tab.backendId) await App.CloseSSH(tab.backendId);
   if (tab.mode === 'local' && tab.backendId) await App.CloseLocalTerminal(tab.backendId);
+  if (tab.mode === 'serial' && tab.backendId) await App.CloseSerial(tab.backendId);
   tab.term?.dispose();
   tab.container?.remove();
   tabs.delete(id);
@@ -226,6 +227,7 @@ function createTerminalForTab(tab: Tab) {
       navigator.clipboard.readText().then((text) => {
         if (tab.mode === 'local' && tab.backendId) App.WriteLocalTerminal(tab.backendId, text);
         if (tab.mode === 'ssh' && tab.backendId) App.WriteSSH(tab.backendId, text);
+        if (tab.mode === 'serial' && tab.backendId) App.WriteSerial(tab.backendId, text);
       }).catch(() => {});
       return false;
     }
@@ -235,6 +237,7 @@ function createTerminalForTab(tab: Tab) {
   term.onData((data) => {
     if (tab.mode === 'local' && tab.backendId) App.WriteLocalTerminal(tab.backendId, data);
     if (tab.mode === 'ssh' && tab.backendId) App.WriteSSH(tab.backendId, data);
+    if (tab.mode === 'serial' && tab.backendId) App.WriteSerial(tab.backendId, data);
   });
 
   tab.term = term;
@@ -798,6 +801,18 @@ async function newLocalShellTab(shell: string, label: string) {
   await startLocalShellInActiveTab(shell, label);
 }
 
+async function connectSerialInActiveTab(portName: string, baud: number) {
+  const tab = tabs.get(activeTabId!)!;
+  tab.label = portName;
+  const id = await App.ConnectSerial(portName, baud);
+  tab.mode = 'serial';
+  tab.backendId = id;
+  tab.status = 'connected';
+  createTerminalForTab(tab);
+  runtime.EventsOn('serial:data:' + id, (data: unknown) => tab.term!.write(data as string));
+  switchToTab(tab.id);
+}
+
 
 
 document.getElementById('browse-key')!.addEventListener('click', async () => {
@@ -890,6 +905,7 @@ document.getElementById('menu-clear-screen')!.addEventListener('click', () => {
 function resetPickerView() {
   document.getElementById('picker-grid')!.style.display = 'grid';
   document.getElementById('picker-ssh-fields')!.style.display = 'none';
+  document.getElementById('picker-serial-fields')!.style.display = 'none';
 }
 function openSessionPicker() {
   resetPickerView();
@@ -926,6 +942,17 @@ document.getElementById('session-picker-overlay')!.addEventListener('click', (e)
 document.getElementById('picker-ssh')!.addEventListener('click', () => {
   document.getElementById('picker-grid')!.style.display = 'none';
   document.getElementById('picker-ssh-fields')!.style.display = 'flex';
+});
+document.getElementById('picker-serial')!.addEventListener('click', () => {
+  document.getElementById('picker-grid')!.style.display = 'none';
+  document.getElementById('picker-serial-fields')!.style.display = 'flex';
+});
+document.getElementById('serial-connect')!.addEventListener('click', async () => {
+  const portName = (document.getElementById('serial-port') as HTMLInputElement).value;
+  const baud = parseInt((document.getElementById('serial-baud') as HTMLSelectElement).value, 10);
+  if (!portName) return;
+  closeSessionPicker();
+  await connectSerialInActiveTab(portName, baud);
 });
 document.getElementById('picker-shell')!.addEventListener('click', () => {
   ensurePendingTab();

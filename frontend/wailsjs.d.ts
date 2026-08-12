@@ -48,6 +48,10 @@ export interface AppBindings {
   Connect(req: ConnectRequest): Promise<ConnectResult>;
   SelectKeyFile(): Promise<string>;
   GetPlatform(): Promise<string>;
+  ConnectSerial(portName: string, baud: number): Promise<string>;
+  WriteSerial(id: string, data: string): Promise<void>;
+  CloseSerial(id: string): Promise<void>;
+  ListSerialPorts(): Promise<string[]>;
   ListSessions(): Promise<SessionProfile[]>;
   SaveSession(profile: SessionProfile): Promise<void>;
   DeleteSession(id: string): Promise<void>;
