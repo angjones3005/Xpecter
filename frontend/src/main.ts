@@ -4,6 +4,39 @@ import * as monaco from 'monaco-editor';
 import '@xterm/xterm/css/xterm.css';
 import type { RemoteFile, ConnectRequest, SessionProfile, SessionGroup } from '../wailsjs.d.ts';
 
+type ThemeName = 'dark' | 'light';
+
+const XTERM_THEMES: Record<ThemeName, { background: string; foreground: string }> = {
+  dark: { background: '#1e1e1e', foreground: '#dddddd' },
+  light: { background: '#ffffff', foreground: '#1e1e1e' },
+};
+
+const MONACO_THEMES: Record<ThemeName, string> = {
+  dark: 'vs-dark',
+  light: 'vs',
+};
+
+function applyTheme(name: ThemeName) {
+  document.documentElement.setAttribute('data-theme', name);
+  localStorage.setItem('specter-theme', name);
+
+  for (const tab of tabs.values()) {
+    if (tab.term) {
+      tab.term.options.theme = XTERM_THEMES[name];
+    }
+  }
+
+  if (typeof monaco !== 'undefined' && editor) {
+    monaco.editor.setTheme(MONACO_THEMES[name]);
+  }
+}
+
+function currentTheme(): ThemeName {
+  const saved = localStorage.getItem('specter-theme');
+  return saved === 'light' ? 'light' : 'dark';
+}
+
+
 const App = window.go.main.App;
 const runtime = window.runtime;
 
@@ -142,7 +175,7 @@ function createTerminalForTab(tab: Tab) {
   const term = new Terminal({
     fontFamily: 'Menlo, Consolas, monospace',
     fontSize: 13,
-    theme: { background: '#1e1e1e' },
+    theme: XTERM_THEMES[currentTheme()],
   });
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
@@ -176,7 +209,7 @@ window.addEventListener('resize', () => {
 const editor = monaco.editor.create(document.getElementById('editor')!, {
   value: '',
   language: 'plaintext',
-  theme: 'vs-dark',
+  theme: MONACO_THEMES[currentTheme()],
   automaticLayout: true,
 });
 
@@ -552,6 +585,13 @@ switchToTab(initialTab.id);
 document.getElementById('session-search')!.addEventListener('input', (e) => {
   sessionSearchQuery = (e.target as HTMLInputElement).value;
   renderSessionList();
+});
+
+const themeSelect = document.getElementById('theme-select') as HTMLSelectElement;
+themeSelect.value = currentTheme();
+applyTheme(currentTheme());
+themeSelect.addEventListener('change', () => {
+  applyTheme(themeSelect.value as ThemeName);
 });
 
 renderSessionList();
