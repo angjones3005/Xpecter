@@ -241,6 +241,7 @@ function setAuthMode(mode: 'password' | 'key') {
 let skipSavePrompt = false;
 
 async function useSession(s: SessionProfile) {
+  await App.SaveSession({ ...s, lastUsed: new Date().toISOString() });
   (document.getElementById('host') as HTMLInputElement).value = s.host;
   (document.getElementById('user') as HTMLInputElement).value = s.user;
 
@@ -344,6 +345,23 @@ async function renderSessionList() {
 
   const query = sessionSearchQuery;
   const visibleSessions = sessions.filter((s) => sessionMatchesQuery(s, query));
+
+  if (!query) {
+    const recent = sessions
+      .filter((s) => s.lastUsed)
+      .sort((a, b) => (b.lastUsed! > a.lastUsed! ? 1 : -1))
+      .slice(0, 5);
+    if (recent.length > 0) {
+      const header = document.createElement('div');
+      header.className = 'entry';
+      header.style.fontWeight = 'bold';
+      header.textContent = '\u23f1\ufe0f Recent';
+      list.appendChild(header);
+      for (const s of recent) {
+        list.appendChild(renderSessionRow(s, groups));
+      }
+    }
+  }
 
   const topGroups = groups.filter((g) => !g.parentId);
   for (const g of topGroups) {
