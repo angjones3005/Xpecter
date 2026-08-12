@@ -248,6 +248,17 @@ function createTerminalForTab(tab: Tab) {
     return true;
   });
 
+  // Right-click to paste (toggleable), matching PuTTY/most Linux terminal convention.
+  container.addEventListener('contextmenu', (e) => {
+    if (!rightClickPasteEnabled) return;
+    e.preventDefault();
+    navigator.clipboard.readText().then((text) => {
+      if (tab.mode === 'local' && tab.backendId) App.WriteLocalTerminal(tab.backendId, text);
+      if (tab.mode === 'ssh' && tab.backendId) App.WriteSSH(tab.backendId, text);
+      if (tab.mode === 'serial' && tab.backendId) App.WriteSerial(tab.backendId, text);
+    }).catch(() => {});
+  });
+
   term.onData((data) => {
     if (tab.mode === 'local' && tab.backendId) App.WriteLocalTerminal(tab.backendId, data);
     if (tab.mode === 'ssh' && tab.backendId) App.WriteSSH(tab.backendId, data);
@@ -400,13 +411,13 @@ async function useSession(s: SessionProfile) {
   (document.getElementById('host') as HTMLInputElement).value = s.host;
   (document.getElementById('user') as HTMLInputElement).value = s.user;
 
+  skipSavePrompt = true;
+
   if (s.keyPath) {
     setAuthMode('key');
     (document.getElementById('keyPath') as HTMLInputElement).value = s.keyPath;
     (document.getElementById('passphrase') as HTMLInputElement).value = '';
-    skipSavePrompt = true;
     await connectActiveTab({ host: s.host, port: s.port, user: s.user, keyPath: s.keyPath });
-    skipSavePrompt = false;
   } else {
     setAuthMode('password');
     openSessionPicker();
@@ -603,6 +614,28 @@ let sessionSearchQuery = '';
 const collapsedGroups = new Set<string>();
 let osc52Enabled = localStorage.getItem('specter-osc52') !== 'off';
 let copyOnSelectEnabled = localStorage.getItem('specter-copy-on-select') === 'on';
+let rightClickPasteEnabled = localStorage.getItem('specter-rclick-paste') !== 'off';
+let highlightEnabled = localStorage.getItem('specter-highlight') !== 'off';
+
+const HIGHLIGHT_RULES: [RegExp, string][] = [
+  [/\b(connected|up|ok|success)\b/gi, '38;2;51;204;51'],   // bright green, MobaXterm-style
+  [/\b(disabled|down|error|fail|failed)\b/gi, '38;2;229;72;77'], // red
+  [/\b(warning)\b/gi, '38;2;210;153;34'],                   // yellow
+  [/\b(?:Gi|Te|Fa|Fo|Hu|Po|Eth|Vlan)\d+(?:\/\d+)*\b/g, '38;2;198;120;221'], // magenta, interface/port identifiers
+];
+
+function applyOutputHighlighting(text: string): string {
+  if (!highlightEnabled) return text;
+  let result = text;
+  for (const [pattern, code] of HIGHLIGHT_RULES) {
+    result = result.replace(pattern, (match) => `\x1b[${code}m${match}\x1b[0m`);
+  }
+  return result;
+}
+
+function writeToTerminal(tab: Tab, data: string) {
+  tab.term!.write(applyOutputHighlighting(data));
+}
 
 function sessionMatchesQuery(s: SessionProfile, query: string): boolean {
   if (!query) return true;
@@ -764,7 +797,7 @@ async function connectActiveTab(req: ConnectRequest) {
     tab.backendId = result.sessionId;
     tab.status = 'connected';
     createTerminalForTab(tab);
-    runtime.EventsOn('ssh:data:' + result.sessionId, (data: unknown) => tab.term!.write(data as string));
+    runtime.EventsOn('ssh:data:' + result.sessionId, (data: unknown) => writeToTerminal(tab, data as string));
     switchToTab(tab.id);
     refreshFileList('.', result.sessionId);
 
@@ -775,6 +808,7 @@ async function connectActiveTab(req: ConnectRequest) {
         renderSessionList();
       }
     }
+    skipSavePrompt = false;
   }
 }
 
@@ -805,7 +839,7 @@ async function startLocalShellInActiveTab(shell: string, label: string) {
   tab.backendId = id;
   tab.status = 'connected';
   createTerminalForTab(tab);
-  runtime.EventsOn('local:data:' + id, (data: unknown) => tab.term!.write(data as string));
+  runtime.EventsOn('local:data:' + id, (data: unknown) => writeToTerminal(tab, data as string));
   switchToTab(tab.id);
 }
 
@@ -823,11 +857,18 @@ async function connectSerialInActiveTab(portName: string, baud: number) {
   tab.backendId = id;
   tab.status = 'connected';
   createTerminalForTab(tab);
-  runtime.EventsOn('serial:data:' + id, (data: unknown) => tab.term!.write(data as string));
+  runtime.EventsOn('serial:data:' + id, (data: unknown) => writeToTerminal(tab, data as string));
   switchToTab(tab.id);
 }
 
 
+
+document.getElementById('picker-ssh-fields')!.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    document.getElementById('connect')!.click();
+  }
+});
 
 document.getElementById('browse-key')!.addEventListener('click', async () => {
   const path = await App.SelectKeyFile();
@@ -852,6 +893,7 @@ document.getElementById('session-search')!.addEventListener('input', (e) => {
   renderSessionList();
 });
 
+
 const themeSelect = document.getElementById('theme-select') as HTMLSelectElement;
 themeSelect.value = currentTheme();
 applyTheme(currentTheme());
@@ -871,6 +913,20 @@ copyOnSelectToggle.checked = copyOnSelectEnabled;
 copyOnSelectToggle.addEventListener('change', () => {
   copyOnSelectEnabled = copyOnSelectToggle.checked;
   localStorage.setItem('specter-copy-on-select', copyOnSelectEnabled ? 'on' : 'off');
+});
+
+const rclickPasteToggle = document.getElementById('rclick-paste-toggle') as HTMLInputElement;
+rclickPasteToggle.checked = rightClickPasteEnabled;
+rclickPasteToggle.addEventListener('change', () => {
+  rightClickPasteEnabled = rclickPasteToggle.checked;
+  localStorage.setItem('specter-rclick-paste', rightClickPasteEnabled ? 'on' : 'off');
+});
+
+const highlightToggle = document.getElementById('highlight-toggle') as HTMLInputElement;
+highlightToggle.checked = highlightEnabled;
+highlightToggle.addEventListener('change', () => {
+  highlightEnabled = highlightToggle.checked;
+  localStorage.setItem('specter-highlight', highlightEnabled ? 'on' : 'off');
 });
 
 // --- Menu bar ---
