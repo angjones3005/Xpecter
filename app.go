@@ -45,11 +45,11 @@ func (a *App) shutdown(ctx context.Context) {
 // StartLocalTerminal spawns a new local shell PTY and returns its ID.
 // Output streams to the frontend via the "local:data:<id>" event, matching
 // the "ssh:data:<id>" pattern already used for SSH sessions.
-func (a *App) StartLocalTerminal() (string, error) {
+func (a *App) StartLocalTerminal(shell string) (string, error) {
 	id := newID()
 	lt, err := pty.New(func(data []byte) {
 		runtime.EventsEmit(a.ctx, "local:data:"+id, string(data))
-	})
+	}, shell)
 	if err != nil {
 		return "", err
 	}

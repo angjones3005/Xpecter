@@ -17,10 +17,12 @@ type windowsTerminal struct {
 	cpty *conpty.ConPty
 }
 
-func newPlatformTerminal(onData func([]byte)) (terminalImpl, error) {
-	shell := os.Getenv("COMSPEC")
+func newPlatformTerminal(onData func([]byte), shell string) (terminalImpl, error) {
 	if shell == "" {
-		shell = "powershell.exe"
+		shell = os.Getenv("COMSPEC")
+		if shell == "" {
+			shell = "powershell.exe"
+		}
 	}
 
 	cpty, err := conpty.Start(shell)

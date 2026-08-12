@@ -16,8 +16,12 @@ type terminalImpl interface {
 	Close() error
 }
 
-func New(onData func([]byte)) (*LocalTerminal, error) {
-	impl, err := newPlatformTerminal(onData)
+// New spawns a local shell. If shell is empty, the platform default is
+// used (COMSPEC/PowerShell fallback on Windows, $SHELL/bash on Unix).
+// A non-empty shell requests a specific executable, e.g. "cmd.exe" or
+// "powershell.exe" on Windows, used by the Tools menu's quick launchers.
+func New(onData func([]byte), shell string) (*LocalTerminal, error) {
+	impl, err := newPlatformTerminal(onData, shell)
 	if err != nil {
 		return nil, err
 	}

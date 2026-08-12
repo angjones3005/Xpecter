@@ -14,10 +14,12 @@ type unixTerminal struct {
 	cmd *exec.Cmd
 }
 
-func newPlatformTerminal(onData func([]byte)) (terminalImpl, error) {
-	shell := os.Getenv("SHELL")
+func newPlatformTerminal(onData func([]byte), shell string) (terminalImpl, error) {
 	if shell == "" {
-		shell = "/bin/bash"
+		shell = os.Getenv("SHELL")
+		if shell == "" {
+			shell = "/bin/bash"
+		}
 	}
 
 	cmd := exec.Command(shell)
