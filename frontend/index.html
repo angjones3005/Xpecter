@@ -73,6 +73,16 @@
     .tab-add { padding: 6px 10px; cursor: pointer; color: var(--text-dim); font-size: 14px; }
     .tab-add:hover { color: var(--text); }
     #theme-select { background: var(--bg-input); border: 1px solid var(--border); color: var(--text); font-size: 12px; padding: 2px 4px; }
+    #session-picker-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 2000; }
+    #session-picker-overlay.open { display: flex; }
+    #session-picker { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; width: 280px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+    #session-picker .picker-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px; }
+    #session-picker .picker-header .close { cursor: pointer; opacity: 0.6; }
+    #session-picker .picker-header .close:hover { opacity: 1; }
+    #session-picker .picker-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; padding: 20px; }
+    #session-picker .picker-item { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--text); border: 1px solid var(--border); }
+    #session-picker .picker-item:hover { background: var(--hover); border-color: var(--accent); }
+    #session-picker .picker-item .icon { font-size: 28px; }
   </style>
 </head>
 <body>
@@ -129,27 +139,44 @@
     </div>
     <div id="terminal-pane">
       <div style="display:flex;background:var(--bg-input);border-bottom:1px solid var(--border);"><div id="tab-bar" style="display:flex;overflow-x:auto;flex:1;"></div></div>
-      <div id="connect-form" class="toolbar">
-        <input id="host" placeholder="host" />
-        <input id="user" placeholder="user" />
-        <label style="margin-right:6px;"><input type="radio" name="authmode" value="password" checked /> Password</label>
-        <label style="margin-right:6px;"><input type="radio" name="authmode" value="key" /> Key</label>
-        <span id="auth-password-fields">
-          <input id="password" placeholder="password" type="password" />
-        </span>
-        <span id="auth-key-fields" style="display:none;">
-          <input id="keyPath" placeholder="key path" readonly style="width:160px;" />
-          <button id="browse-key">Browse…</button>
-          <input id="passphrase" placeholder="passphrase (if any)" type="password" />
-        </span>
-        <button id="connect">Connect</button>
-        <button id="local">Local shell</button>
+      <div id="tab-landing" style="display:none;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:12px;">
+        <div style="font-size:14px;color:var(--text-dim);">No session yet</div>
+        <button id="new-session-btn" style="padding:8px 18px;font-size:13px;">+ New Session</button>
       </div>
       <div id="terminal"></div>
     </div>
     <div id="editor-pane">
       <div class="toolbar"><span id="editor-path">No file open</span><span id="editor-close" style="margin-left:auto;cursor:pointer;opacity:0.5;">✕</span></div>
       <div id="editor"></div>
+    </div>
+  </div>
+  <div id="session-picker-overlay">
+    <div id="session-picker">
+      <div class="picker-header">
+        <strong>New Session</strong>
+        <span class="close" id="session-picker-close">✕</span>
+      </div>
+      <div class="picker-grid" id="picker-grid">
+        <div class="picker-item" id="picker-ssh"><span class="icon">🔑</span><span>SSH</span></div>
+        <div class="picker-item" id="picker-shell"><span class="icon">&gt;_</span><span>Shell</span></div>
+      </div>
+      <div id="picker-ssh-fields" style="display:none;padding:16px;display:none;flex-direction:column;gap:8px;">
+        <input id="host" placeholder="host" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <input id="user" placeholder="user" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <div>
+          <label style="margin-right:10px;"><input type="radio" name="authmode" value="password" checked /> Password</label>
+          <label><input type="radio" name="authmode" value="key" /> Key</label>
+        </div>
+        <span id="auth-password-fields">
+          <input id="password" placeholder="password" type="password" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        </span>
+        <span id="auth-key-fields" style="display:none;flex-direction:column;gap:8px;">
+          <input id="keyPath" placeholder="key path" readonly style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+          <button id="browse-key">Browse…</button>
+          <input id="passphrase" placeholder="passphrase (if any)" type="password" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        </span>
+        <button id="connect" style="padding:6px;">Connect</button>
+      </div>
     </div>
   </div>
   <script type="module" src="/src/main.ts"></script>

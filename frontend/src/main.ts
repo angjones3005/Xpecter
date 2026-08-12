@@ -140,7 +140,7 @@ function switchToTab(id: string) {
   document.querySelectorAll('.term-instance').forEach((el) => {
     (el as HTMLElement).style.display = 'none';
   });
-  document.getElementById('connect-form')!.style.display = tab.mode === 'pending' ? 'flex' : 'none';
+  document.getElementById('tab-landing')!.style.display = tab.mode === 'pending' ? 'flex' : 'none';
 
   if (tab.container) {
     tab.container.style.display = 'block';
@@ -379,6 +379,7 @@ let skipSavePrompt = false;
 
 async function useSession(s: SessionProfile) {
   await App.SaveSession({ ...s, lastUsed: new Date().toISOString() });
+  ensurePendingTab();
   (document.getElementById('host') as HTMLInputElement).value = s.host;
   (document.getElementById('user') as HTMLInputElement).value = s.user;
 
@@ -391,6 +392,9 @@ async function useSession(s: SessionProfile) {
     skipSavePrompt = false;
   } else {
     setAuthMode('password');
+    openSessionPicker();
+    document.getElementById('picker-grid')!.style.display = 'none';
+    document.getElementById('picker-ssh-fields')!.style.display = 'flex';
     const pwField = document.getElementById('password') as HTMLInputElement;
     pwField.value = '';
     pwField.focus();
@@ -773,6 +777,7 @@ document.getElementById('connect')!.addEventListener('click', async () => {
   }
 
   await connectActiveTab(req);
+  closeSessionPicker();
 });
 
 async function startLocalShellInActiveTab(shell: string, label: string) {
@@ -793,9 +798,7 @@ async function newLocalShellTab(shell: string, label: string) {
   await startLocalShellInActiveTab(shell, label);
 }
 
-document.getElementById('local')!.addEventListener('click', () => {
-  startLocalShellInActiveTab('', 'Local shell');
-});
+
 
 document.getElementById('browse-key')!.addEventListener('click', async () => {
   const path = await App.SelectKeyFile();
@@ -884,10 +887,50 @@ document.getElementById('menu-clear-screen')!.addEventListener('click', () => {
 });
 
 // Sessions menu
-document.getElementById('menu-new-session')!.addEventListener('click', () => {
-  closeAllMenus();
+function resetPickerView() {
+  document.getElementById('picker-grid')!.style.display = 'grid';
+  document.getElementById('picker-ssh-fields')!.style.display = 'none';
+}
+function openSessionPicker() {
+  resetPickerView();
+  document.getElementById('session-picker-overlay')!.classList.add('open');
+}
+function closeSessionPicker() {
+  document.getElementById('session-picker-overlay')!.classList.remove('open');
+  resetPickerView();
+}
+function ensurePendingTab() {
+  // The picker always operates on the current tab if it's already
+  // pending (opened from a tab's own landing view); otherwise it
+  // creates a fresh pending tab first (opened from the Sessions menu).
+  const current = activeTabId ? tabs.get(activeTabId) : null;
+  if (current && current.mode === 'pending') return current;
   const tab = createPendingTab();
   switchToTab(tab.id);
+  return tab;
+}
+
+document.getElementById('menu-new-session')!.addEventListener('click', () => {
+  closeAllMenus();
+  ensurePendingTab();
+  openSessionPicker();
+});
+document.getElementById('new-session-btn')!.addEventListener('click', () => {
+  ensurePendingTab();
+  openSessionPicker();
+});
+document.getElementById('session-picker-close')!.addEventListener('click', closeSessionPicker);
+document.getElementById('session-picker-overlay')!.addEventListener('click', (e) => {
+  if (e.target === document.getElementById('session-picker-overlay')) closeSessionPicker();
+});
+document.getElementById('picker-ssh')!.addEventListener('click', () => {
+  document.getElementById('picker-grid')!.style.display = 'none';
+  document.getElementById('picker-ssh-fields')!.style.display = 'flex';
+});
+document.getElementById('picker-shell')!.addEventListener('click', () => {
+  ensurePendingTab();
+  closeSessionPicker();
+  startLocalShellInActiveTab('', 'Local shell');
 });
 document.getElementById('menu-new-folder')!.addEventListener('click', () => {
   closeAllMenus();
