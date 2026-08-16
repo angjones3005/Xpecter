@@ -1,3 +1,8 @@
+#!/usr/bin/env bash
+# Run from the root of your Specter repo.
+set -euo pipefail
+
+cat > "frontend/src/main.ts" << 'SPECTER_EOF_MAINTS'
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import * as monaco from 'monaco-editor';
@@ -589,21 +594,19 @@ const editor = monaco.editor.create(document.getElementById('editor')!, {
   automaticLayout: true,
 });
 
-function toggleEditorPane() {
-  const app = document.getElementById('app')!;
-  app.style.gridTemplateColumns = '';
+document.getElementById('editor-close')!.addEventListener('click', () => {
+  document.getElementById('app')!.style.gridTemplateColumns = '';
   currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
-  const collapsed = app.classList.toggle('editor-collapsed');
-  document.getElementById('editor-expand-btn')!.style.display = collapsed ? 'flex' : 'none';
+  document.getElementById('app')!.classList.toggle('editor-collapsed');
   refitActiveTerminal();
-}
-
-document.getElementById('editor-close')!.addEventListener('click', toggleEditorPane);
-document.getElementById('editor-expand-btn')!.addEventListener('click', toggleEditorPane);
+});
 
 document.getElementById('menu-toggle-editor')!.addEventListener('click', () => {
   closeAllMenus();
-  toggleEditorPane();
+  document.getElementById('app')!.style.gridTemplateColumns = '';
+  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
+  document.getElementById('app')!.classList.toggle('editor-collapsed');
+  refitActiveTerminal();
 });
 
 
@@ -616,13 +619,6 @@ async function openRemoteFile(sessionId: string, path: string) {
   openFileSessionId = sessionId;
   document.getElementById('editor-path')!.textContent = path;
   document.getElementById('editor-close')!.style.display = 'inline';
-  // The editor pane now defaults to collapsed (nothing to show until a
-  // file's actually open), so opening one needs to explicitly restore
-  // it, otherwise the content loads into Monaco invisibly behind a
-  // hidden pane.
-  document.getElementById('app')!.classList.remove('editor-collapsed');
-  document.getElementById('editor-expand-btn')!.style.display = 'none';
-  refitActiveTerminal();
   const ext = path.split('.').pop() ?? '';
   const langMap: Record<string, string> = {
     go: 'go', hs: 'haskell', js: 'javascript', ts: 'typescript', json: 'json', md: 'markdown',
@@ -1833,7 +1829,6 @@ authRadios.forEach((radio) => {
 
 // --- Init: start with one pending tab ---
 document.getElementById('app')!.classList.add('editor-collapsed');
-document.getElementById('editor-expand-btn')!.style.display = 'flex';
 let remoteFilesCollapsed = false;
 document.getElementById('remote-files-header')!.addEventListener('click', () => {
   remoteFilesCollapsed = !remoteFilesCollapsed;
@@ -2100,9 +2095,21 @@ document.getElementById('menu-new-folder')!.addEventListener('click', () => {
 
 // View menu
 function toggleSidebar() {
-  document.getElementById('app')!.style.gridTemplateColumns = '';
-  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
-  const collapsed = document.getElementById('app')!.classList.toggle('sidebar-collapsed');
+  const app = document.getElementById('app')!;
+  const collapsed = app.classList.toggle('sidebar-collapsed');
+  // Set the columns directly rather than clearing the inline style and
+  // relying on the .sidebar-collapsed CSS rule to take over: the resize
+  // drag handles (setupPaneResize below) also write directly to this
+  // same inline style, and letting two different code paths both
+  // manage the same property (one via class+clear, one via direct
+  // writes) is exactly the kind of thing that can go wrong in subtle,
+  // hard-to-reproduce ways depending on what was dragged before.
+  if (collapsed) {
+    app.style.gridTemplateColumns = '0px 0px 1fr 5px 1fr';
+  } else {
+    currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
+    app.style.gridTemplateColumns = currentColumnTemplate.join(' ');
+  }
   document.getElementById('sidebar-expand-btn')!.style.display = collapsed ? 'flex' : 'none';
   refitActiveTerminal();
 }
@@ -2135,7 +2142,6 @@ document.getElementById('menu-tool-powershell')!.addEventListener('click', () =>
 document.getElementById('menu-tool-text-editor')!.addEventListener('click', () => {
   closeAllMenus();
   document.getElementById('app')!.classList.remove('editor-collapsed');
-  document.getElementById('editor-expand-btn')!.style.display = 'none';
   openFilePath = null;
   openFileSessionId = null;
   document.getElementById('editor-path')!.textContent = 'Untitled';
@@ -2180,3 +2186,5 @@ setupPaneResize('resize-sidebar', 0, 150);
 setupPaneResize('resize-editor', 2, 200);
 
 renderSessionList();renderSessionList();
+SPECTER_EOF_MAINTS
+

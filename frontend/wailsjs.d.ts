@@ -76,6 +76,14 @@ export interface Settings {
   // since only the path itself is persisted in settings.json.
   wallpaperDataUrl?: string;
 }
+// Check-for-updates (not auto-update, see design discussion): a single
+// GitHub releases API check on launch, no silent install.
+export interface UpdateInfo {
+  available: boolean;
+  currentVersion: string;
+  latestVersion: string;
+  releaseUrl: string;
+}
 export interface AppBindings {
   StartLocalTerminal(shell: string): Promise<string>;
   WriteLocalTerminal(id: string, data: string): Promise<void>;
@@ -88,6 +96,8 @@ export interface AppBindings {
   SaveTextFile(defaultFilename: string, content: string): Promise<string>;
   GetSettings(): Promise<Settings>;
   SaveSettings(settings: Settings): Promise<void>;
+  GetVersion(): Promise<string>;
+  CheckForUpdate(): Promise<UpdateInfo>;
   GetClipboardText(): Promise<string>;
   GetPlatform(): Promise<string>;
   ConnectSerial(portName: string, baud: number): Promise<string>;
@@ -117,6 +127,7 @@ interface WailsRuntime {
   WindowMinimise(): void;
   WindowToggleMaximise(): void;
   Quit(): void;
+  BrowserOpenURL(url: string): void;
 }
 declare global {
   interface Window {

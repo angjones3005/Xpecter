@@ -48,6 +48,17 @@ jobs:
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
+      # NSIS ships pre-installed on windows-latest runners, but versions
+      # drift over time and we've seen reports of that breaking `wails
+      # build -nsis` for other projects. Installing explicitly via choco
+      # (always present on GitHub-hosted Windows runners) makes this
+      # deterministic instead of depending on whatever happens to be on
+      # the image today.
+      - name: Install NSIS (Windows)
+        if: matrix.platform == 'windows'
+        run: choco install nsis -y
+        shell: pwsh
+
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
@@ -55,20 +66,40 @@ jobs:
       - name: Build (Linux)
         if: matrix.platform == 'linux'
         run: |
-          wails build -platform linux/amd64 -tags webkit2_41
+          wails build -platform linux/amd64 -tags webkit2_41 -ldflags "-X main.Version=${{ github.ref_name }}"
           tar -czf ${{ matrix.artifact }} -C build/bin .
 
       - name: Build (Windows)
         if: matrix.platform == 'windows'
         run: |
-          wails build -platform windows/amd64
+          wails build -platform windows/amd64 -ldflags "-X main.Version=${{ github.ref_name }}"
           Compress-Archive -Path build/bin/* -DestinationPath ${{ matrix.artifact }}
         shell: pwsh
+
+      # Separate, redundant build rather than folding -nsis into the step
+      # above: if NSIS ever breaks (it has, across Wails versions, per
+      # upstream issues), continue-on-error here means the release still
+      # ships with the portable .exe/.zip above either way, this is
+      # purely additive, never a release blocker.
+      - name: Build Windows installer (NSIS)
+        if: matrix.platform == 'windows'
+        continue-on-error: true
+        run: wails build -platform windows/amd64 -nsis -ldflags "-X main.Version=${{ github.ref_name }}"
+        shell: pwsh
+
+      - name: Upload Windows installer (NSIS)
+        if: matrix.platform == 'windows'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: specter-windows-installer.exe
+          path: build/bin/specter-amd64-installer.exe
+          retention-days: 7
 
       - name: Build (macOS)
         if: matrix.platform == 'darwin'
         run: |
-          wails build -platform darwin/universal
+          wails build -platform darwin/universal -ldflags "-X main.Version=${{ github.ref_name }}"
           cd build/bin
           zip -r ../../${{ matrix.artifact }} .
 

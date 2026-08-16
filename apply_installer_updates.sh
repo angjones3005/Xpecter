@@ -1,3 +1,716 @@
+#!/usr/bin/env bash
+# Run from the root of your Specter repo.
+set -euo pipefail
+
+cat > "update.go" << 'SPECTER_EOF_0'
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Version is overridden at release-build time via
+// -ldflags "-X main.Version=vX.Y.Z" (the git tag being built), set in
+// release.yml. Local/dev builds stay "dev", which CheckForUpdate treats
+// as "don't bother checking", there's no meaningful version to compare
+// against.
+var Version = "dev"
+
+type UpdateInfo struct {
+	Available      bool   `json:"available"`
+	CurrentVersion string `json:"currentVersion"`
+	LatestVersion  string `json:"latestVersion"`
+	ReleaseURL     string `json:"releaseUrl"`
+}
+
+func (a *App) GetVersion() string {
+	return Version
+}
+
+// CheckForUpdate queries GitHub's public releases API (no auth needed
+// for a public repo) and compares against the running build's version.
+// Deliberately just a check, not an installer: no auto-download, no
+// silent replace, see the SPE discussion on why (code signing cost,
+// failure surface) before this got built.
+func (a *App) CheckForUpdate() (UpdateInfo, error) {
+	info := UpdateInfo{CurrentVersion: Version}
+	if Version == "dev" {
+		return info, nil
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "https://api.github.com/repos/angjones3005/Specter/releases/latest", nil)
+	if err != nil {
+		return info, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return info, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return info, fmt.Errorf("github api returned %d", resp.StatusCode)
+	}
+
+	var rel struct {
+		TagName string `json:"tag_name"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return info, err
+	}
+
+	info.LatestVersion = rel.TagName
+	info.ReleaseURL = rel.HTMLURL
+	info.Available = isNewerVersion(rel.TagName, Version)
+	return info, nil
+}
+
+// isNewerVersion does a simple numeric major.minor.patch comparison of
+// "vX.Y.Z"-style tags. Not a full semver implementation (no
+// prerelease/build-metadata handling), Specter's own tags are plain
+// vX.Y.Z, so this is deliberately kept minimal rather than pulling in a
+// semver dependency for something this narrow.
+func isNewerVersion(latest, current string) bool {
+	lp := parseVersion(latest)
+	cp := parseVersion(current)
+	for i := 0; i < 3; i++ {
+		if lp[i] != cp[i] {
+			return lp[i] > cp[i]
+		}
+	}
+	return false
+}
+
+func parseVersion(v string) [3]int {
+	v = strings.TrimPrefix(v, "v")
+	parts := strings.SplitN(v, ".", 3)
+	var out [3]int
+	for i := 0; i < 3 && i < len(parts); i++ {
+		n, _ := strconv.Atoi(parts[i])
+		out[i] = n
+	}
+	return out
+}
+SPECTER_EOF_0
+
+mkdir -p ".github/workflows"
+cat > ".github/workflows/release.yml" << 'SPECTER_EOF_1'
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            artifact: specter-linux-amd64.tar.gz
+          - os: windows-latest
+            platform: windows
+            artifact: specter-windows-amd64.zip
+          - os: macos-latest
+            platform: darwin
+            artifact: specter-macos-universal.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      # Wails needs GTK3 + WebKit2GTK on Linux to build/run the webview.
+      # Windows and macOS runners already ship what's needed (WebView2 is
+      # preinstalled on windows-latest; macOS uses the system WebKit).
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      # NSIS ships pre-installed on windows-latest runners, but versions
+      # drift over time and we've seen reports of that breaking `wails
+      # build -nsis` for other projects. Installing explicitly via choco
+      # (always present on GitHub-hosted Windows runners) makes this
+      # deterministic instead of depending on whatever happens to be on
+      # the image today.
+      - name: Install NSIS (Windows)
+        if: matrix.platform == 'windows'
+        run: choco install nsis -y
+        shell: pwsh
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          wails build -platform linux/amd64 -tags webkit2_41 -ldflags "-X main.Version=${{ github.ref_name }}"
+          tar -czf ${{ matrix.artifact }} -C build/bin .
+
+      - name: Build (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          wails build -platform windows/amd64 -ldflags "-X main.Version=${{ github.ref_name }}"
+          Compress-Archive -Path build/bin/* -DestinationPath ${{ matrix.artifact }}
+        shell: pwsh
+
+      # Separate, redundant build rather than folding -nsis into the step
+      # above: if NSIS ever breaks (it has, across Wails versions, per
+      # upstream issues), continue-on-error here means the release still
+      # ships with the portable .exe/.zip above either way, this is
+      # purely additive, never a release blocker.
+      - name: Build Windows installer (NSIS)
+        if: matrix.platform == 'windows'
+        continue-on-error: true
+        run: wails build -platform windows/amd64 -nsis -ldflags "-X main.Version=${{ github.ref_name }}"
+        shell: pwsh
+
+      - name: Upload Windows installer (NSIS)
+        if: matrix.platform == 'windows'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: specter-windows-installer.exe
+          path: build/bin/specter-amd64-installer.exe
+          retention-days: 7
+
+      - name: Build (macOS)
+        if: matrix.platform == 'darwin'
+        run: |
+          wails build -platform darwin/universal -ldflags "-X main.Version=${{ github.ref_name }}"
+          cd build/bin
+          zip -r ../../${{ matrix.artifact }} .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish release with artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+SPECTER_EOF_1
+
+mkdir -p "frontend"
+cat > "frontend/index.html" << 'SPECTER_EOF_2'
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Specter</title>
+  <style>
+    :root[data-theme="dark"] {
+      --bg: #1e1e1e;
+      --bg-alt: #252525;
+      --bg-input: #1a1a1a;
+      --border: #333;
+      --text: #ddd;
+      --text-dim: #999;
+      --hover: #2a2a2a;
+      --accent: #3178c6;
+      --danger: #e5484d;
+      --success: #2ea043;
+      --warning: #d29922;
+    }
+    :root[data-theme="light"] {
+      --bg: #ffffff;
+      --bg-alt: #f3f3f3;
+      --bg-input: #ffffff;
+      --border: #d0d0d0;
+      --text: #1e1e1e;
+      --text-dim: #666;
+      --hover: #e8e8e8;
+      --accent: #3178c6;
+      --danger: #cf3d3e;
+      --success: #1f8a3d;
+      --warning: #a06800;
+    }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: sans-serif; }
+    body { display: flex; flex-direction: column; }
+    #menubar { flex: 0 0 auto; display: flex; align-items: center; background: var(--bg-alt); border-bottom: 1px solid var(--border); font-size: 13px; user-select: none; position: relative; z-index: 500; --wails-draggable: drag; }
+    #menubar .menu-item { padding: 5px 12px; cursor: pointer; color: var(--text); position: relative; --wails-draggable: no-drag; }
+    #menubar .menu-item:hover, #menubar .menu-item.open { background: var(--hover); }
+    #menubar .menu-dropdown { position: absolute; top: 100%; left: 0; background: var(--bg-alt); border: 1px solid var(--border); min-width: 190px; display: none; flex-direction: column; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+    #menubar .menu-dropdown.open { display: flex; }
+    #menubar .menu-dropdown .item { padding: 6px 12px; cursor: pointer; white-space: nowrap; }
+    #menubar .menu-dropdown .item:hover { background: var(--hover); }
+    #menubar .menu-dropdown .item.disabled { opacity: 0.4; cursor: default; pointer-events: none; }
+    #menubar .menu-dropdown .separator { border-top: 1px solid var(--border); margin: 4px 0; }
+    #menubar .menu-dropdown .item label { display: flex; align-items: center; gap: 6px; cursor: pointer; width: 100%; justify-content: space-between; }
+    /* Frameless window: this bar IS the title bar (--wails-draggable:drag
+       above), so brand/spacer/controls opt back OUT of dragging where
+       they need real clicks. */
+    #titlebar-brand { display: flex; align-items: center; gap: 6px; padding: 0 10px 0 12px; --wails-draggable: no-drag; }
+    #titlebar-brand img { width: 18px; height: 18px; border-radius: 4px; display: block; }
+    #titlebar-brand span { font-weight: 600; color: var(--text); letter-spacing: 0.2px; }
+    #titlebar-spacer { flex: 1; align-self: stretch; }
+    #titlebar-controls { display: flex; align-self: stretch; --wails-draggable: no-drag; }
+    #titlebar-controls button { width: 44px; border: none; background: transparent; color: var(--text-dim); cursor: pointer; font-size: 13px; display: flex; align-items: center; justify-content: center; }
+    #titlebar-controls button:hover { background: var(--hover); color: var(--text); }
+    #titlebar-controls button#win-close:hover { background: #e5484d; color: #ffffff; }
+    #app { flex: 1; min-height: 0; display: grid; grid-template-columns: 220px 5px 1fr 5px 1fr; }
+    #statusbar { flex: 0 0 auto; height: 22px; background: var(--bg-alt); border-top: 1px solid var(--border); display: flex; align-items: center; padding: 0 10px; font-size: 11px; color: var(--text-dim); }
+    #app.sidebar-collapsed { grid-template-columns: 0px 0px 1fr 5px 1fr; }
+    #app.sidebar-collapsed #sidebar, #app.sidebar-collapsed #resize-sidebar { display: none; }
+    .resize-handle { cursor: col-resize; background: transparent; }
+    .resize-handle:hover, .resize-handle.dragging { background: var(--accent); }
+    #sidebar { border-right: 1px solid var(--border); overflow-y: auto; padding: 8px; font-size: 13px; }
+    #sidebar .entry { padding: 4px 6px; cursor: pointer; border-radius: 4px; }
+    #sidebar .entry:hover { background: var(--hover); }
+    .session-entry { padding: 4px 6px; cursor: pointer; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
+    .session-entry:hover { background: var(--hover); }
+    .session-entry .delete-btn { opacity: 0.5; font-size: 11px; }
+    .session-entry .delete-btn:hover { opacity: 1; color: var(--danger); }
+    #terminal-pane { border-right: 1px solid var(--border); min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+    #editor-pane { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+    #app.editor-collapsed { grid-template-columns: 220px 5px 1fr 0px 0px; }
+    #app.editor-collapsed.sidebar-collapsed { grid-template-columns: 0px 0px 1fr 0px 0px; }
+    #app.editor-collapsed #editor-pane, #app.editor-collapsed #resize-editor { display: none; }
+    #terminal { flex: 1; min-height: 0; padding: 4px; box-sizing: border-box; }
+    #editor { flex: 1; min-height: 0; }
+    .toolbar { padding: 6px 10px; font-size: 13px; background: var(--bg-alt); border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+    .toolbar input { background: var(--bg-input); border: 1px solid var(--border); color: var(--text); padding: 3px 6px; width: 90px; min-width: 0; }
+    .toolbar button { padding: 3px 8px; }
+    .tab { display: flex; align-items: center; gap: 6px; padding: 6px 10px; font-size: 12px; border-right: 1px solid var(--border); cursor: pointer; white-space: nowrap; color: var(--text-dim); }
+    .tab.active { background: var(--bg-alt); color: var(--text); border-top: 2px solid var(--accent); }
+    .tab .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #666; }
+    .tab .status-dot.connected { background: var(--success); }
+    .tab .status-dot.connecting { background: var(--warning); }
+    .tab .status-dot.disconnected { background: var(--danger); }
+    .tab .tab-close { opacity: 0.5; margin-left: 4px; }
+    .tab .tab-close:hover { opacity: 1; color: var(--danger); }
+    .tab-add { padding: 6px 10px; cursor: pointer; color: var(--text-dim); font-size: 14px; }
+    .tab-add:hover { color: var(--text); }
+    #theme-select {
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-size: 12px;
+      padding: 3px 20px 3px 6px;
+      -webkit-appearance: none;
+      appearance: none;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><path d='M0 0l5 6 5-6z' fill='%23999'/></svg>");
+      background-repeat: no-repeat;
+      background-position: right 6px center;
+      border-radius: 4px;
+    }
+    #theme-select option {
+      background: var(--bg-input);
+      color: var(--text);
+    }
+    button {
+      background: var(--accent);
+      color: #ffffff;
+      border: none;
+      border-radius: 5px;
+      padding: 6px 14px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: opacity 0.12s ease;
+    }
+    button:hover {
+      opacity: 0.85;
+    }
+    button:active {
+      opacity: 0.7;
+    }
+    .toolbar button, .picker-item, #session-picker .close {
+      background: var(--bg-input);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .toolbar button:hover {
+      opacity: 1;
+      background: var(--hover);
+    }
+    #session-picker-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 2000; }
+    #session-picker-overlay.open { display: flex; }
+    #session-picker { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; width: 280px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+    #session-picker .picker-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px; }
+    #session-picker .picker-header .close { cursor: pointer; opacity: 0.6; }
+    #session-picker .picker-header .close:hover { opacity: 1; }
+    #session-picker .picker-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; padding: 20px; }
+    #session-picker .picker-item { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--text); border: 1px solid var(--border); }
+    #session-picker .picker-item:hover { background: var(--hover); border-color: var(--accent); }
+    #session-picker .picker-item .icon { font-size: 28px; }
+    .disconnect-panel {
+      position: absolute;
+      left: 8px;
+      right: 8px;
+      bottom: 8px;
+      background: var(--bg-alt);
+      border: 1px solid var(--border);
+      border-top: 2px solid var(--danger);
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-family: Menlo, Consolas, monospace;
+      font-size: 12px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      z-index: 10;
+    }
+    .disconnect-title { color: var(--danger); font-weight: bold; margin-bottom: 6px; }
+    .disconnect-action { display: flex; align-items: center; gap: 8px; padding: 3px 2px; cursor: pointer; color: var(--text); border-radius: 4px; }
+    .disconnect-action:hover { background: var(--hover); }
+    .disconnect-key { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; padding: 1px 6px; border: 1px solid var(--accent); border-radius: 4px; color: var(--accent); font-weight: bold; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <div id="menubar">
+    <div id="titlebar-brand"><img src="/appicon.png" alt="" /><span>Specter</span></div>
+    <div class="menu-item" data-menu="terminal">Terminal
+      <div class="menu-dropdown" id="menu-terminal">
+        <div class="item" id="menu-new-tab">New Tab</div>
+        <div class="item" id="menu-new-local-shell">New Local Shell</div>
+        <div class="item" id="menu-close-tab">Close Tab</div>
+        <div class="item" id="menu-disconnect-tab">Disconnect <span style="opacity:0.5;font-size:11px;">Ctrl+Shift+X</span></div>
+        <div class="separator"></div>
+        <div class="item" id="menu-clear-screen">Clear Screen</div>
+      </div>
+    </div>
+    <div class="menu-item" data-menu="sessions">Sessions
+      <div class="menu-dropdown" id="menu-sessions">
+        <div class="item" id="menu-new-session">New Session</div>
+        <div class="item" id="menu-new-folder">New Folder</div>
+      </div>
+    </div>
+    <div class="menu-item" data-menu="view">View
+      <div class="menu-dropdown" id="menu-view">
+        <div class="item" id="menu-toggle-editor">Toggle Editor Pane</div>
+        <div class="item" id="menu-toggle-sidebar">Toggle Sidebar</div>
+      </div>
+    </div>
+    <div class="menu-item" data-menu="tools">Tools
+      <div class="menu-dropdown" id="menu-tools">
+        <div class="item" id="menu-tool-terminal">Terminal</div>
+        <div class="item" id="menu-tool-cmd">Command Prompt</div>
+        <div class="item" id="menu-tool-powershell">PowerShell</div>
+        <div class="separator"></div>
+        <div class="item" id="menu-tool-text-editor">Text Editor</div>
+      </div>
+    </div>
+    <div class="menu-item" data-menu="settings">Settings
+      <div class="menu-dropdown" id="menu-settings">
+        <div class="item"><label>Theme <select id="theme-select"><option value="dark">Dark</option><option value="light">Light</option></select></label></div>
+        <div class="item"><label>Terminal colors
+          <select id="colorscheme-select">
+            <option value="dark">Dark (default)</option>
+            <option value="light">Light (default)</option>
+            <option value="dracula">Dracula</option>
+            <option value="nord">Nord</option>
+            <option value="solarized-dark">Solarized Dark</option>
+            <option value="solarized-light">Solarized Light</option>
+            <option value="gruvbox-dark">Gruvbox Dark</option>
+            <option value="one-dark">One Dark</option>
+          </select>
+        </label></div>
+        <div class="item"><label>Font
+          <select id="font-select">
+            <option value="menlo">Menlo</option>
+            <option value="consolas">Consolas</option>
+            <option value="cascadia">Cascadia Code</option>
+            <option value="fira">Fira Code</option>
+            <option value="jetbrains">JetBrains Mono</option>
+            <option value="courier">Courier New</option>
+            <option value="ibmplex">IBM Plex Mono</option>
+            <option value="sourcecodepro">Source Code Pro</option>
+            <option value="inconsolata">Inconsolata</option>
+            <option value="victor">Victor Mono</option>
+            <option value="ubuntumono">Ubuntu Mono</option>
+          </select>
+        </label></div>
+        <div class="separator"></div>
+        <div class="item"><label>Wallpaper <button id="wallpaper-browse" type="button">Browse...</button></label></div>
+        <div class="item" id="wallpaper-opacity-row" style="display:none;">
+          <label>Opacity <input type="range" id="wallpaper-opacity" min="0" max="60" value="15" style="vertical-align:middle;" /></label>
+        </div>
+        <div class="item" id="wallpaper-clear-row" style="display:none;"><span id="wallpaper-clear" style="cursor:pointer;color:var(--danger);">Clear wallpaper</span></div>
+        <div class="separator"></div>
+        <div class="item"><label><input type="checkbox" id="osc52-toggle" /> OSC 52 clipboard sync (remote can write to your clipboard)</label></div>
+        <div class="item"><label><input type="checkbox" id="copy-on-select-toggle" /> Copy on select</label></div>
+        <div class="item"><label><input type="checkbox" id="rclick-paste-toggle" checked /> Right-click to paste</label></div>
+        <div class="item"><label><input type="checkbox" id="highlight-toggle" checked /> Highlight status keywords</label></div>
+        <div class="separator"></div>
+        <div class="item" id="menu-check-updates" style="cursor:pointer;">Check for Updates&#8230; <span id="menu-version" style="opacity:0.5;font-size:11px;"></span></div>
+      </div>
+    </div>
+    <div id="titlebar-spacer"></div>
+    <div id="titlebar-controls">
+      <button id="win-minimize" title="Minimize">&#9472;</button>
+      <button id="win-maximize" title="Maximize">&#9633;</button>
+      <button id="win-close" title="Close">&#10005;</button>
+    </div>
+  </div>
+  <div id="update-banner" style="display:none;align-items:center;gap:10px;padding:6px 14px;background:#1f3a5f;border-bottom:1px solid var(--border);font-size:12px;color:#cfe3ff;">
+    <span id="update-banner-text"></span>
+    <button id="update-banner-download" style="margin-left:auto;padding:3px 10px;font-size:12px;">Download</button>
+    <span id="update-banner-dismiss" style="cursor:pointer;opacity:0.7;padding:0 4px;" title="Dismiss">&#10005;</span>
+  </div>
+  <div id="app">
+    <div id="sidebar">
+      <div class="toolbar" style="padding-left:0;">
+        <strong>Saved sessions</strong>
+      </div>
+      <input id="session-search" placeholder="Quick connect..." style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:4px 6px;margin-bottom:4px;font-size:12px;" />
+      <div id="session-list"></div>
+      <div class="toolbar" style="padding-left:0;cursor:pointer;" id="remote-files-header">
+        <strong id="remote-files-label">Remote files</strong>
+      </div>
+      <div id="file-list"></div>
+    </div>
+    <div class="resize-handle" id="resize-sidebar"></div>
+    <div id="terminal-pane">
+      <div style="display:flex;background:var(--bg-input);border-bottom:1px solid var(--border);"><div id="tab-bar" style="display:flex;overflow-x:auto;flex:1;"></div></div>
+      <div id="tab-landing" style="display:none;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:12px;">
+        <div style="font-size:14px;color:var(--text-dim);">No session yet</div>
+        <button id="new-session-btn" style="padding:8px 18px;font-size:13px;">+ New Session</button>
+      </div>
+      <div id="terminal" style="position:relative;"></div>
+    </div>
+    <div class="resize-handle" id="resize-editor"></div>
+    <div id="editor-pane">
+      <div class="toolbar"><span id="editor-path">No file open</span><span id="editor-close" style="margin-left:auto;cursor:pointer;opacity:0.5;">✕</span></div>
+      <div id="editor"></div>
+    </div>
+  </div>
+  <div id="session-picker-overlay">
+    <div id="session-picker">
+      <div class="picker-header">
+        <strong>New Session</strong>
+        <span class="close" id="session-picker-close">✕</span>
+      </div>
+      <div class="picker-grid" id="picker-grid">
+        <div class="picker-item" id="picker-ssh"><span class="icon">🔑</span><span>SSH</span></div>
+        <div class="picker-item" id="picker-shell"><span class="icon">&gt;_</span><span>Shell</span></div>
+        <div class="picker-item" id="picker-serial"><span class="icon">🔌</span><span>Serial</span></div>
+      </div>
+      <div id="picker-serial-fields" style="display:none;flex-direction:column;gap:8px;padding:16px;">
+        <input id="serial-port" placeholder="/dev/ttyUSB0 or COM3" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <select id="serial-baud" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;">
+          <option value="9600" selected>9600</option>
+          <option value="19200">19200</option>
+          <option value="38400">38400</option>
+          <option value="57600">57600</option>
+          <option value="115200">115200</option>
+        </select>
+        <button id="serial-connect" style="padding:6px;">Connect</button>
+      </div>
+      <div id="picker-ssh-fields" style="display:none;padding:16px;display:none;flex-direction:column;gap:8px;">
+        <input id="host" placeholder="host" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <input id="user" placeholder="user" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <div>
+          <label style="margin-right:10px;"><input type="radio" name="devicekind" value="host" checked /> VM / Host</label>
+          <label style="margin-right:10px;"><input type="radio" name="devicekind" value="switch" /> Switch</label>
+          <label><input type="radio" name="devicekind" value="firewall" /> Firewall</label>
+        </div>
+        <div>
+          <label style="margin-right:10px;"><input type="radio" name="authmode" value="password" checked /> Password</label>
+          <label><input type="radio" name="authmode" value="key" /> Key</label>
+        </div>
+        <span id="auth-password-fields">
+          <input id="password" placeholder="password" type="password" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <div id="caps-lock-warning" style="display:none;color:var(--warning);font-size:11px;">⚠ Caps Lock is on</div>
+        </span>
+        <span id="auth-key-fields" style="display:none;flex-direction:column;gap:8px;">
+          <input id="keyPath" placeholder="key path" readonly style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+          <button id="browse-key">Browse…</button>
+          <input id="passphrase" placeholder="passphrase (if any)" type="password" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        </span>
+        <button id="connect" style="padding:6px;">Connect</button>
+      </div>
+    </div>
+  </div>
+  <div id="statusbar">Specter</div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
+SPECTER_EOF_2
+
+mkdir -p "frontend"
+cat > "frontend/wailsjs.d.ts" << 'SPECTER_EOF_3'
+// Wails injects these globals at build time from the Go backend's bound
+// methods (app.go). Hand-written here since Specter isn't using the
+// `wails generate` codegen step yet, keep this in sync with app.go.
+export interface ConnectRequest {
+  host: string;
+  port: number;
+  user: string;
+  password?: string;
+  keyPath?: string;
+  passphrase?: string;
+  // SPE-65: user already acknowledged the key-permission warning once
+  // for this attempt.
+  ignoreKeyPermWarning?: boolean;
+}
+export interface ConnectResult {
+  sessionId?: string;
+  needsTrust?: boolean;
+  changed?: boolean;
+  host?: string;
+  fingerprint?: string;
+  keyType?: string;
+  needsPassphrase?: boolean;
+  // SPE-65: the selected key file is group/world-readable. Soft
+  // warning, not a hard block, retry with ignoreKeyPermWarning once
+  // acknowledged.
+  needsKeyPermConfirm?: boolean;
+  keyPermPath?: string;
+  keyPermMode?: string;
+}
+export interface SessionProfile {
+  id: string;
+  name: string;
+  type?: string;
+  host?: string;
+  port?: number;
+  user?: string;
+  keyPath?: string;
+  serialPort?: string;
+  baud?: number;
+  groupId?: string;
+  tags?: string[];
+  lastUsed?: string;
+  // Drives the sidebar icon for SSH sessions: '' / 'host' (default,
+  // VM/Linux box) or 'switch' (network hardware). Serial sessions
+  // always show their own icon regardless of this field.
+  deviceKind?: string;
+}
+export interface SessionGroup {
+  id: string;
+  name: string;
+  parentId?: string;
+}
+export interface RemoteFile {
+  name: string;
+  path: string;
+  isDir: boolean;
+  size: number;
+}
+// Emitted as "ssh:closed:<id>" / "serial:closed:<id>" when a session's
+// read loop stops unexpectedly (SPE-59). Deliberate closes (user closed
+// the tab) never emit this event, there's nothing to tell the user.
+export interface SessionClosedEvent {
+  eof: boolean;
+  message: string;
+}
+// Global terminal personalization (SPE-61): wallpaper, color scheme,
+// and font, one set for the whole app, not per-session/per-tab.
+export interface Settings {
+  wallpaperPath?: string;
+  wallpaperOpacity?: number;
+  colorScheme?: string;
+  fontFamily?: string;
+  fontSize?: number;
+  // Frontend-only, never sent to the backend: the wallpaper image
+  // re-read as a data: URL each load via App.ReadImageFile(wallpaperPath),
+  // since only the path itself is persisted in settings.json.
+  wallpaperDataUrl?: string;
+}
+// Check-for-updates (not auto-update, see design discussion): a single
+// GitHub releases API check on launch, no silent install.
+export interface UpdateInfo {
+  available: boolean;
+  currentVersion: string;
+  latestVersion: string;
+  releaseUrl: string;
+}
+export interface AppBindings {
+  StartLocalTerminal(shell: string): Promise<string>;
+  WriteLocalTerminal(id: string, data: string): Promise<void>;
+  ResizeLocalTerminal(id: string, cols: number, rows: number): Promise<void>;
+  CloseLocalTerminal(id: string): Promise<void>;
+  Connect(req: ConnectRequest): Promise<ConnectResult>;
+  SelectKeyFile(): Promise<string>;
+  SelectImageFile(): Promise<string>;
+  ReadImageFile(path: string): Promise<string>;
+  SaveTextFile(defaultFilename: string, content: string): Promise<string>;
+  GetSettings(): Promise<Settings>;
+  SaveSettings(settings: Settings): Promise<void>;
+  GetVersion(): Promise<string>;
+  CheckForUpdate(): Promise<UpdateInfo>;
+  GetClipboardText(): Promise<string>;
+  GetPlatform(): Promise<string>;
+  ConnectSerial(portName: string, baud: number): Promise<string>;
+  WriteSerial(id: string, data: string): Promise<void>;
+  CloseSerial(id: string): Promise<void>;
+  ListSerialPorts(): Promise<string[]>;
+  ListSessions(): Promise<SessionProfile[]>;
+  SaveSession(profile: SessionProfile): Promise<void>;
+  DeleteSession(id: string): Promise<void>;
+  ListGroups(): Promise<SessionGroup[]>;
+  SaveGroup(group: SessionGroup): Promise<void>;
+  DeleteGroup(id: string): Promise<void>;
+  TrustHost(host: string): Promise<void>;
+  TrustHostDespiteChange(host: string): Promise<void>;
+  WriteSSH(id: string, data: string): Promise<void>;
+  ResizeSSH(id: string, cols: number, rows: number): Promise<void>;
+  CloseSSH(id: string): Promise<void>;
+  ListRemoteDir(id: string, path: string): Promise<RemoteFile[]>;
+  ReadRemoteFile(id: string, path: string): Promise<string>;
+  WriteRemoteFile(id: string, path: string, content: string): Promise<void>;
+  UploadRemoteFile(id: string, path: string, base64Content: string): Promise<void>;
+}
+interface WailsRuntime {
+  EventsOn(eventName: string, callback: (...data: unknown[]) => void): () => void;
+  EventsOff(eventName: string, ...additionalEventNames: string[]): void;
+  EventsEmit(eventName: string, ...data: unknown[]): void;
+  WindowMinimise(): void;
+  WindowToggleMaximise(): void;
+  Quit(): void;
+  BrowserOpenURL(url: string): void;
+}
+declare global {
+  interface Window {
+    go: { main: { App: AppBindings } };
+    runtime: WailsRuntime;
+  }
+}
+SPECTER_EOF_3
+
+mkdir -p "frontend/src"
+cat > "frontend/src/main.ts" << 'SPECTER_EOF_4'
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import * as monaco from 'monaco-editor';
@@ -527,13 +1240,6 @@ function createTerminalForTab(tab: Tab) {
       disconnectTab(tab);
       return false;
     }
-    if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
-      // Not plain Ctrl+B: that's tmux's default prefix key, binding it
-      // globally would break every tmux user's workflow the moment
-      // they're inside a session.
-      toggleSidebar();
-      return false;
-    }
     if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
       navigator.clipboard.readText().then((text) => {
         if (tab.mode === 'local' && tab.backendId) App.WriteLocalTerminal(tab.backendId, text);
@@ -589,21 +1295,19 @@ const editor = monaco.editor.create(document.getElementById('editor')!, {
   automaticLayout: true,
 });
 
-function toggleEditorPane() {
-  const app = document.getElementById('app')!;
-  app.style.gridTemplateColumns = '';
+document.getElementById('editor-close')!.addEventListener('click', () => {
+  document.getElementById('app')!.style.gridTemplateColumns = '';
   currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
-  const collapsed = app.classList.toggle('editor-collapsed');
-  document.getElementById('editor-expand-btn')!.style.display = collapsed ? 'flex' : 'none';
+  document.getElementById('app')!.classList.toggle('editor-collapsed');
   refitActiveTerminal();
-}
-
-document.getElementById('editor-close')!.addEventListener('click', toggleEditorPane);
-document.getElementById('editor-expand-btn')!.addEventListener('click', toggleEditorPane);
+});
 
 document.getElementById('menu-toggle-editor')!.addEventListener('click', () => {
   closeAllMenus();
-  toggleEditorPane();
+  document.getElementById('app')!.style.gridTemplateColumns = '';
+  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
+  document.getElementById('app')!.classList.toggle('editor-collapsed');
+  refitActiveTerminal();
 });
 
 
@@ -616,13 +1320,6 @@ async function openRemoteFile(sessionId: string, path: string) {
   openFileSessionId = sessionId;
   document.getElementById('editor-path')!.textContent = path;
   document.getElementById('editor-close')!.style.display = 'inline';
-  // The editor pane now defaults to collapsed (nothing to show until a
-  // file's actually open), so opening one needs to explicitly restore
-  // it, otherwise the content loads into Monaco invisibly behind a
-  // hidden pane.
-  document.getElementById('app')!.classList.remove('editor-collapsed');
-  document.getElementById('editor-expand-btn')!.style.display = 'none';
-  refitActiveTerminal();
   const ext = path.split('.').pop() ?? '';
   const langMap: Record<string, string> = {
     go: 'go', hs: 'haskell', js: 'javascript', ts: 'typescript', json: 'json', md: 'markdown',
@@ -1783,17 +2480,6 @@ function checkCapsLock(e: KeyboardEvent) {
 
 document.addEventListener('keydown', checkCapsLock);
 
-document.addEventListener('keydown', (e) => {
-  // Global fallback for when no terminal has focus (the "No session
-  // yet" landing screen, sidebar search box, etc.), the per-terminal
-  // version above only fires while an xterm instance actually has
-  // focus. Same Ctrl+Shift+B, not plain Ctrl+B (tmux's prefix key).
-  if (e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
-    e.preventDefault();
-    toggleSidebar();
-  }
-});
-
 document.addEventListener('keyup', checkCapsLock);
 
 document.getElementById('password')!.addEventListener('focus', () => {
@@ -1833,7 +2519,6 @@ authRadios.forEach((radio) => {
 
 // --- Init: start with one pending tab ---
 document.getElementById('app')!.classList.add('editor-collapsed');
-document.getElementById('editor-expand-btn')!.style.display = 'flex';
 let remoteFilesCollapsed = false;
 document.getElementById('remote-files-header')!.addEventListener('click', () => {
   remoteFilesCollapsed = !remoteFilesCollapsed;
@@ -1901,8 +2586,8 @@ async function checkForUpdate(manual = false) {
   let info: UpdateInfo;
   try {
     info = await App.CheckForUpdate();
-  } catch (err) {
-    if (manual) alert(`Could not check for updates: ${err}`);
+  } catch {
+    if (manual) alert('Could not check for updates. Check your internet connection and try again.');
     return;
   }
   if (!info.available) {
@@ -2099,19 +2784,13 @@ document.getElementById('menu-new-folder')!.addEventListener('click', () => {
 });
 
 // View menu
-function toggleSidebar() {
-  document.getElementById('app')!.style.gridTemplateColumns = '';
-  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
-  const collapsed = document.getElementById('app')!.classList.toggle('sidebar-collapsed');
-  document.getElementById('sidebar-expand-btn')!.style.display = collapsed ? 'flex' : 'none';
-  refitActiveTerminal();
-}
 document.getElementById('menu-toggle-sidebar')!.addEventListener('click', () => {
   closeAllMenus();
-  toggleSidebar();
+  document.getElementById('app')!.style.gridTemplateColumns = '';
+  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
+  document.getElementById('app')!.classList.toggle('sidebar-collapsed');
+  refitActiveTerminal();
 });
-document.getElementById('sidebar-collapse-btn')!.addEventListener('click', toggleSidebar);
-document.getElementById('sidebar-expand-btn')!.addEventListener('click', toggleSidebar);
 
 // Tools menu: platform-aware, hide Command Prompt/PowerShell on non-Windows
 App.GetPlatform().then((platform) => {
@@ -2135,7 +2814,6 @@ document.getElementById('menu-tool-powershell')!.addEventListener('click', () =>
 document.getElementById('menu-tool-text-editor')!.addEventListener('click', () => {
   closeAllMenus();
   document.getElementById('app')!.classList.remove('editor-collapsed');
-  document.getElementById('editor-expand-btn')!.style.display = 'none';
   openFilePath = null;
   openFileSessionId = null;
   document.getElementById('editor-path')!.textContent = 'Untitled';
@@ -2180,3 +2858,5 @@ setupPaneResize('resize-sidebar', 0, 150);
 setupPaneResize('resize-editor', 2, 200);
 
 renderSessionList();renderSessionList();
+SPECTER_EOF_4
+

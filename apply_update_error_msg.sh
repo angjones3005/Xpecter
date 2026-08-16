@@ -1,3 +1,119 @@
+#!/usr/bin/env bash
+# Run from the root of your Specter repo.
+set -euo pipefail
+
+cat > "update.go" << 'SPECTER_EOF_0'
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Version is overridden at release-build time via
+// -ldflags "-X main.Version=vX.Y.Z" (the git tag being built), set in
+// release.yml. Local/dev builds stay "dev", which CheckForUpdate treats
+// as "don't bother checking", there's no meaningful version to compare
+// against.
+var Version = "dev"
+
+type UpdateInfo struct {
+	Available      bool   `json:"available"`
+	CurrentVersion string `json:"currentVersion"`
+	LatestVersion  string `json:"latestVersion"`
+	ReleaseURL     string `json:"releaseUrl"`
+}
+
+func (a *App) GetVersion() string {
+	return Version
+}
+
+// CheckForUpdate queries GitHub's public releases API (no auth needed
+// for a public repo) and compares against the running build's version.
+// Deliberately just a check, not an installer: no auto-download, no
+// silent replace, see the SPE discussion on why (code signing cost,
+// failure surface) before this got built.
+func (a *App) CheckForUpdate() (UpdateInfo, error) {
+	info := UpdateInfo{CurrentVersion: Version}
+	if Version == "dev" {
+		return info, nil
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "https://api.github.com/repos/angjones3005/Specter/releases/latest", nil)
+	if err != nil {
+		return info, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return info, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			// GitHub's API returns 404 (not 403) for a private repo when
+			// unauthenticated, to avoid leaking whether it exists. This
+			// is expected right now, Specter's repo is currently
+			// private, and will resolve itself with zero code changes
+			// once it goes public. Distinguishing this from a real
+			// network failure avoids a misleading "check your internet
+			// connection" message for what's actually just "not public
+			// yet".
+			return info, fmt.Errorf("repository not found or not public (this is expected while the repo is private)")
+		}
+		return info, fmt.Errorf("github api returned %d", resp.StatusCode)
+	}
+
+	var rel struct {
+		TagName string `json:"tag_name"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return info, err
+	}
+
+	info.LatestVersion = rel.TagName
+	info.ReleaseURL = rel.HTMLURL
+	info.Available = isNewerVersion(rel.TagName, Version)
+	return info, nil
+}
+
+// isNewerVersion does a simple numeric major.minor.patch comparison of
+// "vX.Y.Z"-style tags. Not a full semver implementation (no
+// prerelease/build-metadata handling), Specter's own tags are plain
+// vX.Y.Z, so this is deliberately kept minimal rather than pulling in a
+// semver dependency for something this narrow.
+func isNewerVersion(latest, current string) bool {
+	lp := parseVersion(latest)
+	cp := parseVersion(current)
+	for i := 0; i < 3; i++ {
+		if lp[i] != cp[i] {
+			return lp[i] > cp[i]
+		}
+	}
+	return false
+}
+
+func parseVersion(v string) [3]int {
+	v = strings.TrimPrefix(v, "v")
+	parts := strings.SplitN(v, ".", 3)
+	var out [3]int
+	for i := 0; i < 3 && i < len(parts); i++ {
+		n, _ := strconv.Atoi(parts[i])
+		out[i] = n
+	}
+	return out
+}
+SPECTER_EOF_0
+
+cat > "frontend/src/main.ts" << 'SPECTER_EOF_1'
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import * as monaco from 'monaco-editor';
@@ -527,13 +643,6 @@ function createTerminalForTab(tab: Tab) {
       disconnectTab(tab);
       return false;
     }
-    if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
-      // Not plain Ctrl+B: that's tmux's default prefix key, binding it
-      // globally would break every tmux user's workflow the moment
-      // they're inside a session.
-      toggleSidebar();
-      return false;
-    }
     if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
       navigator.clipboard.readText().then((text) => {
         if (tab.mode === 'local' && tab.backendId) App.WriteLocalTerminal(tab.backendId, text);
@@ -589,21 +698,19 @@ const editor = monaco.editor.create(document.getElementById('editor')!, {
   automaticLayout: true,
 });
 
-function toggleEditorPane() {
-  const app = document.getElementById('app')!;
-  app.style.gridTemplateColumns = '';
+document.getElementById('editor-close')!.addEventListener('click', () => {
+  document.getElementById('app')!.style.gridTemplateColumns = '';
   currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
-  const collapsed = app.classList.toggle('editor-collapsed');
-  document.getElementById('editor-expand-btn')!.style.display = collapsed ? 'flex' : 'none';
+  document.getElementById('app')!.classList.toggle('editor-collapsed');
   refitActiveTerminal();
-}
-
-document.getElementById('editor-close')!.addEventListener('click', toggleEditorPane);
-document.getElementById('editor-expand-btn')!.addEventListener('click', toggleEditorPane);
+});
 
 document.getElementById('menu-toggle-editor')!.addEventListener('click', () => {
   closeAllMenus();
-  toggleEditorPane();
+  document.getElementById('app')!.style.gridTemplateColumns = '';
+  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
+  document.getElementById('app')!.classList.toggle('editor-collapsed');
+  refitActiveTerminal();
 });
 
 
@@ -616,13 +723,6 @@ async function openRemoteFile(sessionId: string, path: string) {
   openFileSessionId = sessionId;
   document.getElementById('editor-path')!.textContent = path;
   document.getElementById('editor-close')!.style.display = 'inline';
-  // The editor pane now defaults to collapsed (nothing to show until a
-  // file's actually open), so opening one needs to explicitly restore
-  // it, otherwise the content loads into Monaco invisibly behind a
-  // hidden pane.
-  document.getElementById('app')!.classList.remove('editor-collapsed');
-  document.getElementById('editor-expand-btn')!.style.display = 'none';
-  refitActiveTerminal();
   const ext = path.split('.').pop() ?? '';
   const langMap: Record<string, string> = {
     go: 'go', hs: 'haskell', js: 'javascript', ts: 'typescript', json: 'json', md: 'markdown',
@@ -1783,17 +1883,6 @@ function checkCapsLock(e: KeyboardEvent) {
 
 document.addEventListener('keydown', checkCapsLock);
 
-document.addEventListener('keydown', (e) => {
-  // Global fallback for when no terminal has focus (the "No session
-  // yet" landing screen, sidebar search box, etc.), the per-terminal
-  // version above only fires while an xterm instance actually has
-  // focus. Same Ctrl+Shift+B, not plain Ctrl+B (tmux's prefix key).
-  if (e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
-    e.preventDefault();
-    toggleSidebar();
-  }
-});
-
 document.addEventListener('keyup', checkCapsLock);
 
 document.getElementById('password')!.addEventListener('focus', () => {
@@ -1833,7 +1922,6 @@ authRadios.forEach((radio) => {
 
 // --- Init: start with one pending tab ---
 document.getElementById('app')!.classList.add('editor-collapsed');
-document.getElementById('editor-expand-btn')!.style.display = 'flex';
 let remoteFilesCollapsed = false;
 document.getElementById('remote-files-header')!.addEventListener('click', () => {
   remoteFilesCollapsed = !remoteFilesCollapsed;
@@ -2099,19 +2187,13 @@ document.getElementById('menu-new-folder')!.addEventListener('click', () => {
 });
 
 // View menu
-function toggleSidebar() {
-  document.getElementById('app')!.style.gridTemplateColumns = '';
-  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
-  const collapsed = document.getElementById('app')!.classList.toggle('sidebar-collapsed');
-  document.getElementById('sidebar-expand-btn')!.style.display = collapsed ? 'flex' : 'none';
-  refitActiveTerminal();
-}
 document.getElementById('menu-toggle-sidebar')!.addEventListener('click', () => {
   closeAllMenus();
-  toggleSidebar();
+  document.getElementById('app')!.style.gridTemplateColumns = '';
+  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
+  document.getElementById('app')!.classList.toggle('sidebar-collapsed');
+  refitActiveTerminal();
 });
-document.getElementById('sidebar-collapse-btn')!.addEventListener('click', toggleSidebar);
-document.getElementById('sidebar-expand-btn')!.addEventListener('click', toggleSidebar);
 
 // Tools menu: platform-aware, hide Command Prompt/PowerShell on non-Windows
 App.GetPlatform().then((platform) => {
@@ -2135,7 +2217,6 @@ document.getElementById('menu-tool-powershell')!.addEventListener('click', () =>
 document.getElementById('menu-tool-text-editor')!.addEventListener('click', () => {
   closeAllMenus();
   document.getElementById('app')!.classList.remove('editor-collapsed');
-  document.getElementById('editor-expand-btn')!.style.display = 'none';
   openFilePath = null;
   openFileSessionId = null;
   document.getElementById('editor-path')!.textContent = 'Untitled';
@@ -2180,3 +2261,5 @@ setupPaneResize('resize-sidebar', 0, 150);
 setupPaneResize('resize-editor', 2, 200);
 
 renderSessionList();renderSessionList();
+SPECTER_EOF_1
+

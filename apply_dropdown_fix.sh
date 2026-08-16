@@ -1,3 +1,8 @@
+#!/usr/bin/env bash
+# Run from the root of your Specter repo.
+set -euo pipefail
+
+cat > "frontend/src/main.ts" << 'SPECTER_EOF_MAINTS'
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import * as monaco from 'monaco-editor';
@@ -24,7 +29,7 @@ import '@fontsource/victor-mono/400.css';
 import '@fontsource/victor-mono/700.css';
 import '@fontsource/ubuntu-mono/400.css';
 import '@fontsource/ubuntu-mono/700.css';
-import type { RemoteFile, ConnectRequest, SessionProfile, SessionGroup, SessionClosedEvent, Settings, UpdateInfo } from '../wailsjs.d.ts';
+import type { RemoteFile, ConnectRequest, SessionProfile, SessionGroup, SessionClosedEvent, Settings } from '../wailsjs.d.ts';
 
 type ThemeName = 'dark' | 'light';
 
@@ -152,11 +157,9 @@ function wallpaperActive(): boolean {
 }
 
 // The palette actually applied to xterm: the chosen preset, with its
-// background swapped for transparent whenever a wallpaper is active, so
-// xterm's own canvas rendering (which paints an opaque per-cell
-// background from this value) doesn't paint over the wallpaper image
-// sitting on the viewport underneath it. Text keeps the palette's
-// normal foreground/ANSI colors.
+// background swapped for transparent whenever a wallpaper is active so
+// the image (painted on #terminal-wallpaper, behind the tab containers)
+// shows through. Text keeps the palette's normal foreground/ANSI colors.
 function activeXtermTheme(): Record<string, string> {
   const base = TERMINAL_COLOR_SCHEMES[currentColorScheme()];
   if (!wallpaperActive()) return base;
@@ -190,45 +193,22 @@ function applyFont(fontId: string) {
   refitActiveTerminal();
 }
 
-// Renders the wallpaper as each terminal's own .xterm-viewport
-// background-image (a dark tint layered via linear-gradient in the same
-// background-image stack, alongside the actual photo) rather than a
-// separate absolutely-positioned div with a transparent viewport
-// underneath. The old approach required making .xterm-viewport's own
-// background-color fully transparent, which turned out to break its
-// native scrollbar entirely (mouse wheel AND direct thumb-drag both
-// stopped working, confirmed via testing on real hardware): a real
-// WebKit-family rendering quirk with transparent scrollable containers,
-// unrelated to the wallpaper image itself. This sidesteps it completely:
-// background-image always paints above background-color in CSS, so
-// xterm's own background-color never needs to be touched at all. As a
-// side effect, this also eliminates the earlier "wallpaper bleeds
-// through the landing screen" bug, there's no longer a floating div
-// that could leak, only per-tab viewports that only exist once a real
-// terminal is actually created.
-function wallpaperBackgroundImage(): string {
-  if (!appSettings.wallpaperDataUrl) return '';
-  const opacity = appSettings.wallpaperOpacity ?? 0.15;
-  const dim = 1 - opacity;
-  return `linear-gradient(rgba(0,0,0,${dim}), rgba(0,0,0,${dim})), url("${appSettings.wallpaperDataUrl}")`;
-}
-
-function applyWallpaperToTab(tab: Tab) {
-  if (!tab.term?.element) return;
-  const viewport = tab.term.element.querySelector('.xterm-viewport') as HTMLElement | null;
-  if (!viewport) return;
-  const bg = wallpaperBackgroundImage();
-  if (bg) {
-    viewport.style.backgroundImage = bg;
-    viewport.style.backgroundSize = 'cover';
-    viewport.style.backgroundPosition = 'center';
-  } else {
-    viewport.style.backgroundImage = '';
-  }
-}
-
 function applyWallpaperVisual() {
-  for (const tab of tabs.values()) applyWallpaperToTab(tab);
+  const el = document.getElementById('terminal-wallpaper')!;
+  // Only actually show it if the active tab has real content behind it;
+  // the wallpaper div lives inside #terminal, a sibling of the "No
+  // session yet" landing screen, so it must stay hidden while that's
+  // showing or it bleeds through the sliver #terminal still occupies.
+  const activeTab = activeTabId ? tabs.get(activeTabId) : null;
+  const shouldShow = !!appSettings.wallpaperDataUrl && activeTab?.mode !== 'pending';
+  if (shouldShow) {
+    el.style.backgroundImage = `url("${appSettings.wallpaperDataUrl}")`;
+    el.style.opacity = String((appSettings.wallpaperOpacity ?? 0.15));
+    el.style.display = 'block';
+  } else {
+    el.style.backgroundImage = '';
+    el.style.display = 'none';
+  }
   document.getElementById('wallpaper-opacity-row')!.style.display = appSettings.wallpaperPath ? 'flex' : 'none';
   document.getElementById('wallpaper-clear-row')!.style.display = appSettings.wallpaperPath ? 'flex' : 'none';
   refreshAllTerminalThemes();
@@ -418,6 +398,12 @@ function switchToTab(id: string) {
     (el as HTMLElement).style.display = 'none';
   });
   document.getElementById('tab-landing')!.style.display = tab.mode === 'pending' ? 'flex' : 'none';
+  // SPE-61 wallpaper lives inside #terminal, a sibling of #tab-landing;
+  // without this, both compete for space in the flex layout and the
+  // wallpaper peeks through the sliver #terminal still occupies while
+  // the "No session yet" landing screen is showing. applyWallpaperVisual
+  // itself checks the now-updated activeTabId/tab.mode.
+  applyWallpaperVisual();
 
   if (tab.container) {
     tab.container.style.display = 'block';
@@ -527,13 +513,6 @@ function createTerminalForTab(tab: Tab) {
       disconnectTab(tab);
       return false;
     }
-    if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
-      // Not plain Ctrl+B: that's tmux's default prefix key, binding it
-      // globally would break every tmux user's workflow the moment
-      // they're inside a session.
-      toggleSidebar();
-      return false;
-    }
     if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
       navigator.clipboard.readText().then((text) => {
         if (tab.mode === 'local' && tab.backendId) App.WriteLocalTerminal(tab.backendId, text);
@@ -565,7 +544,6 @@ function createTerminalForTab(tab: Tab) {
   tab.term = term;
   tab.fitAddon = fitAddon;
   tab.container = container;
-  applyWallpaperToTab(tab);
 }
 
 let resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -589,21 +567,19 @@ const editor = monaco.editor.create(document.getElementById('editor')!, {
   automaticLayout: true,
 });
 
-function toggleEditorPane() {
-  const app = document.getElementById('app')!;
-  app.style.gridTemplateColumns = '';
+document.getElementById('editor-close')!.addEventListener('click', () => {
+  document.getElementById('app')!.style.gridTemplateColumns = '';
   currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
-  const collapsed = app.classList.toggle('editor-collapsed');
-  document.getElementById('editor-expand-btn')!.style.display = collapsed ? 'flex' : 'none';
+  document.getElementById('app')!.classList.toggle('editor-collapsed');
   refitActiveTerminal();
-}
-
-document.getElementById('editor-close')!.addEventListener('click', toggleEditorPane);
-document.getElementById('editor-expand-btn')!.addEventListener('click', toggleEditorPane);
+});
 
 document.getElementById('menu-toggle-editor')!.addEventListener('click', () => {
   closeAllMenus();
-  toggleEditorPane();
+  document.getElementById('app')!.style.gridTemplateColumns = '';
+  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
+  document.getElementById('app')!.classList.toggle('editor-collapsed');
+  refitActiveTerminal();
 });
 
 
@@ -616,13 +592,6 @@ async function openRemoteFile(sessionId: string, path: string) {
   openFileSessionId = sessionId;
   document.getElementById('editor-path')!.textContent = path;
   document.getElementById('editor-close')!.style.display = 'inline';
-  // The editor pane now defaults to collapsed (nothing to show until a
-  // file's actually open), so opening one needs to explicitly restore
-  // it, otherwise the content loads into Monaco invisibly behind a
-  // hidden pane.
-  document.getElementById('app')!.classList.remove('editor-collapsed');
-  document.getElementById('editor-expand-btn')!.style.display = 'none';
-  refitActiveTerminal();
   const ext = path.split('.').pop() ?? '';
   const langMap: Record<string, string> = {
     go: 'go', hs: 'haskell', js: 'javascript', ts: 'typescript', json: 'json', md: 'markdown',
@@ -1783,17 +1752,6 @@ function checkCapsLock(e: KeyboardEvent) {
 
 document.addEventListener('keydown', checkCapsLock);
 
-document.addEventListener('keydown', (e) => {
-  // Global fallback for when no terminal has focus (the "No session
-  // yet" landing screen, sidebar search box, etc.), the per-terminal
-  // version above only fires while an xterm instance actually has
-  // focus. Same Ctrl+Shift+B, not plain Ctrl+B (tmux's prefix key).
-  if (e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
-    e.preventDefault();
-    toggleSidebar();
-  }
-});
-
 document.addEventListener('keyup', checkCapsLock);
 
 document.getElementById('password')!.addEventListener('focus', () => {
@@ -1833,7 +1791,6 @@ authRadios.forEach((radio) => {
 
 // --- Init: start with one pending tab ---
 document.getElementById('app')!.classList.add('editor-collapsed');
-document.getElementById('editor-expand-btn')!.style.display = 'flex';
 let remoteFilesCollapsed = false;
 document.getElementById('remote-files-header')!.addEventListener('click', () => {
   remoteFilesCollapsed = !remoteFilesCollapsed;
@@ -1890,49 +1847,6 @@ document.getElementById('wallpaper-clear')!.addEventListener('click', () => {
 });
 
 loadSettingsAndApply();
-
-// Check-for-updates (not auto-update): one GitHub releases API check on
-// launch, dismissible per-version so it doesn't nag every time once
-// acknowledged, re-appears if a further newer version comes out later.
-// manual=true (from the Settings menu item) always shows a result, even
-// "you're up to date", and ignores any prior dismissal, since an
-// explicit click should never appear to do nothing.
-async function checkForUpdate(manual = false) {
-  let info: UpdateInfo;
-  try {
-    info = await App.CheckForUpdate();
-  } catch (err) {
-    if (manual) alert(`Could not check for updates: ${err}`);
-    return;
-  }
-  if (!info.available) {
-    if (manual) alert(`You're up to date (${info.currentVersion}).`);
-    return;
-  }
-  if (!manual && localStorage.getItem('specter-update-dismissed') === info.latestVersion) return;
-
-  const banner = document.getElementById('update-banner')!;
-  document.getElementById('update-banner-text')!.textContent =
-    `A new version of Specter is available: ${info.latestVersion} (you're on ${info.currentVersion})`;
-  banner.style.display = 'flex';
-
-  document.getElementById('update-banner-download')!.addEventListener('click', () => {
-    runtime.BrowserOpenURL(info.releaseUrl);
-  });
-  document.getElementById('update-banner-dismiss')!.addEventListener('click', () => {
-    localStorage.setItem('specter-update-dismissed', info.latestVersion);
-    banner.style.display = 'none';
-  });
-}
-checkForUpdate();
-
-App.GetVersion().then((v) => {
-  document.getElementById('menu-version')!.textContent = v === 'dev' ? '(dev build)' : v;
-});
-document.getElementById('menu-check-updates')!.addEventListener('click', () => {
-  closeAllMenus();
-  checkForUpdate(true);
-});
 
 const osc52Toggle = document.getElementById('osc52-toggle') as HTMLInputElement;
 osc52Toggle.checked = osc52Enabled;
@@ -2099,19 +2013,13 @@ document.getElementById('menu-new-folder')!.addEventListener('click', () => {
 });
 
 // View menu
-function toggleSidebar() {
-  document.getElementById('app')!.style.gridTemplateColumns = '';
-  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
-  const collapsed = document.getElementById('app')!.classList.toggle('sidebar-collapsed');
-  document.getElementById('sidebar-expand-btn')!.style.display = collapsed ? 'flex' : 'none';
-  refitActiveTerminal();
-}
 document.getElementById('menu-toggle-sidebar')!.addEventListener('click', () => {
   closeAllMenus();
-  toggleSidebar();
+  document.getElementById('app')!.style.gridTemplateColumns = '';
+  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
+  document.getElementById('app')!.classList.toggle('sidebar-collapsed');
+  refitActiveTerminal();
 });
-document.getElementById('sidebar-collapse-btn')!.addEventListener('click', toggleSidebar);
-document.getElementById('sidebar-expand-btn')!.addEventListener('click', toggleSidebar);
 
 // Tools menu: platform-aware, hide Command Prompt/PowerShell on non-Windows
 App.GetPlatform().then((platform) => {
@@ -2135,7 +2043,6 @@ document.getElementById('menu-tool-powershell')!.addEventListener('click', () =>
 document.getElementById('menu-tool-text-editor')!.addEventListener('click', () => {
   closeAllMenus();
   document.getElementById('app')!.classList.remove('editor-collapsed');
-  document.getElementById('editor-expand-btn')!.style.display = 'none';
   openFilePath = null;
   openFileSessionId = null;
   document.getElementById('editor-path')!.textContent = 'Untitled';
@@ -2180,3 +2087,5 @@ setupPaneResize('resize-sidebar', 0, 150);
 setupPaneResize('resize-editor', 2, 200);
 
 renderSessionList();renderSessionList();
+SPECTER_EOF_MAINTS
+

@@ -1,3 +1,8 @@
+#!/usr/bin/env bash
+# Run from the root of your Specter repo.
+set -euo pipefail
+
+cat > "frontend/index.html" << 'SPECTER_EOF_INDEXHTML'
 <!doctype html>
 <html lang="en">
 <head>
@@ -335,3 +340,5 @@
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>
+SPECTER_EOF_INDEXHTML
+

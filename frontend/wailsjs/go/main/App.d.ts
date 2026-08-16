@@ -3,6 +3,8 @@
 import {main} from '../models';
 import {config} from '../models';
 
+export function CheckForUpdate():Promise<main.UpdateInfo>;
+
 export function CloseLocalTerminal(arg1:string):Promise<void>;
 
 export function CloseSSH(arg1:string):Promise<void>;
@@ -22,6 +24,8 @@ export function GetClipboardText():Promise<string>;
 export function GetPlatform():Promise<string>;
 
 export function GetSettings():Promise<config.Settings>;
+
+export function GetVersion():Promise<string>;
 
 export function ListGroups():Promise<Array<config.SessionGroup>>;
 
