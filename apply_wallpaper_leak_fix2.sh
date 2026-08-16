@@ -1,3 +1,8 @@
+#!/usr/bin/env bash
+# Run from the root of your Specter repo.
+set -euo pipefail
+
+cat > "frontend/src/main.ts" << 'SPECTER_EOF_MAINTS'
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import * as monaco from 'monaco-editor';
@@ -1055,12 +1060,7 @@ let sessionSearchQuery = '';
 const collapsedGroups = new Set<string>();
 let foldersInitialized = false;
 let recentCollapsed = true;
-// SPE-64: defaults OFF. OSC 52 lets whatever's running on the remote
-// end write directly to the local OS clipboard with zero confirmation,
-// including from a host you haven't decided to trust yet, the exact
-// TOFU moment Specter's own host-key verification exists to gate.
-// Opt-in via Settings for anyone who wants the convenience.
-let osc52Enabled = localStorage.getItem('specter-osc52') === 'on';
+let osc52Enabled = localStorage.getItem('specter-osc52') !== 'off';
 let copyOnSelectEnabled = localStorage.getItem('specter-copy-on-select') === 'on';
 let rightClickPasteEnabled = localStorage.getItem('specter-rclick-paste') !== 'off';
 let highlightEnabled = localStorage.getItem('specter-highlight') !== 'off';
@@ -1293,36 +1293,6 @@ async function renderSessionList() {
 // SPE-63: masked passphrase entry, replacing window.prompt() which has
 // no password mode and showed the passphrase in cleartext on-screen
 // while typing. Mirrors showTrustPrompt's modal pattern below.
-// SPE-65: soft warning for a group/world-readable key file, real
-// OpenSSH refuses to use one outright, Specter warns but lets the user
-// proceed, since it's their key and Specter didn't create the file.
-function showKeyPermWarning(opts: { path: string; mode: string; onProceed: () => void; onCancel: () => void }) {
-  const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:1000;';
-  const box = document.createElement('div');
-  box.style.cssText = 'background:#1e1e1e;border:2px solid #d29922;border-radius:8px;padding:24px;max-width:480px;color:#ddd;font-family:sans-serif;';
-  box.innerHTML = `
-    <h3 style="margin-top:0;color:#d29922;">Key file permissions are too open</h3>
-    <p><strong>Path:</strong> <code style="word-break:break-all;">${opts.path}</code></p>
-    <p><strong>Mode:</strong> <code>${opts.mode}</code></p>
-    <p>This private key is readable by other users on this system. OpenSSH itself would refuse to use a key like this. You can proceed anyway, but consider running <code>chmod 600 ${opts.path}</code>.</p>
-  `;
-  const btnRow = document.createElement('div');
-  btnRow.style.cssText = 'display:flex;gap:8px;margin-top:16px;';
-  const cancelBtn = document.createElement('button');
-  cancelBtn.textContent = 'Cancel';
-  cancelBtn.onclick = () => { document.body.removeChild(overlay); opts.onCancel(); };
-  const proceedBtn = document.createElement('button');
-  proceedBtn.textContent = 'Use it anyway';
-  proceedBtn.style.cssText = 'background:#d29922;color:#1e1e1e;';
-  proceedBtn.onclick = () => { document.body.removeChild(overlay); opts.onProceed(); };
-  btnRow.appendChild(cancelBtn);
-  btnRow.appendChild(proceedBtn);
-  box.appendChild(btnRow);
-  overlay.appendChild(box);
-  document.body.appendChild(overlay);
-}
-
 function showPassphrasePrompt(opts: { onSubmit: (passphrase: string) => void; onCancel: () => void }) {
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:1000;';
@@ -1461,15 +1431,6 @@ async function reconnectSSH(tab: Tab, req: ConnectRequest): Promise<void> {
     return;
   }
 
-  if (result.needsKeyPermConfirm) {
-    showKeyPermWarning({
-      path: result.keyPermPath!, mode: result.keyPermMode!,
-      onProceed: () => { reconnectSSH(tab, { ...req, ignoreKeyPermWarning: true }); },
-      onCancel: () => showDisconnectPanel(tab, 'Reconnect cancelled.'),
-    });
-    return;
-  }
-
   if (result.needsTrust) {
     showTrustPrompt({
       host: result.host!, fingerprint: result.fingerprint!, keyType: result.keyType!, changed: !!result.changed,
@@ -1512,15 +1473,6 @@ async function connectActiveTab(req: ConnectRequest) {
   if (result.needsPassphrase) {
     showPassphrasePrompt({
       onSubmit: (passphrase) => { connectActiveTab({ ...req, passphrase }); },
-      onCancel: () => { tab.status = 'disconnected'; renderTabBar(); },
-    });
-    return;
-  }
-
-  if (result.needsKeyPermConfirm) {
-    showKeyPermWarning({
-      path: result.keyPermPath!, mode: result.keyPermMode!,
-      onProceed: () => { connectActiveTab({ ...req, ignoreKeyPermWarning: true }); },
       onCancel: () => { tab.status = 'disconnected'; renderTabBar(); },
     });
     return;
@@ -2026,3 +1978,5 @@ setupPaneResize('resize-sidebar', 0, 150);
 setupPaneResize('resize-editor', 2, 200);
 
 renderSessionList();renderSessionList();
+SPECTER_EOF_MAINTS
+

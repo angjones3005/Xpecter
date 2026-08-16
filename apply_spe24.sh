@@ -1,3 +1,9 @@
+#!/usr/bin/env bash
+# Run from the root of your Specter repo.
+set -euo pipefail
+
+mkdir -p ".github/workflows"
+cat > ".github/workflows/release.yml" << 'SPECTER_EOF_0'
 name: Release
 
 on:
@@ -95,3 +101,80 @@ jobs:
         with:
           files: artifacts/*
           generate_release_notes: true
+SPECTER_EOF_0
+
+mkdir -p ".github/workflows"
+cat > ".github/workflows/ci.yml" << 'SPECTER_EOF_1'
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  go-checks:
+    name: Go checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt check
+        run: |
+          fmt_out=$(gofmt -l .)
+          if [ -n "$fmt_out" ]; then
+            echo "The following files are not gofmt'd:"
+            echo "$fmt_out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./backend/...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.6.2
+          args: ./backend/...
+
+      - name: go build (non-GUI packages)
+        # Skips the main Wails package here since it needs GTK/webkit system
+        # deps to compile; those are only installed in the release workflow's
+        # full cross-platform build. This still builds and type-checks
+        # everything under backend/.
+        run: go build ./backend/...
+
+  frontend-checks:
+    name: Frontend checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+SPECTER_EOF_1
+

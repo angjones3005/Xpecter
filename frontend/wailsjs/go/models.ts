@@ -84,6 +84,7 @@ export namespace main {
 	    password?: string;
 	    keyPath?: string;
 	    passphrase?: string;
+	    ignoreKeyPermWarning?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new ConnectRequest(source);
@@ -97,6 +98,7 @@ export namespace main {
 	        this.password = source["password"];
 	        this.keyPath = source["keyPath"];
 	        this.passphrase = source["passphrase"];
+	        this.ignoreKeyPermWarning = source["ignoreKeyPermWarning"];
 	    }
 	}
 	export class ConnectResult {
@@ -107,6 +109,9 @@ export namespace main {
 	    fingerprint?: string;
 	    keyType?: string;
 	    needsPassphrase?: boolean;
+	    needsKeyPermConfirm?: boolean;
+	    keyPermPath?: string;
+	    keyPermMode?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new ConnectResult(source);
@@ -121,6 +126,9 @@ export namespace main {
 	        this.fingerprint = source["fingerprint"];
 	        this.keyType = source["keyType"];
 	        this.needsPassphrase = source["needsPassphrase"];
+	        this.needsKeyPermConfirm = source["needsKeyPermConfirm"];
+	        this.keyPermPath = source["keyPermPath"];
+	        this.keyPermMode = source["keyPermMode"];
 	    }
 	}
 	export class RemoteFile {

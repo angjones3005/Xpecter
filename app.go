@@ -158,6 +158,9 @@ type ConnectRequest struct {
 	Password   string `json:"password,omitempty"`
 	KeyPath    string `json:"keyPath,omitempty"`
 	Passphrase string `json:"passphrase,omitempty"`
+	// IgnoreKeyPermWarning: user already saw and accepted the SPE-65
+	// KeyPermissionWarning once for this attempt, skip the check.
+	IgnoreKeyPermWarning bool `json:"ignoreKeyPermWarning,omitempty"`
 }
 
 type ConnectResult struct {
@@ -168,16 +171,31 @@ type ConnectResult struct {
 	Fingerprint     string `json:"fingerprint,omitempty"`
 	KeyType         string `json:"keyType,omitempty"`
 	NeedsPassphrase bool   `json:"needsPassphrase,omitempty"`
+	// NeedsKeyPermConfirm (SPE-65): the selected key file is
+	// group/world-readable. Soft warning, not a hard block, retry with
+	// IgnoreKeyPermWarning once the user's explicitly acknowledged it.
+	NeedsKeyPermConfirm bool   `json:"needsKeyPermConfirm,omitempty"`
+	KeyPermPath         string `json:"keyPermPath,omitempty"`
+	KeyPermMode         string `json:"keyPermMode,omitempty"`
 }
 
 func (a *App) Connect(req ConnectRequest) (ConnectResult, error) {
 	sess, err := sshclient.Dial(sshclient.Config{
 		Host: req.Host, Port: req.Port, User: req.User,
 		Password: req.Password, KeyPath: req.KeyPath, Passphrase: req.Passphrase,
+		IgnoreKeyPermWarning: req.IgnoreKeyPermWarning,
 	})
 	if err != nil {
 		if errors.Is(err, sshclient.ErrPassphraseRequired) {
 			return ConnectResult{NeedsPassphrase: true}, nil
+		}
+		var permWarning *sshclient.KeyPermissionWarning
+		if errors.As(err, &permWarning) {
+			return ConnectResult{
+				NeedsKeyPermConfirm: true,
+				KeyPermPath:         permWarning.Path,
+				KeyPermMode:         fmt.Sprintf("%04o", permWarning.Mode.Perm()),
+			}, nil
 		}
 		var unknown *sshclient.HostKeyUnknownError
 		if errors.As(err, &unknown) {

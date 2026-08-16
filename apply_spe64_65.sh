@@ -1,3 +1,1423 @@
+#!/usr/bin/env bash
+# Run from the root of your Specter repo.
+set -euo pipefail
+
+cat > "app.go" << 'SPECTER_EOF_0'
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"mime"
+	"os"
+	"path/filepath"
+
+	"specter/backend/config"
+	"specter/backend/pty"
+	"specter/backend/serialclient"
+	"specter/backend/sftpclient"
+	"specter/backend/sshclient"
+
+	"github.com/wailsapp/wails/v2/pkg/runtime"
+)
+
+type App struct {
+	ctx      context.Context
+	sessions map[string]*sshclient.Session
+	locals   map[string]*pty.LocalTerminal
+	serials  map[string]*serialclient.Session
+}
+
+func NewApp() *App {
+	return &App{
+		sessions: make(map[string]*sshclient.Session),
+		locals:   make(map[string]*pty.LocalTerminal),
+		serials:  make(map[string]*serialclient.Session),
+	}
+}
+
+func (a *App) startup(ctx context.Context) { a.ctx = ctx }
+
+func (a *App) shutdown(ctx context.Context) {
+	for _, s := range a.sessions {
+		s.Close()
+	}
+	for _, l := range a.locals {
+		l.Close()
+	}
+	for _, sc := range a.serials {
+		sc.Close()
+	}
+}
+
+// SessionClosedEvent is emitted as "ssh:closed:<id>" / "serial:closed:<id>"
+// whenever a session's read loop stops unexpectedly (SPE-59). Deliberate
+// closes (the user closing the tab) never reach the frontend as an event,
+// since there's nothing useful to tell them at that point.
+type SessionClosedEvent struct {
+	EOF     bool   `json:"eof"`
+	Message string `json:"message"`
+}
+
+// --- Local terminals (one per tab) ---
+
+// StartLocalTerminal spawns a new local shell PTY and returns its ID.
+// Output streams to the frontend via the "local:data:<id>" event, matching
+// the "ssh:data:<id>" pattern already used for SSH sessions.
+func (a *App) StartLocalTerminal(shell string) (string, error) {
+	id := newID()
+	lt, err := pty.New(func(data []byte) {
+		runtime.EventsEmit(a.ctx, "local:data:"+id, string(data))
+	}, shell)
+	if err != nil {
+		return "", err
+	}
+	a.locals[id] = lt
+	return id, nil
+}
+
+func (a *App) WriteLocalTerminal(id string, data string) error {
+	lt, ok := a.locals[id]
+	if !ok {
+		return fmt.Errorf("no such local terminal: %s", id)
+	}
+	return lt.Write([]byte(data))
+}
+
+func (a *App) ResizeLocalTerminal(id string, cols, rows int) error {
+	lt, ok := a.locals[id]
+	if !ok {
+		return fmt.Errorf("no such local terminal: %s", id)
+	}
+	return lt.Resize(cols, rows)
+}
+
+func (a *App) CloseLocalTerminal(id string) error {
+	lt, ok := a.locals[id]
+	if !ok {
+		return nil
+	}
+	delete(a.locals, id)
+	return lt.Close()
+}
+
+// --- Serial/COM port console (direct hardware console access) ---
+
+// ConnectSerial opens a serial port at the given baud rate (8N1, no flow
+// control) and returns a session ID, following the same one-per-tab
+// pattern as StartLocalTerminal.
+func (a *App) ConnectSerial(portName string, baud int) (string, error) {
+	id := newID()
+	sc, err := serialclient.Open(portName, baud, func(data []byte) {
+		runtime.EventsEmit(a.ctx, "serial:data:"+id, string(data))
+	}, func(reason serialclient.CloseReason) {
+		if reason.Deliberate {
+			return
+		}
+		runtime.EventsEmit(a.ctx, "serial:closed:"+id, SessionClosedEvent{
+			EOF:     reason.EOF,
+			Message: closeErrorMessage(reason.Err),
+		})
+	})
+	if err != nil {
+		return "", err
+	}
+	a.serials[id] = sc
+	return id, nil
+}
+
+func (a *App) WriteSerial(id string, data string) error {
+	sc, ok := a.serials[id]
+	if !ok {
+		return fmt.Errorf("no such serial session: %s", id)
+	}
+	return sc.Write([]byte(data))
+}
+
+func (a *App) CloseSerial(id string) error {
+	sc, ok := a.serials[id]
+	if !ok {
+		return nil
+	}
+	delete(a.serials, id)
+	return sc.Close()
+}
+
+// ListSerialPorts returns available serial port device paths for a
+// future port-picker UI (manual entry is used for now).
+func (a *App) ListSerialPorts() ([]string, error) {
+	return serialclient.ListPorts()
+}
+
+// --- SSH sessions ---
+
+type ConnectRequest struct {
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	User       string `json:"user"`
+	Password   string `json:"password,omitempty"`
+	KeyPath    string `json:"keyPath,omitempty"`
+	Passphrase string `json:"passphrase,omitempty"`
+	// IgnoreKeyPermWarning: user already saw and accepted the SPE-65
+	// KeyPermissionWarning once for this attempt, skip the check.
+	IgnoreKeyPermWarning bool `json:"ignoreKeyPermWarning,omitempty"`
+}
+
+type ConnectResult struct {
+	SessionID       string `json:"sessionId,omitempty"`
+	NeedsTrust      bool   `json:"needsTrust,omitempty"`
+	Changed         bool   `json:"changed,omitempty"`
+	Host            string `json:"host,omitempty"`
+	Fingerprint     string `json:"fingerprint,omitempty"`
+	KeyType         string `json:"keyType,omitempty"`
+	NeedsPassphrase bool   `json:"needsPassphrase,omitempty"`
+	// NeedsKeyPermConfirm (SPE-65): the selected key file is
+	// group/world-readable. Soft warning, not a hard block, retry with
+	// IgnoreKeyPermWarning once the user's explicitly acknowledged it.
+	NeedsKeyPermConfirm bool   `json:"needsKeyPermConfirm,omitempty"`
+	KeyPermPath         string `json:"keyPermPath,omitempty"`
+	KeyPermMode         string `json:"keyPermMode,omitempty"`
+}
+
+func (a *App) Connect(req ConnectRequest) (ConnectResult, error) {
+	sess, err := sshclient.Dial(sshclient.Config{
+		Host: req.Host, Port: req.Port, User: req.User,
+		Password: req.Password, KeyPath: req.KeyPath, Passphrase: req.Passphrase,
+		IgnoreKeyPermWarning: req.IgnoreKeyPermWarning,
+	})
+	if err != nil {
+		if errors.Is(err, sshclient.ErrPassphraseRequired) {
+			return ConnectResult{NeedsPassphrase: true}, nil
+		}
+		var permWarning *sshclient.KeyPermissionWarning
+		if errors.As(err, &permWarning) {
+			return ConnectResult{
+				NeedsKeyPermConfirm: true,
+				KeyPermPath:         permWarning.Path,
+				KeyPermMode:         fmt.Sprintf("%04o", permWarning.Mode.Perm()),
+			}, nil
+		}
+		var unknown *sshclient.HostKeyUnknownError
+		if errors.As(err, &unknown) {
+			return ConnectResult{
+				NeedsTrust: true, Changed: false,
+				Host: unknown.Host, Fingerprint: unknown.Fingerprint, KeyType: unknown.KeyType,
+			}, nil
+		}
+		var changed *sshclient.HostKeyChangedError
+		if errors.As(err, &changed) {
+			return ConnectResult{
+				NeedsTrust: true, Changed: true,
+				Host: changed.Host, Fingerprint: changed.NewFingerprint, KeyType: changed.KeyType,
+			}, nil
+		}
+		return ConnectResult{}, err
+	}
+
+	id := sess.ID()
+	a.sessions[id] = sess
+
+	err = sess.StartShell(func(data []byte) {
+		runtime.EventsEmit(a.ctx, "ssh:data:"+id, string(data))
+	}, func(reason sshclient.CloseReason) {
+		if reason.Deliberate {
+			return
+		}
+		runtime.EventsEmit(a.ctx, "ssh:closed:"+id, SessionClosedEvent{
+			EOF:     reason.EOF,
+			Message: closeErrorMessage(reason.Err),
+		})
+	})
+	if err != nil {
+		return ConnectResult{}, err
+	}
+
+	return ConnectResult{SessionID: id}, nil
+}
+
+// closeErrorMessage renders a CloseReason's error for display, matching
+// MobaXterm's "Remote side unexpectedly closed network connection"
+// framing for the clean-EOF case.
+func closeErrorMessage(err error) string {
+	if err == nil {
+		return "Session ended"
+	}
+	if errors.Is(err, io.EOF) {
+		return "Remote side closed the connection"
+	}
+	if errors.Is(err, os.ErrClosed) {
+		return "Session ended"
+	}
+	return err.Error()
+}
+
+func (a *App) TrustHost(host string) error {
+	return sshclient.TrustHost(host)
+}
+
+func (a *App) TrustHostDespiteChange(host string) error {
+	return sshclient.TrustHostDespiteChange(host)
+}
+
+// GetPlatform returns "windows", "darwin", or "linux", used by the
+// frontend Tools menu to show Command Prompt/PowerShell only on Windows.
+func (a *App) GetPlatform() string {
+	return runtime.Environment(a.ctx).Platform
+}
+
+// GetClipboardText reads the OS clipboard via Wails' native runtime,
+// bypassing the browser Clipboard API entirely. Some WebKitGTK builds
+// deny navigator.clipboard.readText() when triggered from a contextmenu
+// (right-click) event, even though the identical API call succeeds from
+// a keypress, this sidesteps that permission quirk completely.
+func (a *App) GetClipboardText() (string, error) {
+	return runtime.ClipboardGetText(a.ctx)
+}
+
+func (a *App) SelectKeyFile() (string, error) {
+	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Select SSH Private Key",
+	})
+}
+
+// SelectImageFile prompts for an image file, used by the wallpaper
+// picker (SPE-61). Returns "" (no error) if the user cancels.
+func (a *App) SelectImageFile() (string, error) {
+	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Select Terminal Wallpaper",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "Images (*.png;*.jpg;*.jpeg;*.gif;*.webp)", Pattern: "*.png;*.jpg;*.jpeg;*.gif;*.webp"},
+		},
+	})
+}
+
+// ReadImageFile reads an arbitrary local image path and returns it as a
+// data: URL, since the webview can't load arbitrary file:// paths
+// directly for security reasons. Used to render the wallpaper (SPE-61),
+// referenced by path in Settings rather than embedded there.
+func (a *App) ReadImageFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	mimeType := mime.TypeByExtension(filepath.Ext(path))
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
+}
+
+// SaveTextFile prompts for a destination path and writes content to it,
+// used by the disconnected-session panel's "Save output to file" action
+// (SPE-59, matching MobaXterm's "S" option). Returns "" (no error) if the
+// user cancels the dialog.
+func (a *App) SaveTextFile(defaultFilename string, content string) (string, error) {
+	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "Save Terminal Output",
+		DefaultFilename: defaultFilename,
+	})
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", nil
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// --- Terminal personalization (SPE-61) ---
+
+func (a *App) GetSettings() (config.Settings, error) {
+	return config.LoadSettings()
+}
+
+func (a *App) SaveSettings(s config.Settings) error {
+	return config.SaveSettings(s)
+}
+
+// --- Saved sessions ---
+
+func (a *App) ListSessions() ([]config.SessionProfile, error) {
+	return config.LoadSessions()
+}
+
+func (a *App) SaveSession(profile config.SessionProfile) error {
+	sessions, err := config.LoadSessions()
+	if err != nil {
+		return err
+	}
+	if profile.ID == "" {
+		profile.ID = newID()
+	}
+	replaced := false
+	for i, s := range sessions {
+		if s.ID == profile.ID {
+			sessions[i] = profile
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		sessions = append(sessions, profile)
+	}
+	return config.SaveSessions(sessions)
+}
+
+func (a *App) DeleteSession(id string) error {
+	sessions, err := config.LoadSessions()
+	if err != nil {
+		return err
+	}
+	kept := sessions[:0]
+	for _, s := range sessions {
+		if s.ID != id {
+			kept = append(kept, s)
+		}
+	}
+	return config.SaveSessions(kept)
+}
+
+// --- Session groups (folders) ---
+
+func (a *App) ListGroups() ([]config.SessionGroup, error) {
+	return config.LoadGroups()
+}
+
+// SaveGroup creates a new group, or updates one with a matching ID.
+func (a *App) SaveGroup(group config.SessionGroup) error {
+	groups, err := config.LoadGroups()
+	if err != nil {
+		return err
+	}
+	if group.ID == "" {
+		group.ID = newID()
+	}
+	replaced := false
+	for i, g := range groups {
+		if g.ID == group.ID {
+			groups[i] = group
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		groups = append(groups, group)
+	}
+	return config.SaveGroups(groups)
+}
+
+// DeleteGroup removes a group and ungroups any sessions inside it
+// (sets their GroupID back to empty) rather than deleting those sessions.
+func (a *App) DeleteGroup(id string) error {
+	groups, err := config.LoadGroups()
+	if err != nil {
+		return err
+	}
+	kept := groups[:0]
+	for _, g := range groups {
+		if g.ID != id {
+			kept = append(kept, g)
+		}
+	}
+	if err := config.SaveGroups(kept); err != nil {
+		return err
+	}
+
+	sessions, err := config.LoadSessions()
+	if err != nil {
+		return err
+	}
+	changed := false
+	for i, s := range sessions {
+		if s.GroupID == id {
+			sessions[i].GroupID = ""
+			changed = true
+		}
+	}
+	if changed {
+		return config.SaveSessions(sessions)
+	}
+	return nil
+}
+
+func newID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func (a *App) WriteSSH(id string, data string) error {
+	sess, ok := a.sessions[id]
+	if !ok {
+		return fmt.Errorf("no such session: %s", id)
+	}
+	return sess.Write([]byte(data))
+}
+
+func (a *App) ResizeSSH(id string, cols, rows int) error {
+	sess, ok := a.sessions[id]
+	if !ok {
+		return fmt.Errorf("no such session: %s", id)
+	}
+	return sess.Resize(cols, rows)
+}
+
+func (a *App) CloseSSH(id string) error {
+	sess, ok := a.sessions[id]
+	if !ok {
+		return nil
+	}
+	delete(a.sessions, id)
+	return sess.Close()
+}
+
+// --- SFTP / remote file editing ---
+
+type RemoteFile struct {
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	IsDir bool   `json:"isDir"`
+	Size  int64  `json:"size"`
+}
+
+func (a *App) ListRemoteDir(id string, path string) ([]RemoteFile, error) {
+	sess, ok := a.sessions[id]
+	if !ok {
+		return nil, fmt.Errorf("no such session: %s", id)
+	}
+	entries, err := sftpclient.ListDir(sess.SSHClient(), path)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RemoteFile, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, RemoteFile{Name: e.Name, Path: e.Path, IsDir: e.IsDir, Size: e.Size})
+	}
+	return out, nil
+}
+
+func (a *App) ReadRemoteFile(id string, path string) (string, error) {
+	sess, ok := a.sessions[id]
+	if !ok {
+		return "", fmt.Errorf("no such session: %s", id)
+	}
+	return sftpclient.ReadFile(sess.SSHClient(), path)
+}
+
+func (a *App) WriteRemoteFile(id string, path string, content string) error {
+	sess, ok := a.sessions[id]
+	if !ok {
+		return fmt.Errorf("no such session: %s", id)
+	}
+	return sftpclient.WriteFile(sess.SSHClient(), path, content)
+}
+
+// UploadRemoteFile writes a base64-encoded file to a remote path. Base64
+// is used because Wails bindings serialize over JSON, which requires
+// valid UTF-8 strings, arbitrary binary data (images, executables, etc.)
+// is not valid UTF-8 and would be corrupted if sent as a raw string.
+func (a *App) UploadRemoteFile(id string, path string, base64Content string) error {
+	sess, ok := a.sessions[id]
+	if !ok {
+		return fmt.Errorf("no such session: %s", id)
+	}
+	data, err := base64.StdEncoding.DecodeString(base64Content)
+	if err != nil {
+		return fmt.Errorf("invalid base64 upload payload: %w", err)
+	}
+	return sftpclient.UploadFile(sess.SSHClient(), path, data)
+}
+SPECTER_EOF_0
+
+cat > "backend/sshclient/sshclient.go" << 'SPECTER_EOF_1'
+// Package sshclient wraps golang.org/x/crypto/ssh to provide an
+// interactive shell session, with real host key verification against the
+// user's standard ~/.ssh/known_hosts file (no more InsecureIgnoreHostKey).
+package sshclient
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
+)
+
+var ErrPassphraseRequired = errors.New("private key is encrypted, passphrase required")
+
+type Config struct {
+	Host       string
+	Port       int
+	User       string
+	Password   string
+	KeyPath    string
+	Passphrase string
+	// IgnoreKeyPermWarning skips the KeyPermissionWarning check below,
+	// set only after the user has explicitly acknowledged it once
+	// (SPE-65). Specter didn't create the user's key file, so this is a
+	// soft warning with real user choice, not a hard block like OpenSSH
+	// itself does.
+	IgnoreKeyPermWarning bool
+}
+
+type Session struct {
+	id      string
+	client  *ssh.Client
+	sess    *ssh.Session
+	stdin   io.WriteCloser
+	closing atomic.Bool
+}
+
+// CloseReason distinguishes why a session's read loop stopped, so the
+// frontend can show an accurate message (SPE-59) instead of just going
+// quiet. Deliberate is set when Close() was called locally (tab closed by
+// the user); everything else is an unexpected drop the user should be
+// told about, since they may still be typing into a dead session.
+type CloseReason struct {
+	// Deliberate is true only when the user closed this session
+	// themselves (closing the tab). No frontend notification is needed
+	// in that case, the tab is already gone.
+	Deliberate bool
+	// EOF is true when the remote side cleanly closed the connection
+	// (io.EOF), matching MobaXterm's "Remote side unexpectedly closed
+	// network connection" case.
+	EOF bool
+	// Err holds the underlying error for anything that isn't a clean
+	// EOF, e.g. a network-level drop or timeout.
+	Err error
+}
+
+// HostKeyUnknownError means this host has never been seen before — not in
+// known_hosts at all. The frontend should show the fingerprint and, if the
+// user accepts, call TrustHost before retrying Connect.
+type HostKeyUnknownError struct {
+	Host        string
+	Fingerprint string
+	KeyType     string
+}
+
+func (e *HostKeyUnknownError) Error() string {
+	return fmt.Sprintf("unknown host key for %s (%s): %s", e.Host, e.KeyType, e.Fingerprint)
+}
+
+// HostKeyChangedError means the host IS in known_hosts, but presented a
+// different key than what's on record — the classic MITM signal. Requires
+// deliberate, explicit override (TrustHostDespiteChange), never silent.
+type HostKeyChangedError struct {
+	Host           string
+	NewFingerprint string
+	KeyType        string
+}
+
+func (e *HostKeyChangedError) Error() string {
+	return fmt.Sprintf("WARNING: host key for %s has CHANGED (%s): %s — this can mean the server was reconfigured, OR that you're being intercepted", e.Host, e.KeyType, e.NewFingerprint)
+}
+
+// KeyPermissionWarning means the selected private key file is
+// group/world-readable, the same condition real OpenSSH refuses to use
+// a key under. Specter treats it as a soft warning rather than a hard
+// block (SPE-65), since it didn't create this file and the user may
+// have a real reason it's set up this way, but they should know.
+type KeyPermissionWarning struct {
+	Path string
+	Mode os.FileMode
+}
+
+func (e *KeyPermissionWarning) Error() string {
+	return fmt.Sprintf("key file %s has overly permissive mode %04o (should not be group/world-readable)", e.Path, e.Mode.Perm())
+}
+
+// pendingKeys caches the offending public key by hostname between the
+// failed Connect attempt and the frontend's trust decision, so we don't
+// need to round-trip raw key bytes through the JS bridge.
+var (
+	pendingKeysMu sync.Mutex
+	pendingKeys   = map[string]pendingKey{}
+)
+
+// pendingKeyTTL bounds how long an abandoned trust prompt's key stays in
+// memory (SPE-65). Not a security issue, it's just the offending public
+// key plus a timestamp, but untidy to keep forever if a user closes the
+// app or navigates away without accepting or rejecting.
+const pendingKeyTTL = 10 * time.Minute
+
+// sweepExpiredPendingKeys drops entries older than pendingKeyTTL. Called
+// lazily whenever a new pending key is added rather than on a background
+// timer, no ticket goroutine needed for what's genuinely a minor cleanup.
+// Caller must hold pendingKeysMu.
+func sweepExpiredPendingKeys() {
+	cutoff := time.Now().Add(-pendingKeyTTL)
+	for host, pk := range pendingKeys {
+		if pk.at.Before(cutoff) {
+			delete(pendingKeys, host)
+		}
+	}
+}
+
+type pendingKey struct {
+	key  ssh.PublicKey
+	addr string
+	at   time.Time
+}
+
+func knownHostsPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "known_hosts")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		f, ferr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+		if ferr != nil {
+			return "", ferr
+		}
+		_ = f.Close()
+	}
+	return path, nil
+}
+
+func hostKeyCallback() (ssh.HostKeyCallback, error) {
+	path, err := knownHostsPath()
+	if err != nil {
+		return nil, err
+	}
+	base, err := knownhosts.New(path)
+	if err != nil {
+		return nil, err
+	}
+
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		err := base(hostname, remote, key)
+		if err == nil {
+			return nil
+		}
+
+		var keyErr *knownhosts.KeyError
+		if errors.As(err, &keyErr) {
+			pendingKeysMu.Lock()
+			sweepExpiredPendingKeys()
+			pendingKeys[hostname] = pendingKey{key: key, addr: remote.String(), at: time.Now()}
+			pendingKeysMu.Unlock()
+
+			fp := ssh.FingerprintSHA256(key)
+			if len(keyErr.Want) == 0 {
+				return &HostKeyUnknownError{Host: hostname, Fingerprint: fp, KeyType: key.Type()}
+			}
+			return &HostKeyChangedError{Host: hostname, NewFingerprint: fp, KeyType: key.Type()}
+		}
+		return err
+	}, nil
+}
+
+// TrustHost records a genuinely new host's key in known_hosts. Only valid
+// after a HostKeyUnknownError — call this once the user has confirmed the
+// fingerprint shown by the frontend.
+func TrustHost(hostname string) error {
+	return writeTrustedKey(hostname, false)
+}
+
+// TrustHostDespiteChange overwrites an existing, mismatched known_hosts
+// entry. Only valid after a HostKeyChangedError, and only after explicit,
+// deliberate user confirmation — this is the override for a potential MITM
+// warning, so the frontend must make this a distinctly harder action than
+// TrustHost's ordinary first-connect flow, not a one-click default.
+func TrustHostDespiteChange(hostname string) error {
+	return writeTrustedKey(hostname, true)
+}
+
+func writeTrustedKey(hostname string, replacing bool) error {
+	pendingKeysMu.Lock()
+	pk, ok := pendingKeys[hostname]
+	if ok {
+		delete(pendingKeys, hostname)
+	}
+	pendingKeysMu.Unlock()
+
+	if !ok {
+		return fmt.Errorf("no pending host key for %s (fingerprint may have expired, try connecting again)", hostname)
+	}
+
+	path, err := knownHostsPath()
+	if err != nil {
+		return err
+	}
+
+	if replacing {
+		if err := removeHostLines(path, hostname); err != nil {
+			return err
+		}
+	}
+
+	line := knownhosts.Line([]string{hostname}, pk.key)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(line + "\n"); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// removeHostLines strips existing known_hosts lines for hostname before a
+// changed-key override is written, avoiding a stale, conflicting entry.
+func removeHostLines(path, hostname string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(string(data), "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), hostname+" ") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return os.WriteFile(path, []byte(strings.Join(kept, "\n")), 0o600)
+}
+
+func Dial(cfg Config) (*Session, error) {
+	if cfg.Port == 0 {
+		cfg.Port = 22
+	}
+
+	var authMethods []ssh.AuthMethod
+	if cfg.KeyPath != "" {
+		if !cfg.IgnoreKeyPermWarning {
+			if info, err := os.Stat(cfg.KeyPath); err == nil {
+				if info.Mode().Perm()&0o077 != 0 {
+					return nil, &KeyPermissionWarning{Path: cfg.KeyPath, Mode: info.Mode()}
+				}
+			}
+			// A Stat failure here isn't fatal, os.ReadFile below will
+			// surface the real error (missing file, no permission to
+			// even stat it, etc.) with better context than this check would.
+		}
+		key, err := os.ReadFile(cfg.KeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("reading key: %w", err)
+		}
+		signer, err := ssh.ParsePrivateKey(key)
+		if err != nil {
+			var passErr *ssh.PassphraseMissingError
+			if errors.As(err, &passErr) {
+				if cfg.Passphrase == "" {
+					return nil, ErrPassphraseRequired
+				}
+				signer, err = ssh.ParsePrivateKeyWithPassphrase(key, []byte(cfg.Passphrase))
+				if err != nil {
+					return nil, fmt.Errorf("parsing key with passphrase: %w", err)
+				}
+			} else {
+				return nil, fmt.Errorf("parsing key: %w", err)
+			}
+		}
+		authMethods = append(authMethods, ssh.PublicKeys(signer))
+	}
+	if cfg.Password != "" {
+		authMethods = append(authMethods, ssh.Password(cfg.Password))
+	}
+
+	hkCallback, err := hostKeyCallback()
+	if err != nil {
+		return nil, fmt.Errorf("setting up host key verification: %w", err)
+	}
+
+	sshCfg := &ssh.ClientConfig{
+		User:            cfg.User,
+		Auth:            authMethods,
+		Timeout:         10 * time.Second,
+		HostKeyCallback: hkCallback,
+	}
+
+	addr := net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", cfg.Port))
+	client, err := ssh.Dial("tcp", addr, sshCfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Session{id: newID(), client: client}, nil
+}
+
+func (s *Session) ID() string             { return s.id }
+func (s *Session) SSHClient() *ssh.Client { return s.client }
+
+// StartShell opens an interactive shell on the session. onData streams
+// output as it arrives; onClose fires exactly once, when the read loop
+// stops for any reason (clean remote close, network drop, or a
+// deliberate local Close()), so the frontend can distinguish "the switch
+// closed the session" from "I closed this tab" (SPE-59).
+func (s *Session) StartShell(onData func([]byte), onClose func(CloseReason)) error {
+	sess, err := s.client.NewSession()
+	if err != nil {
+		return err
+	}
+	modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
+	if err := sess.RequestPty("xterm-256color", 40, 120, modes); err != nil {
+		_ = sess.Close()
+		return err
+	}
+	stdout, err := sess.StdoutPipe()
+	if err != nil {
+		_ = sess.Close()
+		return err
+	}
+	stdin, err := sess.StdinPipe()
+	if err != nil {
+		_ = sess.Close()
+		return err
+	}
+	if err := sess.Shell(); err != nil {
+		_ = sess.Close()
+		return err
+	}
+	s.sess = sess
+	s.stdin = stdin
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := stdout.Read(buf)
+			if n > 0 {
+				chunk := make([]byte, n)
+				copy(chunk, buf[:n])
+				onData(chunk)
+			}
+			if err != nil {
+				if onClose != nil {
+					onClose(CloseReason{
+						Deliberate: s.closing.Load(),
+						EOF:        errors.Is(err, io.EOF),
+						Err:        err,
+					})
+				}
+				return
+			}
+		}
+	}()
+	return nil
+}
+
+func (s *Session) Write(data []byte) error {
+	if s.stdin == nil {
+		return fmt.Errorf("shell not started")
+	}
+	_, err := s.stdin.Write(data)
+	return err
+}
+
+func (s *Session) Resize(cols, rows int) error {
+	if s.sess == nil {
+		return fmt.Errorf("shell not started")
+	}
+	return s.sess.WindowChange(rows, cols)
+}
+
+func (s *Session) Close() error {
+	s.closing.Store(true)
+	if s.sess != nil {
+		_ = s.sess.Close()
+	}
+	return s.client.Close()
+}
+
+func newID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+SPECTER_EOF_1
+
+cat > "frontend/index.html" << 'SPECTER_EOF_2'
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Specter</title>
+  <style>
+    :root[data-theme="dark"] {
+      --bg: #1e1e1e;
+      --bg-alt: #252525;
+      --bg-input: #1a1a1a;
+      --border: #333;
+      --text: #ddd;
+      --text-dim: #999;
+      --hover: #2a2a2a;
+      --accent: #3178c6;
+      --danger: #e5484d;
+      --success: #2ea043;
+      --warning: #d29922;
+    }
+    :root[data-theme="light"] {
+      --bg: #ffffff;
+      --bg-alt: #f3f3f3;
+      --bg-input: #ffffff;
+      --border: #d0d0d0;
+      --text: #1e1e1e;
+      --text-dim: #666;
+      --hover: #e8e8e8;
+      --accent: #3178c6;
+      --danger: #cf3d3e;
+      --success: #1f8a3d;
+      --warning: #a06800;
+    }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: sans-serif; }
+    body { display: flex; flex-direction: column; }
+    #menubar { flex: 0 0 auto; display: flex; align-items: center; background: var(--bg-alt); border-bottom: 1px solid var(--border); font-size: 13px; user-select: none; position: relative; z-index: 500; --wails-draggable: drag; }
+    #menubar .menu-item { padding: 5px 12px; cursor: pointer; color: var(--text); position: relative; --wails-draggable: no-drag; }
+    #menubar .menu-item:hover, #menubar .menu-item.open { background: var(--hover); }
+    #menubar .menu-dropdown { position: absolute; top: 100%; left: 0; background: var(--bg-alt); border: 1px solid var(--border); min-width: 190px; display: none; flex-direction: column; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+    #menubar .menu-dropdown.open { display: flex; }
+    #menubar .menu-dropdown .item { padding: 6px 12px; cursor: pointer; white-space: nowrap; }
+    #menubar .menu-dropdown .item:hover { background: var(--hover); }
+    #menubar .menu-dropdown .item.disabled { opacity: 0.4; cursor: default; pointer-events: none; }
+    #menubar .menu-dropdown .separator { border-top: 1px solid var(--border); margin: 4px 0; }
+    #menubar .menu-dropdown .item label { display: flex; align-items: center; gap: 6px; cursor: pointer; width: 100%; justify-content: space-between; }
+    /* Frameless window: this bar IS the title bar (--wails-draggable:drag
+       above), so brand/spacer/controls opt back OUT of dragging where
+       they need real clicks. */
+    #titlebar-brand { display: flex; align-items: center; gap: 6px; padding: 0 10px 0 12px; --wails-draggable: no-drag; }
+    #titlebar-brand img { width: 18px; height: 18px; border-radius: 4px; display: block; }
+    #titlebar-brand span { font-weight: 600; color: var(--text); letter-spacing: 0.2px; }
+    #titlebar-spacer { flex: 1; align-self: stretch; }
+    #titlebar-controls { display: flex; align-self: stretch; --wails-draggable: no-drag; }
+    #titlebar-controls button { width: 44px; border: none; background: transparent; color: var(--text-dim); cursor: pointer; font-size: 13px; display: flex; align-items: center; justify-content: center; }
+    #titlebar-controls button:hover { background: var(--hover); color: var(--text); }
+    #titlebar-controls button#win-close:hover { background: #e5484d; color: #ffffff; }
+    #app { flex: 1; min-height: 0; display: grid; grid-template-columns: 220px 5px 1fr 5px 1fr; }
+    #statusbar { flex: 0 0 auto; height: 22px; background: var(--bg-alt); border-top: 1px solid var(--border); display: flex; align-items: center; padding: 0 10px; font-size: 11px; color: var(--text-dim); }
+    #app.sidebar-collapsed { grid-template-columns: 0px 0px 1fr 5px 1fr; }
+    #app.sidebar-collapsed #sidebar, #app.sidebar-collapsed #resize-sidebar { display: none; }
+    .resize-handle { cursor: col-resize; background: transparent; }
+    .resize-handle:hover, .resize-handle.dragging { background: var(--accent); }
+    #sidebar { border-right: 1px solid var(--border); overflow-y: auto; padding: 8px; font-size: 13px; }
+    #sidebar .entry { padding: 4px 6px; cursor: pointer; border-radius: 4px; }
+    #sidebar .entry:hover { background: var(--hover); }
+    .session-entry { padding: 4px 6px; cursor: pointer; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
+    .session-entry:hover { background: var(--hover); }
+    .session-entry .delete-btn { opacity: 0.5; font-size: 11px; }
+    .session-entry .delete-btn:hover { opacity: 1; color: var(--danger); }
+    #terminal-pane { border-right: 1px solid var(--border); min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+    #editor-pane { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+    #app.editor-collapsed { grid-template-columns: 220px 5px 1fr 0px 0px; }
+    #app.editor-collapsed.sidebar-collapsed { grid-template-columns: 0px 0px 1fr 0px 0px; }
+    #app.editor-collapsed #editor-pane, #app.editor-collapsed #resize-editor { display: none; }
+    #terminal { flex: 1; min-height: 0; padding: 4px; box-sizing: border-box; }
+    #editor { flex: 1; min-height: 0; }
+    .toolbar { padding: 6px 10px; font-size: 13px; background: var(--bg-alt); border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+    .toolbar input { background: var(--bg-input); border: 1px solid var(--border); color: var(--text); padding: 3px 6px; width: 90px; min-width: 0; }
+    .toolbar button { padding: 3px 8px; }
+    .tab { display: flex; align-items: center; gap: 6px; padding: 6px 10px; font-size: 12px; border-right: 1px solid var(--border); cursor: pointer; white-space: nowrap; color: var(--text-dim); }
+    .tab.active { background: var(--bg-alt); color: var(--text); border-top: 2px solid var(--accent); }
+    .tab .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #666; }
+    .tab .status-dot.connected { background: var(--success); }
+    .tab .status-dot.connecting { background: var(--warning); }
+    .tab .status-dot.disconnected { background: var(--danger); }
+    .tab .tab-close { opacity: 0.5; margin-left: 4px; }
+    .tab .tab-close:hover { opacity: 1; color: var(--danger); }
+    .tab-add { padding: 6px 10px; cursor: pointer; color: var(--text-dim); font-size: 14px; }
+    .tab-add:hover { color: var(--text); }
+    #theme-select {
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-size: 12px;
+      padding: 3px 20px 3px 6px;
+      -webkit-appearance: none;
+      appearance: none;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><path d='M0 0l5 6 5-6z' fill='%23999'/></svg>");
+      background-repeat: no-repeat;
+      background-position: right 6px center;
+      border-radius: 4px;
+    }
+    #theme-select option {
+      background: var(--bg-input);
+      color: var(--text);
+    }
+    button {
+      background: var(--accent);
+      color: #ffffff;
+      border: none;
+      border-radius: 5px;
+      padding: 6px 14px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: opacity 0.12s ease;
+    }
+    button:hover {
+      opacity: 0.85;
+    }
+    button:active {
+      opacity: 0.7;
+    }
+    .toolbar button, .picker-item, #session-picker .close {
+      background: var(--bg-input);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .toolbar button:hover {
+      opacity: 1;
+      background: var(--hover);
+    }
+    #session-picker-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 2000; }
+    #session-picker-overlay.open { display: flex; }
+    #session-picker { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; width: 280px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+    #session-picker .picker-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px; }
+    #session-picker .picker-header .close { cursor: pointer; opacity: 0.6; }
+    #session-picker .picker-header .close:hover { opacity: 1; }
+    #session-picker .picker-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; padding: 20px; }
+    #session-picker .picker-item { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--text); border: 1px solid var(--border); }
+    #session-picker .picker-item:hover { background: var(--hover); border-color: var(--accent); }
+    #session-picker .picker-item .icon { font-size: 28px; }
+    .disconnect-panel {
+      position: absolute;
+      left: 8px;
+      right: 8px;
+      bottom: 8px;
+      background: var(--bg-alt);
+      border: 1px solid var(--border);
+      border-top: 2px solid var(--danger);
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-family: Menlo, Consolas, monospace;
+      font-size: 12px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      z-index: 10;
+    }
+    .disconnect-title { color: var(--danger); font-weight: bold; margin-bottom: 6px; }
+    .disconnect-action { display: flex; align-items: center; gap: 8px; padding: 3px 2px; cursor: pointer; color: var(--text); border-radius: 4px; }
+    .disconnect-action:hover { background: var(--hover); }
+    .disconnect-key { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; padding: 1px 6px; border: 1px solid var(--accent); border-radius: 4px; color: var(--accent); font-weight: bold; font-size: 11px; }
+    /* SPE-61: xterm.js's own stylesheet paints .xterm-viewport with an
+       opaque background-color, separate from the theme.background we
+       set in JS. Without this override, that opaque layer sits on top
+       of the wallpaper (and masks color-scheme background changes)
+       regardless of what theme.background is set to. Safe unconditionally:
+       the canvas still paints its own opaque background from the active
+       theme when no wallpaper is set, this only removes the *redundant*
+       layer underneath it. */
+    .xterm-viewport { background-color: transparent !important; }
+  </style>
+</head>
+<body>
+  <div id="menubar">
+    <div id="titlebar-brand"><img src="/appicon.png" alt="" /><span>Specter</span></div>
+    <div class="menu-item" data-menu="terminal">Terminal
+      <div class="menu-dropdown" id="menu-terminal">
+        <div class="item" id="menu-new-tab">New Tab</div>
+        <div class="item" id="menu-new-local-shell">New Local Shell</div>
+        <div class="item" id="menu-close-tab">Close Tab</div>
+        <div class="item" id="menu-disconnect-tab">Disconnect <span style="opacity:0.5;font-size:11px;">Ctrl+Shift+X</span></div>
+        <div class="separator"></div>
+        <div class="item" id="menu-clear-screen">Clear Screen</div>
+      </div>
+    </div>
+    <div class="menu-item" data-menu="sessions">Sessions
+      <div class="menu-dropdown" id="menu-sessions">
+        <div class="item" id="menu-new-session">New Session</div>
+        <div class="item" id="menu-new-folder">New Folder</div>
+      </div>
+    </div>
+    <div class="menu-item" data-menu="view">View
+      <div class="menu-dropdown" id="menu-view">
+        <div class="item" id="menu-toggle-editor">Toggle Editor Pane</div>
+        <div class="item" id="menu-toggle-sidebar">Toggle Sidebar</div>
+      </div>
+    </div>
+    <div class="menu-item" data-menu="tools">Tools
+      <div class="menu-dropdown" id="menu-tools">
+        <div class="item" id="menu-tool-terminal">Terminal</div>
+        <div class="item" id="menu-tool-cmd">Command Prompt</div>
+        <div class="item" id="menu-tool-powershell">PowerShell</div>
+        <div class="separator"></div>
+        <div class="item" id="menu-tool-text-editor">Text Editor</div>
+      </div>
+    </div>
+    <div class="menu-item" data-menu="settings">Settings
+      <div class="menu-dropdown" id="menu-settings">
+        <div class="item"><label>Theme <select id="theme-select"><option value="dark">Dark</option><option value="light">Light</option></select></label></div>
+        <div class="item"><label>Terminal colors
+          <select id="colorscheme-select">
+            <option value="dark">Dark (default)</option>
+            <option value="light">Light (default)</option>
+            <option value="dracula">Dracula</option>
+            <option value="nord">Nord</option>
+            <option value="solarized-dark">Solarized Dark</option>
+            <option value="solarized-light">Solarized Light</option>
+            <option value="gruvbox-dark">Gruvbox Dark</option>
+            <option value="one-dark">One Dark</option>
+          </select>
+        </label></div>
+        <div class="item"><label>Font
+          <select id="font-select">
+            <option value="menlo">Menlo</option>
+            <option value="consolas">Consolas</option>
+            <option value="cascadia">Cascadia Code</option>
+            <option value="fira">Fira Code</option>
+            <option value="jetbrains">JetBrains Mono</option>
+            <option value="courier">Courier New</option>
+            <option value="ibmplex">IBM Plex Mono</option>
+            <option value="sourcecodepro">Source Code Pro</option>
+            <option value="inconsolata">Inconsolata</option>
+            <option value="victor">Victor Mono</option>
+            <option value="ubuntumono">Ubuntu Mono</option>
+          </select>
+        </label></div>
+        <div class="separator"></div>
+        <div class="item"><label>Wallpaper <button id="wallpaper-browse" type="button">Browse...</button></label></div>
+        <div class="item" id="wallpaper-opacity-row" style="display:none;">
+          <label>Opacity <input type="range" id="wallpaper-opacity" min="0" max="60" value="15" style="vertical-align:middle;" /></label>
+        </div>
+        <div class="item" id="wallpaper-clear-row" style="display:none;"><span id="wallpaper-clear" style="cursor:pointer;color:var(--danger);">Clear wallpaper</span></div>
+        <div class="separator"></div>
+        <div class="item"><label><input type="checkbox" id="osc52-toggle" /> OSC 52 clipboard sync (remote can write to your clipboard)</label></div>
+        <div class="item"><label><input type="checkbox" id="copy-on-select-toggle" /> Copy on select</label></div>
+        <div class="item"><label><input type="checkbox" id="rclick-paste-toggle" checked /> Right-click to paste</label></div>
+        <div class="item"><label><input type="checkbox" id="highlight-toggle" checked /> Highlight status keywords</label></div>
+      </div>
+    </div>
+    <div id="titlebar-spacer"></div>
+    <div id="titlebar-controls">
+      <button id="win-minimize" title="Minimize">&#9472;</button>
+      <button id="win-maximize" title="Maximize">&#9633;</button>
+      <button id="win-close" title="Close">&#10005;</button>
+    </div>
+  </div>
+  <div id="app">
+    <div id="sidebar">
+      <div class="toolbar" style="padding-left:0;">
+        <strong>Saved sessions</strong>
+      </div>
+      <input id="session-search" placeholder="Quick connect..." style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:4px 6px;margin-bottom:4px;font-size:12px;" />
+      <div id="session-list"></div>
+      <div class="toolbar" style="padding-left:0;cursor:pointer;" id="remote-files-header">
+        <strong id="remote-files-label">Remote files</strong>
+      </div>
+      <div id="file-list"></div>
+    </div>
+    <div class="resize-handle" id="resize-sidebar"></div>
+    <div id="terminal-pane">
+      <div style="display:flex;background:var(--bg-input);border-bottom:1px solid var(--border);"><div id="tab-bar" style="display:flex;overflow-x:auto;flex:1;"></div></div>
+      <div id="tab-landing" style="display:none;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:12px;">
+        <div style="font-size:14px;color:var(--text-dim);">No session yet</div>
+        <button id="new-session-btn" style="padding:8px 18px;font-size:13px;">+ New Session</button>
+      </div>
+      <div id="terminal" style="position:relative;">
+        <div id="terminal-wallpaper" style="position:absolute;inset:0;background-size:cover;background-position:center;pointer-events:none;display:none;"></div>
+      </div>
+    </div>
+    <div class="resize-handle" id="resize-editor"></div>
+    <div id="editor-pane">
+      <div class="toolbar"><span id="editor-path">No file open</span><span id="editor-close" style="margin-left:auto;cursor:pointer;opacity:0.5;">✕</span></div>
+      <div id="editor"></div>
+    </div>
+  </div>
+  <div id="session-picker-overlay">
+    <div id="session-picker">
+      <div class="picker-header">
+        <strong>New Session</strong>
+        <span class="close" id="session-picker-close">✕</span>
+      </div>
+      <div class="picker-grid" id="picker-grid">
+        <div class="picker-item" id="picker-ssh"><span class="icon">🔑</span><span>SSH</span></div>
+        <div class="picker-item" id="picker-shell"><span class="icon">&gt;_</span><span>Shell</span></div>
+        <div class="picker-item" id="picker-serial"><span class="icon">🔌</span><span>Serial</span></div>
+      </div>
+      <div id="picker-serial-fields" style="display:none;flex-direction:column;gap:8px;padding:16px;">
+        <input id="serial-port" placeholder="/dev/ttyUSB0 or COM3" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <select id="serial-baud" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;">
+          <option value="9600" selected>9600</option>
+          <option value="19200">19200</option>
+          <option value="38400">38400</option>
+          <option value="57600">57600</option>
+          <option value="115200">115200</option>
+        </select>
+        <button id="serial-connect" style="padding:6px;">Connect</button>
+      </div>
+      <div id="picker-ssh-fields" style="display:none;padding:16px;display:none;flex-direction:column;gap:8px;">
+        <input id="host" placeholder="host" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <input id="user" placeholder="user" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <div>
+          <label style="margin-right:10px;"><input type="radio" name="devicekind" value="host" checked /> VM / Host</label>
+          <label style="margin-right:10px;"><input type="radio" name="devicekind" value="switch" /> Switch</label>
+          <label><input type="radio" name="devicekind" value="firewall" /> Firewall</label>
+        </div>
+        <div>
+          <label style="margin-right:10px;"><input type="radio" name="authmode" value="password" checked /> Password</label>
+          <label><input type="radio" name="authmode" value="key" /> Key</label>
+        </div>
+        <span id="auth-password-fields">
+          <input id="password" placeholder="password" type="password" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <div id="caps-lock-warning" style="display:none;color:var(--warning);font-size:11px;">⚠ Caps Lock is on</div>
+        </span>
+        <span id="auth-key-fields" style="display:none;flex-direction:column;gap:8px;">
+          <input id="keyPath" placeholder="key path" readonly style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+          <button id="browse-key">Browse…</button>
+          <input id="passphrase" placeholder="passphrase (if any)" type="password" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        </span>
+        <button id="connect" style="padding:6px;">Connect</button>
+      </div>
+    </div>
+  </div>
+  <div id="statusbar">Specter</div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
+SPECTER_EOF_2
+
+cat > "frontend/wailsjs.d.ts" << 'SPECTER_EOF_3'
+// Wails injects these globals at build time from the Go backend's bound
+// methods (app.go). Hand-written here since Specter isn't using the
+// `wails generate` codegen step yet, keep this in sync with app.go.
+export interface ConnectRequest {
+  host: string;
+  port: number;
+  user: string;
+  password?: string;
+  keyPath?: string;
+  passphrase?: string;
+  // SPE-65: user already acknowledged the key-permission warning once
+  // for this attempt.
+  ignoreKeyPermWarning?: boolean;
+}
+export interface ConnectResult {
+  sessionId?: string;
+  needsTrust?: boolean;
+  changed?: boolean;
+  host?: string;
+  fingerprint?: string;
+  keyType?: string;
+  needsPassphrase?: boolean;
+  // SPE-65: the selected key file is group/world-readable. Soft
+  // warning, not a hard block, retry with ignoreKeyPermWarning once
+  // acknowledged.
+  needsKeyPermConfirm?: boolean;
+  keyPermPath?: string;
+  keyPermMode?: string;
+}
+export interface SessionProfile {
+  id: string;
+  name: string;
+  type?: string;
+  host?: string;
+  port?: number;
+  user?: string;
+  keyPath?: string;
+  serialPort?: string;
+  baud?: number;
+  groupId?: string;
+  tags?: string[];
+  lastUsed?: string;
+  // Drives the sidebar icon for SSH sessions: '' / 'host' (default,
+  // VM/Linux box) or 'switch' (network hardware). Serial sessions
+  // always show their own icon regardless of this field.
+  deviceKind?: string;
+}
+export interface SessionGroup {
+  id: string;
+  name: string;
+  parentId?: string;
+}
+export interface RemoteFile {
+  name: string;
+  path: string;
+  isDir: boolean;
+  size: number;
+}
+// Emitted as "ssh:closed:<id>" / "serial:closed:<id>" when a session's
+// read loop stops unexpectedly (SPE-59). Deliberate closes (user closed
+// the tab) never emit this event, there's nothing to tell the user.
+export interface SessionClosedEvent {
+  eof: boolean;
+  message: string;
+}
+// Global terminal personalization (SPE-61): wallpaper, color scheme,
+// and font, one set for the whole app, not per-session/per-tab.
+export interface Settings {
+  wallpaperPath?: string;
+  wallpaperOpacity?: number;
+  colorScheme?: string;
+  fontFamily?: string;
+  fontSize?: number;
+  // Frontend-only, never sent to the backend: the wallpaper image
+  // re-read as a data: URL each load via App.ReadImageFile(wallpaperPath),
+  // since only the path itself is persisted in settings.json.
+  wallpaperDataUrl?: string;
+}
+export interface AppBindings {
+  StartLocalTerminal(shell: string): Promise<string>;
+  WriteLocalTerminal(id: string, data: string): Promise<void>;
+  ResizeLocalTerminal(id: string, cols: number, rows: number): Promise<void>;
+  CloseLocalTerminal(id: string): Promise<void>;
+  Connect(req: ConnectRequest): Promise<ConnectResult>;
+  SelectKeyFile(): Promise<string>;
+  SelectImageFile(): Promise<string>;
+  ReadImageFile(path: string): Promise<string>;
+  SaveTextFile(defaultFilename: string, content: string): Promise<string>;
+  GetSettings(): Promise<Settings>;
+  SaveSettings(settings: Settings): Promise<void>;
+  GetClipboardText(): Promise<string>;
+  GetPlatform(): Promise<string>;
+  ConnectSerial(portName: string, baud: number): Promise<string>;
+  WriteSerial(id: string, data: string): Promise<void>;
+  CloseSerial(id: string): Promise<void>;
+  ListSerialPorts(): Promise<string[]>;
+  ListSessions(): Promise<SessionProfile[]>;
+  SaveSession(profile: SessionProfile): Promise<void>;
+  DeleteSession(id: string): Promise<void>;
+  ListGroups(): Promise<SessionGroup[]>;
+  SaveGroup(group: SessionGroup): Promise<void>;
+  DeleteGroup(id: string): Promise<void>;
+  TrustHost(host: string): Promise<void>;
+  TrustHostDespiteChange(host: string): Promise<void>;
+  WriteSSH(id: string, data: string): Promise<void>;
+  ResizeSSH(id: string, cols: number, rows: number): Promise<void>;
+  CloseSSH(id: string): Promise<void>;
+  ListRemoteDir(id: string, path: string): Promise<RemoteFile[]>;
+  ReadRemoteFile(id: string, path: string): Promise<string>;
+  WriteRemoteFile(id: string, path: string, content: string): Promise<void>;
+  UploadRemoteFile(id: string, path: string, base64Content: string): Promise<void>;
+}
+interface WailsRuntime {
+  EventsOn(eventName: string, callback: (...data: unknown[]) => void): () => void;
+  EventsOff(eventName: string, ...additionalEventNames: string[]): void;
+  EventsEmit(eventName: string, ...data: unknown[]): void;
+  WindowMinimise(): void;
+  WindowToggleMaximise(): void;
+  Quit(): void;
+}
+declare global {
+  interface Window {
+    go: { main: { App: AppBindings } };
+    runtime: WailsRuntime;
+  }
+}
+SPECTER_EOF_3
+
+cat > "frontend/src/main.ts" << 'SPECTER_EOF_4'
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import * as monaco from 'monaco-editor';
@@ -2026,3 +3446,5 @@ setupPaneResize('resize-sidebar', 0, 150);
 setupPaneResize('resize-editor', 2, 200);
 
 renderSessionList();renderSessionList();
+SPECTER_EOF_4
+

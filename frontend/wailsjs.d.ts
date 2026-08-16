@@ -8,6 +8,9 @@ export interface ConnectRequest {
   password?: string;
   keyPath?: string;
   passphrase?: string;
+  // SPE-65: user already acknowledged the key-permission warning once
+  // for this attempt.
+  ignoreKeyPermWarning?: boolean;
 }
 export interface ConnectResult {
   sessionId?: string;
@@ -17,6 +20,12 @@ export interface ConnectResult {
   fingerprint?: string;
   keyType?: string;
   needsPassphrase?: boolean;
+  // SPE-65: the selected key file is group/world-readable. Soft
+  // warning, not a hard block, retry with ignoreKeyPermWarning once
+  // acknowledged.
+  needsKeyPermConfirm?: boolean;
+  keyPermPath?: string;
+  keyPermMode?: string;
 }
 export interface SessionProfile {
   id: string;

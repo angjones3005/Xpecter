@@ -30,6 +30,12 @@ type Config struct {
 	Password   string
 	KeyPath    string
 	Passphrase string
+	// IgnoreKeyPermWarning skips the KeyPermissionWarning check below,
+	// set only after the user has explicitly acknowledged it once
+	// (SPE-65). Specter didn't create the user's key file, so this is a
+	// soft warning with real user choice, not a hard block like OpenSSH
+	// itself does.
+	IgnoreKeyPermWarning bool
 }
 
 type Session struct {
@@ -85,6 +91,20 @@ func (e *HostKeyChangedError) Error() string {
 	return fmt.Sprintf("WARNING: host key for %s has CHANGED (%s): %s — this can mean the server was reconfigured, OR that you're being intercepted", e.Host, e.KeyType, e.NewFingerprint)
 }
 
+// KeyPermissionWarning means the selected private key file is
+// group/world-readable, the same condition real OpenSSH refuses to use
+// a key under. Specter treats it as a soft warning rather than a hard
+// block (SPE-65), since it didn't create this file and the user may
+// have a real reason it's set up this way, but they should know.
+type KeyPermissionWarning struct {
+	Path string
+	Mode os.FileMode
+}
+
+func (e *KeyPermissionWarning) Error() string {
+	return fmt.Sprintf("key file %s has overly permissive mode %04o (should not be group/world-readable)", e.Path, e.Mode.Perm())
+}
+
 // pendingKeys caches the offending public key by hostname between the
 // failed Connect attempt and the frontend's trust decision, so we don't
 // need to round-trip raw key bytes through the JS bridge.
@@ -92,6 +112,25 @@ var (
 	pendingKeysMu sync.Mutex
 	pendingKeys   = map[string]pendingKey{}
 )
+
+// pendingKeyTTL bounds how long an abandoned trust prompt's key stays in
+// memory (SPE-65). Not a security issue, it's just the offending public
+// key plus a timestamp, but untidy to keep forever if a user closes the
+// app or navigates away without accepting or rejecting.
+const pendingKeyTTL = 10 * time.Minute
+
+// sweepExpiredPendingKeys drops entries older than pendingKeyTTL. Called
+// lazily whenever a new pending key is added rather than on a background
+// timer, no ticket goroutine needed for what's genuinely a minor cleanup.
+// Caller must hold pendingKeysMu.
+func sweepExpiredPendingKeys() {
+	cutoff := time.Now().Add(-pendingKeyTTL)
+	for host, pk := range pendingKeys {
+		if pk.at.Before(cutoff) {
+			delete(pendingKeys, host)
+		}
+	}
+}
 
 type pendingKey struct {
 	key  ssh.PublicKey
@@ -138,6 +177,7 @@ func hostKeyCallback() (ssh.HostKeyCallback, error) {
 		var keyErr *knownhosts.KeyError
 		if errors.As(err, &keyErr) {
 			pendingKeysMu.Lock()
+			sweepExpiredPendingKeys()
 			pendingKeys[hostname] = pendingKey{key: key, addr: remote.String(), at: time.Now()}
 			pendingKeysMu.Unlock()
 
@@ -227,6 +267,16 @@ func Dial(cfg Config) (*Session, error) {
 
 	var authMethods []ssh.AuthMethod
 	if cfg.KeyPath != "" {
+		if !cfg.IgnoreKeyPermWarning {
+			if info, err := os.Stat(cfg.KeyPath); err == nil {
+				if info.Mode().Perm()&0o077 != 0 {
+					return nil, &KeyPermissionWarning{Path: cfg.KeyPath, Mode: info.Mode()}
+				}
+			}
+			// A Stat failure here isn't fatal, os.ReadFile below will
+			// surface the real error (missing file, no permission to
+			// even stat it, etc.) with better context than this check would.
+		}
 		key, err := os.ReadFile(cfg.KeyPath)
 		if err != nil {
 			return nil, fmt.Errorf("reading key: %w", err)
