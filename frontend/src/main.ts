@@ -1257,7 +1257,7 @@ document.addEventListener('keydown', checkCapsLock);
 
 document.addEventListener('keyup', checkCapsLock);
 
-document.getElementById('password')!.addEventListener('focus', (e) => {
+document.getElementById('password')!.addEventListener('focus', () => {
 
   // Chrome/WebKit don't expose getModifierState on a plain focus event,
 
