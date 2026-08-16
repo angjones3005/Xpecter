@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"specter/backend/config"
@@ -220,6 +221,9 @@ func (a *App) Connect(req ConnectRequest) (ConnectResult, error) {
 func closeErrorMessage(err error) string {
 	if err == nil {
 		return "Session ended"
+	}
+	if errors.Is(err, io.EOF) {
+		return "Remote side closed the connection"
 	}
 	if errors.Is(err, os.ErrClosed) {
 		return "Session ended"
