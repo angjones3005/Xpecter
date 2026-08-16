@@ -38,6 +38,10 @@ export function GetPlatform() {
   return window['go']['main']['App']['GetPlatform']();
 }
 
+export function GetSettings() {
+  return window['go']['main']['App']['GetSettings']();
+}
+
 export function ListGroups() {
   return window['go']['main']['App']['ListGroups']();
 }
@@ -52,6 +56,10 @@ export function ListSerialPorts() {
 
 export function ListSessions() {
   return window['go']['main']['App']['ListSessions']();
+}
+
+export function ReadImageFile(arg1) {
+  return window['go']['main']['App']['ReadImageFile'](arg1);
 }
 
 export function ReadRemoteFile(arg1, arg2) {
@@ -74,8 +82,16 @@ export function SaveSession(arg1) {
   return window['go']['main']['App']['SaveSession'](arg1);
 }
 
+export function SaveSettings(arg1) {
+  return window['go']['main']['App']['SaveSettings'](arg1);
+}
+
 export function SaveTextFile(arg1, arg2) {
   return window['go']['main']['App']['SaveTextFile'](arg1, arg2);
+}
+
+export function SelectImageFile() {
+  return window['go']['main']['App']['SelectImageFile']();
 }
 
 export function SelectKeyFile() {

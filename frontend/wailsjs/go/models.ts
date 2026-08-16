@@ -52,6 +52,26 @@ export namespace config {
 	        this.deviceKind = source["deviceKind"];
 	    }
 	}
+	export class Settings {
+	    wallpaperPath?: string;
+	    wallpaperOpacity?: number;
+	    colorScheme?: string;
+	    fontFamily?: string;
+	    fontSize?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Settings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.wallpaperPath = source["wallpaperPath"];
+	        this.wallpaperOpacity = source["wallpaperOpacity"];
+	        this.colorScheme = source["colorScheme"];
+	        this.fontFamily = source["fontFamily"];
+	        this.fontSize = source["fontSize"];
+	    }
+	}
 
 }
 

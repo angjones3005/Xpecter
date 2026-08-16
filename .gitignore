@@ -1,5 +1,6 @@
 # Go
-/build/
+/build/*
+!/build/appicon.png
 
 # Frontend
 frontend/node_modules/

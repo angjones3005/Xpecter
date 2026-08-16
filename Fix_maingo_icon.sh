@@ -1,3 +1,8 @@
+#!/usr/bin/env bash
+# Run from the root of your Specter repo.
+set -euo pipefail
+
+cat > "main.go" << 'SPECTER_EOF_MAINGO'
 package main
 
 import (
@@ -41,3 +46,5 @@ func main() {
 		println("Error:", err.Error())
 	}
 }
+SPECTER_EOF_MAINGO
+

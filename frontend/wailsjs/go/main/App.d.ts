@@ -21,6 +21,8 @@ export function GetClipboardText():Promise<string>;
 
 export function GetPlatform():Promise<string>;
 
+export function GetSettings():Promise<config.Settings>;
+
 export function ListGroups():Promise<Array<config.SessionGroup>>;
 
 export function ListRemoteDir(arg1:string,arg2:string):Promise<Array<main.RemoteFile>>;
@@ -28,6 +30,8 @@ export function ListRemoteDir(arg1:string,arg2:string):Promise<Array<main.Remote
 export function ListSerialPorts():Promise<Array<string>>;
 
 export function ListSessions():Promise<Array<config.SessionProfile>>;
+
+export function ReadImageFile(arg1:string):Promise<string>;
 
 export function ReadRemoteFile(arg1:string,arg2:string):Promise<string>;
 
@@ -39,7 +43,11 @@ export function SaveGroup(arg1:config.SessionGroup):Promise<void>;
 
 export function SaveSession(arg1:config.SessionProfile):Promise<void>;
 
+export function SaveSettings(arg1:config.Settings):Promise<void>;
+
 export function SaveTextFile(arg1:string,arg2:string):Promise<string>;
+
+export function SelectImageFile():Promise<string>;
 
 export function SelectKeyFile():Promise<string>;
 

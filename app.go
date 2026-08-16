@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"os"
+	"path/filepath"
 
 	"specter/backend/config"
 	"specter/backend/pty"
@@ -260,6 +262,33 @@ func (a *App) SelectKeyFile() (string, error) {
 	})
 }
 
+// SelectImageFile prompts for an image file, used by the wallpaper
+// picker (SPE-61). Returns "" (no error) if the user cancels.
+func (a *App) SelectImageFile() (string, error) {
+	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Select Terminal Wallpaper",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "Images (*.png;*.jpg;*.jpeg;*.gif;*.webp)", Pattern: "*.png;*.jpg;*.jpeg;*.gif;*.webp"},
+		},
+	})
+}
+
+// ReadImageFile reads an arbitrary local image path and returns it as a
+// data: URL, since the webview can't load arbitrary file:// paths
+// directly for security reasons. Used to render the wallpaper (SPE-61),
+// referenced by path in Settings rather than embedded there.
+func (a *App) ReadImageFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	mimeType := mime.TypeByExtension(filepath.Ext(path))
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
+}
+
 // SaveTextFile prompts for a destination path and writes content to it,
 // used by the disconnected-session panel's "Save output to file" action
 // (SPE-59, matching MobaXterm's "S" option). Returns "" (no error) if the
@@ -279,6 +308,16 @@ func (a *App) SaveTextFile(defaultFilename string, content string) (string, erro
 		return "", err
 	}
 	return path, nil
+}
+
+// --- Terminal personalization (SPE-61) ---
+
+func (a *App) GetSettings() (config.Settings, error) {
+	return config.LoadSettings()
+}
+
+func (a *App) SaveSettings(s config.Settings) error {
+	return config.SaveSettings(s)
 }
 
 // --- Saved sessions ---

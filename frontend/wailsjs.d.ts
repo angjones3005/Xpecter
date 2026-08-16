@@ -54,6 +54,19 @@ export interface SessionClosedEvent {
   eof: boolean;
   message: string;
 }
+// Global terminal personalization (SPE-61): wallpaper, color scheme,
+// and font, one set for the whole app, not per-session/per-tab.
+export interface Settings {
+  wallpaperPath?: string;
+  wallpaperOpacity?: number;
+  colorScheme?: string;
+  fontFamily?: string;
+  fontSize?: number;
+  // Frontend-only, never sent to the backend: the wallpaper image
+  // re-read as a data: URL each load via App.ReadImageFile(wallpaperPath),
+  // since only the path itself is persisted in settings.json.
+  wallpaperDataUrl?: string;
+}
 export interface AppBindings {
   StartLocalTerminal(shell: string): Promise<string>;
   WriteLocalTerminal(id: string, data: string): Promise<void>;
@@ -61,7 +74,11 @@ export interface AppBindings {
   CloseLocalTerminal(id: string): Promise<void>;
   Connect(req: ConnectRequest): Promise<ConnectResult>;
   SelectKeyFile(): Promise<string>;
+  SelectImageFile(): Promise<string>;
+  ReadImageFile(path: string): Promise<string>;
   SaveTextFile(defaultFilename: string, content: string): Promise<string>;
+  GetSettings(): Promise<Settings>;
+  SaveSettings(settings: Settings): Promise<void>;
   GetClipboardText(): Promise<string>;
   GetPlatform(): Promise<string>;
   ConnectSerial(portName: string, baud: number): Promise<string>;
@@ -88,6 +105,9 @@ interface WailsRuntime {
   EventsOn(eventName: string, callback: (...data: unknown[]) => void): () => void;
   EventsOff(eventName: string, ...additionalEventNames: string[]): void;
   EventsEmit(eventName: string, ...data: unknown[]): void;
+  WindowMinimise(): void;
+  WindowToggleMaximise(): void;
+  Quit(): void;
 }
 declare global {
   interface Window {
