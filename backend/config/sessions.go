@@ -27,6 +27,12 @@ type SessionProfile struct {
 	GroupID    string   `json:"groupId,omitempty"`
 	Tags       []string `json:"tags,omitempty"`
 	LastUsed   string   `json:"lastUsed,omitempty"`
+	// DeviceKind drives the sidebar icon for SSH sessions: "" or "host"
+	// (default, a VM/Linux box), "switch" (network switch/router), or
+	// "firewall" (e.g. FortiGate). Serial sessions always show their
+	// own icon regardless of this field. Plain string rather than a Go
+	// enum so new kinds can be added without a schema migration.
+	DeviceKind string `json:"deviceKind,omitempty"`
 }
 
 // SessionGroup is a folder for organizing sessions. ParentID enables

@@ -244,6 +244,11 @@
         <input id="host" placeholder="host" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
         <input id="user" placeholder="user" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
         <div>
+          <label style="margin-right:10px;"><input type="radio" name="devicekind" value="host" checked /> VM / Host</label>
+          <label style="margin-right:10px;"><input type="radio" name="devicekind" value="switch" /> Switch</label>
+          <label><input type="radio" name="devicekind" value="firewall" /> Firewall</label>
+        </div>
+        <div>
           <label style="margin-right:10px;"><input type="radio" name="authmode" value="password" checked /> Password</label>
           <label><input type="radio" name="authmode" value="key" /> Key</label>
         </div>

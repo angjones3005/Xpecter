@@ -29,6 +29,7 @@ export namespace config {
 	    groupId?: string;
 	    tags?: string[];
 	    lastUsed?: string;
+	    deviceKind?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new SessionProfile(source);
@@ -48,6 +49,7 @@ export namespace config {
 	        this.groupId = source["groupId"];
 	        this.tags = source["tags"];
 	        this.lastUsed = source["lastUsed"];
+	        this.deviceKind = source["deviceKind"];
 	    }
 	}
 

@@ -31,6 +31,10 @@ export interface SessionProfile {
   groupId?: string;
   tags?: string[];
   lastUsed?: string;
+  // Drives the sidebar icon for SSH sessions: '' / 'host' (default,
+  // VM/Linux box) or 'switch' (network hardware). Serial sessions
+  // always show their own icon regardless of this field.
+  deviceKind?: string;
 }
 export interface SessionGroup {
   id: string;
