@@ -1,3 +1,8 @@
+#!/usr/bin/env bash
+# Run from the root of your Specter repo.
+set -euo pipefail
+
+cat > "frontend/src/main.ts" << 'SPECTER_EOF_MAINTS'
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import * as monaco from 'monaco-editor';
@@ -1260,23 +1265,7 @@ async function renderSessionList() {
       header.className = 'entry';
       header.style.fontWeight = 'bold';
       header.style.userSelect = 'none';
-      header.style.display = 'flex';
-      header.style.alignItems = 'center';
-      header.style.gap = '4px';
-      const arrow = document.createElement('span');
-      arrow.textContent = recentCollapsed ? '\u25b8' : '\u25be';
-      // Original document+clock icon (SPE-61-adjacent polish), not a
-      // copy of any existing stock icon, replaces the stopwatch emoji
-      // that was here before with something that reads more clearly as
-      // "recently used" at this size.
-      const icon = document.createElement('span');
-      icon.style.cssText = 'display:inline-flex;width:14px;height:14px;flex:0 0 auto;';
-      icon.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14"><path d="M14 3H6a1.5 1.5 0 0 0-1.5 1.5v15A1.5 1.5 0 0 0 6 21h12a1.5 1.5 0 0 0 1.5-1.5V8.5L14 3Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M14 3v4.5a1 1 0 0 0 1 1h4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><line x1="8" y1="16.5" x2="13.5" y2="16.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><line x1="8" y1="19" x2="12" y2="19" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="8" cy="9.5" r="5.5" fill="var(--bg)" stroke="currentColor" stroke-width="1.6"/><path d="M8 6.3V9.5l2.3 1.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-      const label = document.createElement('span');
-      label.textContent = 'Recent';
-      header.appendChild(arrow);
-      header.appendChild(icon);
-      header.appendChild(label);
+      header.textContent = (recentCollapsed ? '\u25b8 ' : '\u25be ') + '\u23f1\ufe0f Recent';
       header.addEventListener('click', () => {
         recentCollapsed = !recentCollapsed;
         renderSessionList();
@@ -2070,3 +2059,5 @@ setupPaneResize('resize-sidebar', 0, 150);
 setupPaneResize('resize-editor', 2, 200);
 
 renderSessionList();renderSessionList();
+SPECTER_EOF_MAINTS
+
