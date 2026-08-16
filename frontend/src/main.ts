@@ -255,6 +255,10 @@ function createTerminalForTab(tab: Tab) {
 
   // Explicit paste keybind (Ctrl+Shift+V / Cmd+Shift+V), separate from
   // native browser paste, as a reliable fallback across platforms/webviews.
+  // Ctrl+Shift+X disconnects the active session (see disconnectTab):
+  // deliberately NOT plain Ctrl+C, since that's the real SIGINT keystroke
+  // needed constantly on a live switch session, and NOT plain Ctrl+X
+  // either, since bash/readline and Emacs both use that as a prefix key.
   // Also handles the SPE-59 disconnected-session panel: while a session is
   // stopped, R/S/Enter drive the panel's actions and everything else is
   // swallowed rather than typed into a dead PTY.
@@ -266,6 +270,10 @@ function createTerminalForTab(tab: Tab) {
         else if (key === 'r') reconnectTab(tab);
         else if (key === 's') saveTabOutput(tab);
       }
+      return false;
+    }
+    if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'x') {
+      disconnectTab(tab);
       return false;
     }
     if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
@@ -826,6 +834,25 @@ async function reconnectTab(tab: Tab) {
   await tab.reconnect();
 }
 
+// Manual "Disconnect" (Terminal menu): closes the underlying session but
+// keeps the tab open, showing the same SPE-59 panel a real drop would.
+// Useful both as a real feature (deliberately kill a session without
+// losing the tab/scrollback) and for testing the panel without having
+// to pull a cable every time. Reuses CloseSSH/CloseSerial, which mark
+// the close as deliberate on the backend (no ssh:closed/serial:closed
+// event fires), so the panel is shown here on the frontend side instead.
+async function disconnectTab(tab: Tab) {
+  if (tab.stopped) return;
+  if (tab.mode === 'ssh' && tab.backendId) {
+    await App.CloseSSH(tab.backendId);
+  } else if (tab.mode === 'serial' && tab.backendId) {
+    await App.CloseSerial(tab.backendId);
+  } else {
+    return; // nothing live to disconnect (pending or local shell tabs)
+  }
+  showDisconnectPanel(tab, 'Disconnected.');
+}
+
 function showDisconnectPanel(tab: Tab, message: string) {
   if (!tab.term || !tab.container) return;
   tab.stopped = true;
@@ -1380,6 +1407,11 @@ document.getElementById('menu-new-local-shell')!.addEventListener('click', () =>
 document.getElementById('menu-close-tab')!.addEventListener('click', () => {
   closeAllMenus();
   if (activeTabId) closeTab(activeTabId);
+});
+document.getElementById('menu-disconnect-tab')!.addEventListener('click', () => {
+  closeAllMenus();
+  const tab = activeTabId ? tabs.get(activeTabId) : null;
+  if (tab) disconnectTab(tab);
 });
 document.getElementById('menu-clear-screen')!.addEventListener('click', () => {
   closeAllMenus();
