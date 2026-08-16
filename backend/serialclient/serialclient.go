@@ -6,17 +6,32 @@
 package serialclient
 
 import (
+	"sync/atomic"
+
 	"go.bug.st/serial"
 )
 
 type Session struct {
-	port serial.Port
+	port    serial.Port
+	closing atomic.Bool
+}
+
+// CloseReason mirrors sshclient.CloseReason: distinguishes a deliberate
+// local close (tab closed by the user) from an unexpected drop, e.g. the
+// device losing power or the USB-serial adapter disconnecting (SPE-59).
+// EOF is generally not meaningful for serial ports (they don't "close"
+// the way a TCP stream does), but is included for parity with SSH.
+type CloseReason struct {
+	Deliberate bool
+	EOF        bool
+	Err        error
 }
 
 // Open opens a serial port at the given baud rate with standard 8N1
 // framing and no flow control, covering the vast majority of network
-// hardware console connections. onData is called as bytes arrive.
-func Open(portName string, baud int, onData func([]byte)) (*Session, error) {
+// hardware console connections. onData is called as bytes arrive;
+// onClose fires exactly once when the read loop stops.
+func Open(portName string, baud int, onData func([]byte), onClose func(CloseReason)) (*Session, error) {
 	mode := &serial.Mode{
 		BaudRate: baud,
 		Parity:   serial.NoParity,
@@ -40,6 +55,9 @@ func Open(portName string, baud int, onData func([]byte)) (*Session, error) {
 				onData(chunk)
 			}
 			if err != nil {
+				if onClose != nil {
+					onClose(CloseReason{Deliberate: s.closing.Load(), Err: err})
+				}
 				return
 			}
 		}
@@ -54,6 +72,7 @@ func (s *Session) Write(data []byte) error {
 }
 
 func (s *Session) Close() error {
+	s.closing.Store(true)
 	return s.port.Close()
 }
 

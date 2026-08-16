@@ -39,6 +39,8 @@ export function SaveGroup(arg1:config.SessionGroup):Promise<void>;
 
 export function SaveSession(arg1:config.SessionProfile):Promise<void>;
 
+export function SaveTextFile(arg1:string,arg2:string):Promise<string>;
+
 export function SelectKeyFile():Promise<string>;
 
 export function StartLocalTerminal(arg1:string):Promise<string>;

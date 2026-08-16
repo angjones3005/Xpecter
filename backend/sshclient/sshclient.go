@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -32,10 +33,30 @@ type Config struct {
 }
 
 type Session struct {
-	id     string
-	client *ssh.Client
-	sess   *ssh.Session
-	stdin  io.WriteCloser
+	id      string
+	client  *ssh.Client
+	sess    *ssh.Session
+	stdin   io.WriteCloser
+	closing atomic.Bool
+}
+
+// CloseReason distinguishes why a session's read loop stopped, so the
+// frontend can show an accurate message (SPE-59) instead of just going
+// quiet. Deliberate is set when Close() was called locally (tab closed by
+// the user); everything else is an unexpected drop the user should be
+// told about, since they may still be typing into a dead session.
+type CloseReason struct {
+	// Deliberate is true only when the user closed this session
+	// themselves (closing the tab). No frontend notification is needed
+	// in that case, the tab is already gone.
+	Deliberate bool
+	// EOF is true when the remote side cleanly closed the connection
+	// (io.EOF), matching MobaXterm's "Remote side unexpectedly closed
+	// network connection" case.
+	EOF bool
+	// Err holds the underlying error for anything that isn't a clean
+	// EOF, e.g. a network-level drop or timeout.
+	Err error
 }
 
 // HostKeyUnknownError means this host has never been seen before — not in
@@ -255,7 +276,12 @@ func Dial(cfg Config) (*Session, error) {
 func (s *Session) ID() string             { return s.id }
 func (s *Session) SSHClient() *ssh.Client { return s.client }
 
-func (s *Session) StartShell(onData func([]byte)) error {
+// StartShell opens an interactive shell on the session. onData streams
+// output as it arrives; onClose fires exactly once, when the read loop
+// stops for any reason (clean remote close, network drop, or a
+// deliberate local Close()), so the frontend can distinguish "the switch
+// closed the session" from "I closed this tab" (SPE-59).
+func (s *Session) StartShell(onData func([]byte), onClose func(CloseReason)) error {
 	sess, err := s.client.NewSession()
 	if err != nil {
 		return err
@@ -291,6 +317,13 @@ func (s *Session) StartShell(onData func([]byte)) error {
 				onData(chunk)
 			}
 			if err != nil {
+				if onClose != nil {
+					onClose(CloseReason{
+						Deliberate: s.closing.Load(),
+						EOF:        errors.Is(err, io.EOF),
+						Err:        err,
+					})
+				}
 				return
 			}
 		}
@@ -314,6 +347,7 @@ func (s *Session) Resize(cols, rows int) error {
 }
 
 func (s *Session) Close() error {
+	s.closing.Store(true)
 	if s.sess != nil {
 		_ = s.sess.Close()
 	}

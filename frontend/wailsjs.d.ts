@@ -43,6 +43,13 @@ export interface RemoteFile {
   isDir: boolean;
   size: number;
 }
+// Emitted as "ssh:closed:<id>" / "serial:closed:<id>" when a session's
+// read loop stops unexpectedly (SPE-59). Deliberate closes (user closed
+// the tab) never emit this event, there's nothing to tell the user.
+export interface SessionClosedEvent {
+  eof: boolean;
+  message: string;
+}
 export interface AppBindings {
   StartLocalTerminal(shell: string): Promise<string>;
   WriteLocalTerminal(id: string, data: string): Promise<void>;
@@ -50,6 +57,7 @@ export interface AppBindings {
   CloseLocalTerminal(id: string): Promise<void>;
   Connect(req: ConnectRequest): Promise<ConnectResult>;
   SelectKeyFile(): Promise<string>;
+  SaveTextFile(defaultFilename: string, content: string): Promise<string>;
   GetClipboardText(): Promise<string>;
   GetPlatform(): Promise<string>;
   ConnectSerial(portName: string, baud: number): Promise<string>;
@@ -73,7 +81,8 @@ export interface AppBindings {
   UploadRemoteFile(id: string, path: string, base64Content: string): Promise<void>;
 }
 interface WailsRuntime {
-  EventsOn(eventName: string, callback: (...data: unknown[]) => void): void;
+  EventsOn(eventName: string, callback: (...data: unknown[]) => void): () => void;
+  EventsOff(eventName: string, ...additionalEventNames: string[]): void;
   EventsEmit(eventName: string, ...data: unknown[]): void;
 }
 declare global {

@@ -2,7 +2,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import * as monaco from 'monaco-editor';
 import '@xterm/xterm/css/xterm.css';
-import type { RemoteFile, ConnectRequest, SessionProfile, SessionGroup } from '../wailsjs.d.ts';
+import type { RemoteFile, ConnectRequest, SessionProfile, SessionGroup, SessionClosedEvent } from '../wailsjs.d.ts';
 
 type ThemeName = 'dark' | 'light';
 
@@ -84,6 +84,15 @@ interface Tab {
   term: Terminal | null;
   fitAddon: FitAddon | null;
   container: HTMLDivElement | null;
+  // SPE-59: true while showing the "session stopped" panel after an
+  // unexpected disconnect. Gates keyboard input away from the dead PTY
+  // and routes R/S/Enter to the panel's actions instead.
+  stopped: boolean;
+  overlay: HTMLDivElement | null;
+  // Set once a session connects; re-runs the same connect call to
+  // power the panel's "R to restart session" action. null for local
+  // shell tabs (out of scope for SPE-59, see ticket).
+  reconnect: (() => void | Promise<void>) | null;
 }
 
 const tabs = new Map<string, Tab>();
@@ -105,6 +114,9 @@ function createPendingTab(): Tab {
     term: null,
     fitAddon: null,
     container: null,
+    stopped: false,
+    overlay: null,
+    reconnect: null,
   };
   tabs.set(tab.id, tab);
   return tab;
@@ -174,9 +186,16 @@ async function closeTab(id: string) {
   const tab = tabs.get(id);
   if (!tab) return;
 
-  if (tab.mode === 'ssh' && tab.backendId) await App.CloseSSH(tab.backendId);
+  if (tab.mode === 'ssh' && tab.backendId) {
+    await App.CloseSSH(tab.backendId);
+    runtime.EventsOff('ssh:data:' + tab.backendId, 'ssh:closed:' + tab.backendId);
+  }
   if (tab.mode === 'local' && tab.backendId) await App.CloseLocalTerminal(tab.backendId);
-  if (tab.mode === 'serial' && tab.backendId) await App.CloseSerial(tab.backendId);
+  if (tab.mode === 'serial' && tab.backendId) {
+    await App.CloseSerial(tab.backendId);
+    runtime.EventsOff('serial:data:' + tab.backendId, 'serial:closed:' + tab.backendId);
+  }
+  tab.overlay?.remove();
   tab.term?.dispose();
   tab.container?.remove();
   tabs.delete(id);
@@ -197,7 +216,7 @@ async function closeTab(id: string) {
 function createTerminalForTab(tab: Tab) {
   const container = document.createElement('div');
   container.className = 'term-instance';
-  container.style.cssText = 'height:100%;padding:4px;box-sizing:border-box;';
+  container.style.cssText = 'height:100%;padding:4px;box-sizing:border-box;position:relative;';
   document.getElementById('terminal')!.appendChild(container);
 
   const term = new Terminal({
@@ -236,7 +255,19 @@ function createTerminalForTab(tab: Tab) {
 
   // Explicit paste keybind (Ctrl+Shift+V / Cmd+Shift+V), separate from
   // native browser paste, as a reliable fallback across platforms/webviews.
+  // Also handles the SPE-59 disconnected-session panel: while a session is
+  // stopped, R/S/Enter drive the panel's actions and everything else is
+  // swallowed rather than typed into a dead PTY.
   term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+    if (tab.stopped) {
+      if (e.type === 'keydown') {
+        const key = e.key.toLowerCase();
+        if (key === 'enter') closeTab(tab.id);
+        else if (key === 'r') reconnectTab(tab);
+        else if (key === 's') saveTabOutput(tab);
+      }
+      return false;
+    }
     if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
       navigator.clipboard.readText().then((text) => {
         if (tab.mode === 'local' && tab.backendId) App.WriteLocalTerminal(tab.backendId, text);
@@ -753,6 +784,96 @@ function writeToTerminal(tab: Tab, data: string) {
   tab.term!.write(applyOutputHighlighting(data));
 }
 
+// --- Disconnected-session panel (SPE-59) ---
+// Mirrors MobaXterm's disconnect UI (see design-reference comment on the
+// Linear ticket): the failure message and a divider are written into the
+// terminal's own scrollback, real content that scrolls, copies, and saves
+// like everything else, and a small non-modal panel with Reconnect /
+// Save Output / Close Tab is anchored to the bottom of the pane. R / S /
+// Enter work as shortcuts while the panel is open, matching MobaXterm's
+// keyboard-driven flow.
+
+function terminalTextContent(term: Terminal): string {
+  const buffer = term.buffer.active;
+  const lines: string[] = [];
+  for (let i = 0; i < buffer.length; i++) {
+    const line = buffer.getLine(i);
+    if (line) lines.push(line.translateToString(true));
+  }
+  return lines.join('\n');
+}
+
+async function saveTabOutput(tab: Tab) {
+  if (!tab.term) return;
+  const content = terminalTextContent(tab.term);
+  const defaultName = `${tab.label.replace(/[^a-zA-Z0-9._@-]+/g, '_')}.log`;
+  try {
+    await App.SaveTextFile(defaultName, content);
+  } catch (err) {
+    console.error('Failed to save terminal output', err);
+  }
+}
+
+function clearDisconnectPanel(tab: Tab) {
+  tab.stopped = false;
+  tab.overlay?.remove();
+  tab.overlay = null;
+}
+
+async function reconnectTab(tab: Tab) {
+  if (!tab.reconnect) return;
+  clearDisconnectPanel(tab);
+  await tab.reconnect();
+}
+
+function showDisconnectPanel(tab: Tab, message: string) {
+  if (!tab.term || !tab.container) return;
+  tab.stopped = true;
+  tab.status = 'disconnected';
+  renderTabBar();
+
+  const term = tab.term;
+  const cols = term.cols || 80;
+  const divider = '-'.repeat(cols);
+  // Red inline message + divider, written as real terminal content so it
+  // scrolls, copies, and saves like everything else in the session.
+  term.write(`\r\n\x1b[31m${message}\x1b[0m\r\n`);
+  term.write(`\x1b[36m${divider}\x1b[0m\r\n`);
+
+  tab.overlay?.remove();
+  const overlay = document.createElement('div');
+  overlay.className = 'disconnect-panel';
+
+  const title = document.createElement('div');
+  title.className = 'disconnect-title';
+  title.textContent = 'Session stopped';
+  overlay.appendChild(title);
+
+  const actions: { key: string; label: string; run: () => void; enabled: boolean }[] = [
+    { key: 'Enter', label: 'exit tab', run: () => closeTab(tab.id), enabled: true },
+    { key: 'R', label: 'restart session', run: () => { reconnectTab(tab); }, enabled: !!tab.reconnect },
+    { key: 'S', label: 'save terminal output to file', run: () => { saveTabOutput(tab); }, enabled: true },
+  ];
+
+  for (const action of actions) {
+    if (!action.enabled) continue;
+    const row = document.createElement('div');
+    row.className = 'disconnect-action';
+    const key = document.createElement('span');
+    key.className = 'disconnect-key';
+    key.textContent = action.key;
+    row.appendChild(key);
+    const label = document.createElement('span');
+    label.textContent = `to ${action.label}`;
+    row.appendChild(label);
+    row.onclick = action.run;
+    overlay.appendChild(row);
+  }
+
+  tab.container.appendChild(overlay);
+  tab.overlay = overlay;
+}
+
 function sessionMatchesQuery(s: SessionProfile, query: string): boolean {
   if (!query) return true;
   const q = query.toLowerCase();
@@ -888,6 +1009,65 @@ function clearConnectError() {
 
 // --- Connect flow (targets the currently active pending tab) ---
 
+// wireSSHEvents attaches the data/close listeners for a live SSH session
+// and (re)installs the tab's reconnect closure, used both on first
+// connect and after SPE-59's "R to restart session" action.
+function wireSSHEvents(tab: Tab, sessionId: string, req: ConnectRequest) {
+  runtime.EventsOn('ssh:data:' + sessionId, (data: unknown) => writeToTerminal(tab, data as string));
+  runtime.EventsOn('ssh:closed:' + sessionId, (payload: unknown) => {
+    showDisconnectPanel(tab, (payload as SessionClosedEvent).message);
+  });
+  tab.reconnect = () => reconnectSSH(tab, req);
+}
+
+// reconnectSSH re-runs Connect() on an already-live tab (as opposed to
+// connectActiveTab, which targets a fresh pending tab and creates a new
+// terminal). Reuses the existing terminal/container so scrollback from
+// the dead session, including the disconnect message, stays visible.
+async function reconnectSSH(tab: Tab, req: ConnectRequest): Promise<void> {
+  tab.status = 'connecting';
+  renderTabBar();
+
+  let result;
+  try {
+    result = await App.Connect(req);
+  } catch (err) {
+    showDisconnectPanel(tab, String(err));
+    return;
+  }
+
+  if (result.needsPassphrase) {
+    const passphrase = prompt('This key is encrypted. Enter its passphrase:');
+    if (passphrase === null) {
+      showDisconnectPanel(tab, 'Reconnect cancelled.');
+      return;
+    }
+    await reconnectSSH(tab, { ...req, passphrase });
+    return;
+  }
+
+  if (result.needsTrust) {
+    showTrustPrompt({
+      host: result.host!, fingerprint: result.fingerprint!, keyType: result.keyType!, changed: !!result.changed,
+      onAccept: async () => {
+        if (result.changed) await App.TrustHostDespiteChange(result.host!);
+        else await App.TrustHost(result.host!);
+        await reconnectSSH(tab, req);
+      },
+      onReject: () => showDisconnectPanel(tab, 'Reconnect cancelled.'),
+    });
+    return;
+  }
+
+  if (result.sessionId) {
+    tab.backendId = result.sessionId;
+    tab.status = 'connected';
+    renderTabBar();
+    tab.term!.write('\r\n\x1b[32mReconnected.\x1b[0m\r\n');
+    wireSSHEvents(tab, result.sessionId, req);
+  }
+}
+
 async function connectActiveTab(req: ConnectRequest) {
   const tab = tabs.get(activeTabId!)!;
   tab.status = 'connecting';
@@ -934,7 +1114,7 @@ async function connectActiveTab(req: ConnectRequest) {
     tab.backendId = result.sessionId;
     tab.status = 'connected';
     createTerminalForTab(tab);
-    runtime.EventsOn('ssh:data:' + result.sessionId, (data: unknown) => writeToTerminal(tab, data as string));
+    wireSSHEvents(tab, result.sessionId, req);
     switchToTab(tab.id);
     refreshFileList('.', result.sessionId);
 
@@ -1016,6 +1196,33 @@ async function newLocalShellTab(shell: string, label: string) {
   await startLocalShellInActiveTab(shell, label);
 }
 
+// wireSerialEvents mirrors wireSSHEvents for serial console sessions,
+// the direct-hardware-console analogue of a dropped SSH session (SPE-59).
+function wireSerialEvents(tab: Tab, id: string, portName: string, baud: number) {
+  runtime.EventsOn('serial:data:' + id, (data: unknown) => writeToTerminal(tab, data as string));
+  runtime.EventsOn('serial:closed:' + id, (payload: unknown) => {
+    showDisconnectPanel(tab, (payload as SessionClosedEvent).message);
+  });
+  tab.reconnect = () => reconnectSerial(tab, portName, baud);
+}
+
+async function reconnectSerial(tab: Tab, portName: string, baud: number): Promise<void> {
+  tab.status = 'connecting';
+  renderTabBar();
+  let id: string;
+  try {
+    id = await App.ConnectSerial(portName, baud);
+  } catch (err) {
+    showDisconnectPanel(tab, String(err));
+    return;
+  }
+  tab.backendId = id;
+  tab.status = 'connected';
+  renderTabBar();
+  tab.term!.write('\r\n\x1b[32mReconnected.\x1b[0m\r\n');
+  wireSerialEvents(tab, id, portName, baud);
+}
+
 async function connectSerialInActiveTab(portName: string, baud: number) {
   const tab = tabs.get(activeTabId!)!;
   tab.label = portName;
@@ -1024,7 +1231,7 @@ async function connectSerialInActiveTab(portName: string, baud: number) {
   tab.backendId = id;
   tab.status = 'connected';
   createTerminalForTab(tab);
-  runtime.EventsOn('serial:data:' + id, (data: unknown) => writeToTerminal(tab, data as string));
+  wireSerialEvents(tab, id, portName, baud);
   switchToTab(tab.id);
 
   if (!skipSerialSavePrompt) {

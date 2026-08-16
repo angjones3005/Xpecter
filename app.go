@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 
 	"specter/backend/config"
 	"specter/backend/pty"
@@ -44,6 +45,15 @@ func (a *App) shutdown(ctx context.Context) {
 	for _, sc := range a.serials {
 		sc.Close()
 	}
+}
+
+// SessionClosedEvent is emitted as "ssh:closed:<id>" / "serial:closed:<id>"
+// whenever a session's read loop stops unexpectedly (SPE-59). Deliberate
+// closes (the user closing the tab) never reach the frontend as an event,
+// since there's nothing useful to tell them at that point.
+type SessionClosedEvent struct {
+	EOF     bool   `json:"eof"`
+	Message string `json:"message"`
 }
 
 // --- Local terminals (one per tab) ---
@@ -97,6 +107,14 @@ func (a *App) ConnectSerial(portName string, baud int) (string, error) {
 	id := newID()
 	sc, err := serialclient.Open(portName, baud, func(data []byte) {
 		runtime.EventsEmit(a.ctx, "serial:data:"+id, string(data))
+	}, func(reason serialclient.CloseReason) {
+		if reason.Deliberate {
+			return
+		}
+		runtime.EventsEmit(a.ctx, "serial:closed:"+id, SessionClosedEvent{
+			EOF:     reason.EOF,
+			Message: closeErrorMessage(reason.Err),
+		})
 	})
 	if err != nil {
 		return "", err
@@ -180,12 +198,33 @@ func (a *App) Connect(req ConnectRequest) (ConnectResult, error) {
 
 	err = sess.StartShell(func(data []byte) {
 		runtime.EventsEmit(a.ctx, "ssh:data:"+id, string(data))
+	}, func(reason sshclient.CloseReason) {
+		if reason.Deliberate {
+			return
+		}
+		runtime.EventsEmit(a.ctx, "ssh:closed:"+id, SessionClosedEvent{
+			EOF:     reason.EOF,
+			Message: closeErrorMessage(reason.Err),
+		})
 	})
 	if err != nil {
 		return ConnectResult{}, err
 	}
 
 	return ConnectResult{SessionID: id}, nil
+}
+
+// closeErrorMessage renders a CloseReason's error for display, matching
+// MobaXterm's "Remote side unexpectedly closed network connection"
+// framing for the clean-EOF case.
+func closeErrorMessage(err error) string {
+	if err == nil {
+		return "Session ended"
+	}
+	if errors.Is(err, os.ErrClosed) {
+		return "Session ended"
+	}
+	return err.Error()
 }
 
 func (a *App) TrustHost(host string) error {
@@ -215,6 +254,27 @@ func (a *App) SelectKeyFile() (string, error) {
 	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
 		Title: "Select SSH Private Key",
 	})
+}
+
+// SaveTextFile prompts for a destination path and writes content to it,
+// used by the disconnected-session panel's "Save output to file" action
+// (SPE-59, matching MobaXterm's "S" option). Returns "" (no error) if the
+// user cancels the dialog.
+func (a *App) SaveTextFile(defaultFilename string, content string) (string, error) {
+	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "Save Terminal Output",
+		DefaultFilename: defaultFilename,
+	})
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", nil
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // --- Saved sessions ---
