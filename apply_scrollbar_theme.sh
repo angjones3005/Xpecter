@@ -1,3 +1,8 @@
+#!/usr/bin/env bash
+# Run from the root of your Specter repo.
+set -euo pipefail
+
+cat > "frontend/index.html" << 'SPECTER_EOF_INDEXHTML'
 <!doctype html>
 <html lang="en">
 <head>
@@ -5,7 +10,6 @@
   <title>Specter</title>
   <style>
     :root[data-theme="dark"] {
-      color-scheme: dark;
       --bg: #1e1e1e;
       --bg-alt: #252525;
       --bg-input: #1a1a1a;
@@ -19,7 +23,6 @@
       --warning: #d29922;
     }
     :root[data-theme="light"] {
-      color-scheme: light;
       --bg: #ffffff;
       --bg-alt: #f3f3f3;
       --bg-input: #ffffff;
@@ -167,21 +170,10 @@
        own decoration, never .xterm-viewport's background-color itself,
        that's what broke the scrollbar entirely earlier tonight, this
        is a completely different, safe styling surface. */
-    /* Real fix: hide the native scrollbar entirely and draw our own
-       (setupCustomScrollbar in main.ts). Two earlier attempts
-       (::-webkit-scrollbar styling, then the standard
-       scrollbar-width/scrollbar-color properties + color-scheme) both
-       worked on Linux/WebKitGTK but not Windows/WebView2, confirmed by
-       testing: WebView2 controls its native scrollbar via a separate
-       environment-level API Wails v2 doesn't expose, not something more
-       CSS properties can reach. A custom-drawn scrollbar is pure page
-       content, not dependent on any engine's native rendering, so it's
-       genuinely identical on every platform. */
-    .xterm-viewport { scrollbar-width: none; }
-    .xterm-viewport::-webkit-scrollbar { display: none; width: 0; }
-    .custom-scrollbar-track { position: absolute; top: 0; right: 2px; bottom: 0; width: 8px; z-index: 5; }
-    .custom-scrollbar-thumb { position: absolute; left: 0; right: 0; background: var(--border); border-radius: 4px; cursor: pointer; min-height: 20px; }
-    .custom-scrollbar-thumb:hover, .custom-scrollbar-thumb.dragging { background: var(--text-dim); }
+    .xterm-viewport::-webkit-scrollbar { width: 10px; }
+    .xterm-viewport::-webkit-scrollbar-track { background: var(--bg); }
+    .xterm-viewport::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
+    .xterm-viewport::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
   </style>
 </head>
 <body>
@@ -358,3 +350,5 @@
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>
+SPECTER_EOF_INDEXHTML
+
