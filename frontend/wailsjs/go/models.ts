@@ -58,6 +58,7 @@ export namespace config {
 	    colorScheme?: string;
 	    fontFamily?: string;
 	    fontSize?: number;
+	    sshKeepaliveDisabled?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -70,6 +71,7 @@ export namespace config {
 	        this.colorScheme = source["colorScheme"];
 	        this.fontFamily = source["fontFamily"];
 	        this.fontSize = source["fontSize"];
+	        this.sshKeepaliveDisabled = source["sshKeepaliveDisabled"];
 	    }
 	}
 
@@ -154,6 +156,7 @@ export namespace main {
 	    currentVersion: string;
 	    latestVersion: string;
 	    releaseUrl: string;
+	    assetUrl: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new UpdateInfo(source);
@@ -165,6 +168,7 @@ export namespace main {
 	        this.currentVersion = source["currentVersion"];
 	        this.latestVersion = source["latestVersion"];
 	        this.releaseUrl = source["releaseUrl"];
+	        this.assetUrl = source["assetUrl"];
 	    }
 	}
 

@@ -1,3 +1,8 @@
+#!/usr/bin/env bash
+# Run from the root of your Specter repo.
+set -euo pipefail
+
+cat > "update.go" << 'SPECTER_EOF_UPDATEGO'
 package main
 
 import (
@@ -340,3 +345,5 @@ func parseVersion(v string) [3]int {
 	}
 	return out
 }
+SPECTER_EOF_UPDATEGO
+

@@ -1,3 +1,8 @@
+#!/usr/bin/env bash
+# Run from the root of your Specter repo.
+set -euo pipefail
+
+cat > "frontend/src/main.ts" << 'SPECTER_EOF_MAINTS'
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import * as monaco from 'monaco-editor';
@@ -169,39 +174,6 @@ function refreshAllTerminalThemes() {
   }
 }
 
-// SPE-77: zoom drives the same persisted appSettings.fontSize shown in
-// Settings, not a separate temporary zoom layer, confirmed choice.
-// Applies to every live tab (font size is global, not per-tab, same
-// reasoning as refreshAllTerminalThemes above), refitting and notifying
-// the backend of the new terminal size for each, mirroring what
-// refitActiveTerminal does for a single tab.
-const FONT_SIZE_MIN = 8;
-const FONT_SIZE_MAX = 32;
-const FONT_SIZE_DEFAULT = 13;
-
-function applyFontSize(size: number) {
-  const clamped = Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, Math.round(size)));
-  appSettings.fontSize = clamped;
-  for (const tab of tabs.values()) {
-    if (!tab.term || !tab.fitAddon) continue;
-    tab.term.options.fontSize = clamped;
-    tab.fitAddon.fit();
-    if (tab.mode === 'local' && tab.backendId) App.ResizeLocalTerminal(tab.backendId, tab.term.cols, tab.term.rows);
-    if (tab.mode === 'ssh' && tab.backendId) App.ResizeSSH(tab.backendId, tab.term.cols, tab.term.rows);
-  }
-  // SPE-78: editor shares the same font size setting as the terminal,
-  // confirmed choice, not an independent editor-specific size.
-  editor.updateOptions({ fontSize: clamped });
-  const slider = document.getElementById('zoom-slider') as HTMLInputElement;
-  slider.value = String(clamped);
-  document.getElementById('zoom-readout')!.textContent = `${clamped}px`;
-  App.SaveSettings(appSettings);
-}
-
-function zoomBy(delta: number) {
-  applyFontSize((appSettings.fontSize || FONT_SIZE_DEFAULT) + delta);
-}
-
 function applyColorScheme(name: ColorScheme) {
   appSettings.colorScheme = name;
   App.SaveSettings(appSettings);
@@ -301,14 +273,6 @@ async function loadSettingsAndApply() {
   opacitySlider.value = String(Math.round((appSettings.wallpaperOpacity ?? 0.15) * 100));
   applyWallpaperVisual();
 
-  const keepaliveToggle = document.getElementById('ssh-keepalive-toggle') as HTMLInputElement;
-  keepaliveToggle.checked = !appSettings.sshKeepaliveDisabled;
-
-  const slider = document.getElementById('zoom-slider') as HTMLInputElement;
-  const initialSize = appSettings.fontSize || FONT_SIZE_DEFAULT;
-  slider.value = String(initialSize);
-  document.getElementById('zoom-readout')!.textContent = `${initialSize}px`;
-
   // In case a tab was created before this async load resolved (race:
   // GetSettings is an IPC round-trip), reapply font to whatever's live.
   // refreshAllTerminalThemes (called by applyWallpaperVisual above)
@@ -317,14 +281,6 @@ async function loadSettingsAndApply() {
   document.body.style.fontFamily = stack;
   for (const tab of tabs.values()) {
     if (tab.term) tab.term.options.fontFamily = stack;
-  }
-  // Same race-condition reasoning for font SIZE: the editor was created
-  // synchronously at module load, before this async settings load
-  // resolved, and terminal tabs may exist too if one connected fast.
-  const savedFontSize = appSettings.fontSize || FONT_SIZE_DEFAULT;
-  editor.updateOptions({ fontSize: savedFontSize });
-  for (const tab of tabs.values()) {
-    if (tab.term) tab.term.options.fontSize = savedFontSize;
   }
 }
 
@@ -422,27 +378,13 @@ function createPendingTab(): Tab {
   return tab;
 }
 
-// SPE-97: opt-in (defaults off), a numbered badge is a minor visual
-// addition, not a safety/correctness feature, so it follows the
-// opt-in convention rather than the default-on one.
-let showTabNumbersEnabled = localStorage.getItem('specter-show-tab-numbers') === 'on';
-
 function renderTabBar() {
   const bar = document.getElementById('tab-bar')!;
   bar.innerHTML = '';
-  let tabIndex = 0;
   for (const tab of tabs.values()) {
-    tabIndex++;
     const el = document.createElement('div');
     el.className = 'tab' + (tab.id === activeTabId ? ' active' : '');
     el.onclick = () => switchToTab(tab.id);
-
-    if (showTabNumbersEnabled) {
-      const num = document.createElement('span');
-      num.textContent = String(tabIndex);
-      num.style.cssText = 'opacity:0.5;font-size:10px;margin-right:5px;';
-      el.appendChild(num);
-    }
 
     const dot = document.createElement('span');
     dot.className = 'status-dot ' + tab.status;
@@ -499,15 +441,6 @@ function switchToTab(id: string) {
 async function closeTab(id: string) {
   const tab = tabs.get(id);
   if (!tab) return;
-
-  // SPE-81: only prompt for a genuinely live session, not the disconnect
-  // panel's own "exit tab" action (tab.stopped is already true there,
-  // there's nothing live left to lose), and not a pending/never-connected
-  // tab, matching the ticket's own scope note.
-  if (tab.status === 'connected' && !tab.stopped) {
-    const proceed = confirm(`Close this tab? The session is still connected (${tab.label}).`);
-    if (!proceed) return;
-  }
 
   if (tab.mode === 'ssh' && tab.backendId) {
     await App.CloseSSH(tab.backendId);
@@ -634,28 +567,6 @@ function setupCustomScrollbar(tab: Tab) {
   update();
 }
 
-// SPE-80: warn before sending clipboard content containing multiple
-// lines, since each line can execute as a separate command once it
-// reaches a remote shell, a real safety net especially on network
-// hardware where a pasted multi-line block could silently apply
-// several config commands in sequence. Toggleable, matching the
-// checkbox precedent this was modeled on; not everyone wants a prompt
-// on every multi-line paste.
-let warnMultilinePasteEnabled = localStorage.getItem('specter-warn-multiline-paste') !== 'off';
-
-function writeToTabWithPasteGuard(tab: Tab, text: string) {
-  if (warnMultilinePasteEnabled) {
-    const lines = text.split(/\r\n|\r|\n/).filter((l, i, arr) => !(i === arr.length - 1 && l === ''));
-    if (lines.length > 1) {
-      const proceed = confirm(`You're about to paste ${lines.length} lines. Each line may run as a separate command on the remote end. Continue?`);
-      if (!proceed) return;
-    }
-  }
-  if (tab.mode === 'local' && tab.backendId) App.WriteLocalTerminal(tab.backendId, text);
-  if (tab.mode === 'ssh' && tab.backendId) App.WriteSSH(tab.backendId, text);
-  if (tab.mode === 'serial' && tab.backendId) App.WriteSerial(tab.backendId, text);
-}
-
 function createTerminalForTab(tab: Tab) {
   const container = document.createElement('div');
   container.className = 'term-instance';
@@ -664,7 +575,7 @@ function createTerminalForTab(tab: Tab) {
 
   const term = new Terminal({
     fontFamily: fontStack(appSettings.fontFamily || FONT_OPTIONS[0].value),
-    fontSize: appSettings.fontSize || FONT_SIZE_DEFAULT,
+    fontSize: appSettings.fontSize || 13,
     theme: activeXtermTheme(),
   });
   const fitAddon = new FitAddon();
@@ -727,25 +638,11 @@ function createTerminalForTab(tab: Tab) {
       return false;
     }
     if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
-      navigator.clipboard.readText().then((text) => writeToTabWithPasteGuard(tab, text)).catch(() => {});
-      return false;
-    }
-    if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
-      // SPE-77. Accepts both '=' and '+' since Plus is Shift+Equals on
-      // most layouts, matching how browsers handle Ctrl+= zoom too.
-      zoomBy(1);
-      return false;
-    }
-    if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && e.key === '-') {
-      zoomBy(-1);
-      return false;
-    }
-    if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && e.key === '0') {
-      applyFontSize(FONT_SIZE_DEFAULT);
-      return false;
-    }
-    if (e.type === 'keydown' && e.key === 'F11') {
-      toggleFullscreen();
+      navigator.clipboard.readText().then((text) => {
+        if (tab.mode === 'local' && tab.backendId) App.WriteLocalTerminal(tab.backendId, text);
+        if (tab.mode === 'ssh' && tab.backendId) App.WriteSSH(tab.backendId, text);
+        if (tab.mode === 'serial' && tab.backendId) App.WriteSerial(tab.backendId, text);
+      }).catch(() => {});
       return false;
     }
     return true;
@@ -755,22 +652,12 @@ function createTerminalForTab(tab: Tab) {
   container.addEventListener('contextmenu', (e) => {
     if (!rightClickPasteEnabled) return;
     e.preventDefault();
-    App.GetClipboardText().then((text) => writeToTabWithPasteGuard(tab, text)).catch(() => {});
+    App.GetClipboardText().then((text) => {
+      if (tab.mode === 'local' && tab.backendId) App.WriteLocalTerminal(tab.backendId, text);
+      if (tab.mode === 'ssh' && tab.backendId) App.WriteSSH(tab.backendId, text);
+      if (tab.mode === 'serial' && tab.backendId) App.WriteSerial(tab.backendId, text);
+    }).catch(() => {});
   });
-
-  // Native browser paste (Ctrl+V, middle-click on Linux, right-click ->
-  // Paste in some contexts, etc.), xterm.js listens for this itself and
-  // would otherwise feed it straight through to onData below with no
-  // multi-line awareness at all. Intercepted here instead, at capture
-  // phase so it runs before xterm's own listener, so it goes through
-  // the same guard as the other two paste paths above.
-  container.addEventListener('paste', (e) => {
-    if (!e.clipboardData) return; // let default handling proceed if unavailable
-    e.preventDefault();
-    e.stopPropagation();
-    const text = e.clipboardData.getData('text');
-    if (text) writeToTabWithPasteGuard(tab, text);
-  }, true);
 
   term.onData((data) => {
     if (tab.mode === 'local' && tab.backendId) App.WriteLocalTerminal(tab.backendId, data);
@@ -804,12 +691,6 @@ const editor = monaco.editor.create(document.getElementById('editor')!, {
   language: 'plaintext',
   theme: MONACO_THEMES[currentTheme()],
   automaticLayout: true,
-  // SPE-78: shares appSettings.fontSize with the terminal (confirmed
-  // choice), appSettings isn't populated yet at this point in module
-  // load order (loadSettingsAndApply is async), loadSettingsAndApply
-  // re-applies the real value once it resolves, same race-condition
-  // pattern already used for the terminal's own font-family sync.
-  fontSize: appSettings.fontSize || FONT_SIZE_DEFAULT,
 });
 
 function toggleEditorPane() {
@@ -832,30 +713,17 @@ document.getElementById('menu-toggle-editor')!.addEventListener('click', () => {
 
 let openFilePath: string | null = null;
 let openFileSessionId: string | null = null;
-// SPE-78: local file support alongside the existing remote (SSH) editing.
-// openFileSessionId stays null for both "nothing open" and "a local file
-// is open", this flag is what actually distinguishes the two.
-let openFileIsLocal = false;
 
-let editorStatusTimer: ReturnType<typeof setTimeout> | null = null;
-function flashEditorStatus(msg: string, isError = false) {
-  const el = document.getElementById('editor-status')!;
-  el.textContent = msg;
-  el.style.color = isError ? 'var(--danger)' : 'var(--success)';
-  el.style.opacity = '1';
-  if (editorStatusTimer) clearTimeout(editorStatusTimer);
-  editorStatusTimer = setTimeout(() => { el.style.opacity = '0'; }, 2000);
-}
-
-// Shared tail end of opening a file, whether local or remote:
-// language detection, showing/expanding the pane, loading content.
-function finishOpeningFile(path: string, content: string) {
+async function openRemoteFile(sessionId: string, path: string) {
+  const content = await App.ReadRemoteFile(sessionId, path);
+  openFilePath = path;
+  openFileSessionId = sessionId;
   document.getElementById('editor-path')!.textContent = path;
   document.getElementById('editor-close')!.style.display = 'inline';
-  // The editor pane defaults to collapsed (nothing to show until a
-  // file's actually open), opening one needs to explicitly restore it,
-  // otherwise the content loads into Monaco invisibly behind a hidden
-  // pane.
+  // The editor pane now defaults to collapsed (nothing to show until a
+  // file's actually open), so opening one needs to explicitly restore
+  // it, otherwise the content loads into Monaco invisibly behind a
+  // hidden pane.
   document.getElementById('app')!.classList.remove('editor-collapsed');
   document.getElementById('editor-expand-btn')!.style.display = 'none';
   refitActiveTerminal();
@@ -867,97 +735,10 @@ function finishOpeningFile(path: string, content: string) {
   editor.setValue(content);
 }
 
-async function openRemoteFile(sessionId: string, path: string) {
-  const content = await App.ReadRemoteFile(sessionId, path);
-  openFilePath = path;
-  openFileSessionId = sessionId;
-  openFileIsLocal = false;
-  finishOpeningFile(path, content);
-}
-
-async function openLocalFile() {
-  const path = await App.SelectAnyFile();
-  if (!path) return; // cancelled
-  const content = await App.ReadLocalFile(path);
-  openFilePath = path;
-  openFileSessionId = null;
-  openFileIsLocal = true;
-  finishOpeningFile(path, content);
-}
-
-async function saveCurrentFile() {
-  if (!openFilePath) {
-    // Nothing open yet (Untitled), Save behaves like Save As rather
-    // than silently doing nothing, matching most editors' convention.
-    return saveAsLocal();
-  }
-  try {
-    if (openFileIsLocal) {
-      await App.WriteLocalFile(openFilePath, editor.getValue());
-    } else if (openFileSessionId) {
-      await App.WriteRemoteFile(openFileSessionId, openFilePath, editor.getValue());
-    }
-    flashEditorStatus('Saved');
-  } catch (err) {
-    flashEditorStatus(`Save failed: ${err}`, true);
-  }
-}
-
-async function saveAsLocal() {
-  const defaultName = openFilePath ? openFilePath.split(/[\\/]/).pop()! : 'Untitled.txt';
-  const path = await App.SaveTextFile(defaultName, editor.getValue());
-  if (!path) return; // cancelled
-  openFilePath = path;
-  openFileSessionId = null;
-  openFileIsLocal = true;
-  document.getElementById('editor-path')!.textContent = path;
-  document.getElementById('editor-close')!.style.display = 'inline';
-  flashEditorStatus('Saved');
-}
-
-async function saveAsRemote() {
-  const sessionId = openFileSessionId ?? (activeTabId ? tabs.get(activeTabId)?.backendId : null);
-  if (!sessionId) {
-    alert('No active SSH session to save to. Open or switch to an SSH tab first.');
-    return;
-  }
-  const defaultPath = openFilePath && !openFileIsLocal
-    ? openFilePath
-    : (currentRemotePath === '.' ? 'untitled.txt' : `${currentRemotePath}/untitled.txt`);
-  const newPath = prompt('Save to remote path:', defaultPath);
-  if (!newPath) return; // cancelled
-  try {
-    await App.WriteRemoteFile(sessionId, newPath, editor.getValue());
-    openFilePath = newPath;
-    openFileSessionId = sessionId;
-    openFileIsLocal = false;
-    document.getElementById('editor-path')!.textContent = newPath;
-    document.getElementById('editor-close')!.style.display = 'inline';
-    flashEditorStatus('Saved');
-  } catch (err) {
-    flashEditorStatus(`Save failed: ${err}`, true);
-  }
-}
-
-document.getElementById('editor-open-btn')!.addEventListener('click', () => { openLocalFile(); });
-document.getElementById('editor-save-btn')!.addEventListener('click', () => { saveCurrentFile(); });
-
-const saveAsMenu = document.getElementById('editor-saveas-menu')!;
-document.getElementById('editor-saveas-btn')!.addEventListener('click', (e) => {
-  e.stopPropagation();
-  saveAsMenu.style.display = saveAsMenu.style.display === 'block' ? 'none' : 'block';
+editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, async () => {
+  if (!openFileSessionId || !openFilePath) return;
+  await App.WriteRemoteFile(openFileSessionId, openFilePath, editor.getValue());
 });
-document.getElementById('editor-saveas-local')!.addEventListener('click', () => {
-  saveAsMenu.style.display = 'none';
-  saveAsLocal();
-});
-document.getElementById('editor-saveas-remote')!.addEventListener('click', () => {
-  saveAsMenu.style.display = 'none';
-  saveAsRemote();
-});
-document.addEventListener('click', () => { saveAsMenu.style.display = 'none'; });
-
-editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => { saveCurrentFile(); });
 
 // --- File browser (scoped to whichever SSH tab is active) ---
 
@@ -2133,31 +1914,7 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     toggleSidebar();
   }
-  // SPE-77 zoom, same global-fallback reasoning.
-  if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
-    e.preventDefault();
-    zoomBy(1);
-  }
-  if ((e.ctrlKey || e.metaKey) && e.key === '-') {
-    e.preventDefault();
-    zoomBy(-1);
-  }
-  if ((e.ctrlKey || e.metaKey) && e.key === '0') {
-    e.preventDefault();
-    applyFontSize(FONT_SIZE_DEFAULT);
-  }
-  if (e.key === 'F11') {
-    e.preventDefault();
-    toggleFullscreen();
-  }
 });
-
-document.getElementById('zoom-slider')!.addEventListener('input', (e) => {
-  applyFontSize(Number((e.target as HTMLInputElement).value));
-});
-document.getElementById('zoom-in-btn')!.addEventListener('click', () => zoomBy(1));
-document.getElementById('zoom-out-btn')!.addEventListener('click', () => zoomBy(-1));
-document.getElementById('zoom-reset-btn')!.addEventListener('click', () => applyFontSize(FONT_SIZE_DEFAULT));
 
 document.addEventListener('keyup', checkCapsLock);
 
@@ -2221,49 +1978,6 @@ applyTheme(currentTheme());
 themeSelect.addEventListener('change', () => {
   applyTheme(themeSelect.value as ThemeName);
 });
-
-// SPE-96: applied synchronously from localStorage on startup (like
-// theme above), rather than waiting on the async GetSettings() round
-// trip, no reason a same-machine layout preference needs an IPC call.
-function currentSidebarPosition(): 'left' | 'right' {
-  return localStorage.getItem('specter-sidebar-position') === 'right' ? 'right' : 'left';
-}
-// Deliberately minimal, safe to call synchronously at startup: just the
-// CSS class + localStorage, nothing that touches currentColumnTemplate
-// (a let declared much later in this file). Confirmed the hard way that
-// referencing a let before its declaration line has run throws a
-// temporal-dead-zone ReferenceError that silently halts ALL script
-// execution after it, every button below this point stopped working
-// entirely, not just this feature.
-function applySidebarPosition(pos: 'left' | 'right') {
-  document.getElementById('app')!.classList.toggle('sidebar-right', pos === 'right');
-  localStorage.setItem('specter-sidebar-position', pos);
-}
-const sidebarPositionSelect = document.getElementById('sidebar-position-select') as HTMLSelectElement;
-sidebarPositionSelect.value = currentSidebarPosition();
-applySidebarPosition(currentSidebarPosition());
-sidebarPositionSelect.addEventListener('change', () => {
-  // The currentColumnTemplate reset (safe here: this only runs on user
-  // interaction, long after the whole script, including that later let
-  // declaration, has finished loading) stays deferred to this handler,
-  // not the startup call above, same pattern toggleSidebar/
-  // toggleEditorPane already use for the identical reason.
-  const app = document.getElementById('app')!;
-  app.style.gridTemplateColumns = '';
-  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
-  applySidebarPosition(sidebarPositionSelect.value as 'left' | 'right');
-  refitActiveTerminal();
-});
-
-// SPE-98: one-click toggle in the title bar, alongside applyTheme,
-// keeping the Settings dropdown in sync so neither path shows a stale
-// value if the other one was used most recently.
-function toggleThemeQuick() {
-  const next: ThemeName = currentTheme() === 'dark' ? 'light' : 'dark';
-  applyTheme(next);
-  themeSelect.value = next;
-}
-document.getElementById('theme-toggle-btn')!.addEventListener('click', toggleThemeQuick);
 
 // SPE-61: terminal color scheme, font, and wallpaper. Loaded from the
 // backend-persisted settings.json (loadSettingsAndApply), independent
@@ -2387,31 +2101,6 @@ rclickPasteToggle.addEventListener('change', () => {
   localStorage.setItem('specter-rclick-paste', rightClickPasteEnabled ? 'on' : 'off');
 });
 
-const warnMultilinePasteToggle = document.getElementById('warn-multiline-paste-toggle') as HTMLInputElement;
-warnMultilinePasteToggle.checked = warnMultilinePasteEnabled;
-warnMultilinePasteToggle.addEventListener('change', () => {
-  warnMultilinePasteEnabled = warnMultilinePasteToggle.checked;
-  localStorage.setItem('specter-warn-multiline-paste', warnMultilinePasteEnabled ? 'on' : 'off');
-});
-
-// SPE-79: unlike the toggles above, this one lives in the Go-backed
-// config.Settings (App.SaveSettings), not localStorage, since Connect()
-// needs to read it fresh from settings.json at connect time, not just
-// the frontend's own in-memory state.
-const keepaliveToggle = document.getElementById('ssh-keepalive-toggle') as HTMLInputElement;
-keepaliveToggle.addEventListener('change', () => {
-  appSettings.sshKeepaliveDisabled = !keepaliveToggle.checked;
-  App.SaveSettings(appSettings);
-});
-
-const showTabNumbersToggle = document.getElementById('show-tab-numbers-toggle') as HTMLInputElement;
-showTabNumbersToggle.checked = showTabNumbersEnabled;
-showTabNumbersToggle.addEventListener('change', () => {
-  showTabNumbersEnabled = showTabNumbersToggle.checked;
-  localStorage.setItem('specter-show-tab-numbers', showTabNumbersEnabled ? 'on' : 'off');
-  renderTabBar();
-});
-
 const highlightToggle = document.getElementById('highlight-toggle') as HTMLInputElement;
 highlightToggle.checked = highlightEnabled;
 highlightToggle.addEventListener('change', () => {
@@ -2501,16 +2190,6 @@ function resetPickerView() {
 }
 function openSessionPicker() {
   resetPickerView();
-  // SPE-83: pre-fill with the OS username, matching MobaXterm's "same
-  // as Windows login" default, only if the field is currently empty,
-  // never overwrite something the person already typed or a saved
-  // session's own stored username.
-  const userField = document.getElementById('user') as HTMLInputElement;
-  if (!userField.value) {
-    App.GetOSUsername().then((name) => {
-      if (name && !userField.value) userField.value = name;
-    }).catch(() => {});
-  }
   document.getElementById('session-picker-overlay')!.classList.add('open');
 }
 function closeSessionPicker() {
@@ -2576,21 +2255,6 @@ function toggleSidebar() {
 document.getElementById('menu-toggle-sidebar')!.addEventListener('click', () => {
   closeAllMenus();
   toggleSidebar();
-});
-
-// SPE-95: distinct from window maximize, hides all chrome (menu bar,
-// title bar) and uses the whole screen, matching F11 convention. F11
-// itself is safe to claim globally, unlike some of the other shortcuts
-// tonight (Ctrl+B/tmux etc.), it's not a meaningful readline/shell
-// binding anywhere.
-async function toggleFullscreen() {
-  const isFull = await runtime.WindowIsFullscreen();
-  if (isFull) runtime.WindowUnfullscreen();
-  else runtime.WindowFullscreen();
-}
-document.getElementById('menu-toggle-fullscreen')!.addEventListener('click', () => {
-  closeAllMenus();
-  toggleFullscreen();
 });
 document.getElementById('sidebar-collapse-btn')!.addEventListener('click', toggleSidebar);
 document.getElementById('sidebar-expand-btn')!.addEventListener('click', toggleSidebar);
@@ -2662,3 +2326,5 @@ setupPaneResize('resize-sidebar', 0, 150);
 setupPaneResize('resize-editor', 2, 200);
 
 renderSessionList();renderSessionList();
+SPECTER_EOF_MAINTS
+

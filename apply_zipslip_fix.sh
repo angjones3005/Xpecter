@@ -1,3 +1,8 @@
+#!/usr/bin/env bash
+# Run from the root of your Specter repo.
+set -euo pipefail
+
+cat > "update.go" << 'SPECTER_EOF_UPDATEGO'
 package main
 
 import (
@@ -15,13 +20,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	// Aliased: this file already uses the standard library's "runtime"
-	// package (runtime.GOOS) for platform detection, Wails' own runtime
-	// package (needed here to quit the app so the Windows installer
-	// isn't blocked by a file lock on the running exe) would otherwise
-	// collide with that name within this file.
-	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // Version is overridden at release-build time via
@@ -160,22 +158,7 @@ func (a *App) DownloadAndInstallUpdate(assetURL string) error {
 	switch runtime.GOOS {
 	case "windows":
 		cmd := exec.Command(destPath)
-		if err := cmd.Start(); err != nil {
-			return err
-		}
-		// Give the installer a moment to actually launch and show its
-		// own window, then quit Specter so its own exe is no longer
-		// locked, the installer needs that to overwrite the old files
-		// as part of a normal reinstall to the same location (this is
-		// the installer's own well-tested behavior, not something
-		// Specter deletes manually). Async so this method still returns
-		// normally to the frontend first, rather than the app
-		// disappearing mid-request.
-		go func() {
-			time.Sleep(2 * time.Second)
-			wailsruntime.Quit(a.ctx)
-		}()
-		return nil
+		return cmd.Start()
 
 	case "darwin":
 		extractDir := filepath.Join(tmpDir, "extracted")
@@ -340,3 +323,5 @@ func parseVersion(v string) [3]int {
 	}
 	return out
 }
+SPECTER_EOF_UPDATEGO
+

@@ -1,3 +1,8 @@
+#!/usr/bin/env bash
+# Run from the root of your Specter repo.
+set -euo pipefail
+
+cat > "frontend/src/main.ts" << 'SPECTER_EOF_MAINTS'
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import * as monaco from 'monaco-editor';
@@ -2228,31 +2233,24 @@ themeSelect.addEventListener('change', () => {
 function currentSidebarPosition(): 'left' | 'right' {
   return localStorage.getItem('specter-sidebar-position') === 'right' ? 'right' : 'left';
 }
-// Deliberately minimal, safe to call synchronously at startup: just the
-// CSS class + localStorage, nothing that touches currentColumnTemplate
-// (a let declared much later in this file). Confirmed the hard way that
-// referencing a let before its declaration line has run throws a
-// temporal-dead-zone ReferenceError that silently halts ALL script
-// execution after it, every button below this point stopped working
-// entirely, not just this feature.
 function applySidebarPosition(pos: 'left' | 'right') {
-  document.getElementById('app')!.classList.toggle('sidebar-right', pos === 'right');
+  // Clear any inline override from resize-dragging and reset the
+  // tracked template, same reasoning as toggleSidebar/toggleEditorPane:
+  // the CSS class rules already handle every collapse combination
+  // correctly (verified), a stale inline override from before a
+  // position switch would fight with them.
+  const app = document.getElementById('app')!;
+  app.style.gridTemplateColumns = '';
+  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
+  app.classList.toggle('sidebar-right', pos === 'right');
   localStorage.setItem('specter-sidebar-position', pos);
+  refitActiveTerminal();
 }
 const sidebarPositionSelect = document.getElementById('sidebar-position-select') as HTMLSelectElement;
 sidebarPositionSelect.value = currentSidebarPosition();
 applySidebarPosition(currentSidebarPosition());
 sidebarPositionSelect.addEventListener('change', () => {
-  // The currentColumnTemplate reset (safe here: this only runs on user
-  // interaction, long after the whole script, including that later let
-  // declaration, has finished loading) stays deferred to this handler,
-  // not the startup call above, same pattern toggleSidebar/
-  // toggleEditorPane already use for the identical reason.
-  const app = document.getElementById('app')!;
-  app.style.gridTemplateColumns = '';
-  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
   applySidebarPosition(sidebarPositionSelect.value as 'left' | 'right');
-  refitActiveTerminal();
 });
 
 // SPE-98: one-click toggle in the title bar, alongside applyTheme,
@@ -2662,3 +2660,6 @@ setupPaneResize('resize-sidebar', 0, 150);
 setupPaneResize('resize-editor', 2, 200);
 
 renderSessionList();renderSessionList();
+SPECTER_EOF_MAINTS
+
+echo "Wrote $(wc -l < frontend/src/main.ts) lines (expect 2657)"

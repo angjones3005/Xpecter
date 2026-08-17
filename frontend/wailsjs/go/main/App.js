@@ -34,8 +34,16 @@ export function DeleteSession(arg1) {
   return window['go']['main']['App']['DeleteSession'](arg1);
 }
 
+export function DownloadAndInstallUpdate(arg1) {
+  return window['go']['main']['App']['DownloadAndInstallUpdate'](arg1);
+}
+
 export function GetClipboardText() {
   return window['go']['main']['App']['GetClipboardText']();
+}
+
+export function GetOSUsername() {
+  return window['go']['main']['App']['GetOSUsername']();
 }
 
 export function GetPlatform() {
@@ -70,6 +78,10 @@ export function ReadImageFile(arg1) {
   return window['go']['main']['App']['ReadImageFile'](arg1);
 }
 
+export function ReadLocalFile(arg1) {
+  return window['go']['main']['App']['ReadLocalFile'](arg1);
+}
+
 export function ReadRemoteFile(arg1, arg2) {
   return window['go']['main']['App']['ReadRemoteFile'](arg1, arg2);
 }
@@ -98,6 +110,10 @@ export function SaveTextFile(arg1, arg2) {
   return window['go']['main']['App']['SaveTextFile'](arg1, arg2);
 }
 
+export function SelectAnyFile() {
+  return window['go']['main']['App']['SelectAnyFile']();
+}
+
 export function SelectImageFile() {
   return window['go']['main']['App']['SelectImageFile']();
 }
@@ -120,6 +136,10 @@ export function TrustHostDespiteChange(arg1) {
 
 export function UploadRemoteFile(arg1, arg2, arg3) {
   return window['go']['main']['App']['UploadRemoteFile'](arg1, arg2, arg3);
+}
+
+export function WriteLocalFile(arg1, arg2) {
+  return window['go']['main']['App']['WriteLocalFile'](arg1, arg2);
 }
 
 export function WriteLocalTerminal(arg1, arg2) {

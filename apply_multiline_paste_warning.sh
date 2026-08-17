@@ -1,3 +1,372 @@
+#!/usr/bin/env bash
+# Run from the root of your Specter repo.
+set -euo pipefail
+
+cat > "frontend/index.html" << 'SPECTER_EOF_0'
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Specter</title>
+  <style>
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #1e1e1e;
+      --bg-alt: #252525;
+      --bg-input: #1a1a1a;
+      --border: #333;
+      --text: #ddd;
+      --text-dim: #999;
+      --hover: #2a2a2a;
+      --accent: #3178c6;
+      --danger: #e5484d;
+      --success: #2ea043;
+      --warning: #d29922;
+    }
+    :root[data-theme="light"] {
+      color-scheme: light;
+      --bg: #ffffff;
+      --bg-alt: #f3f3f3;
+      --bg-input: #ffffff;
+      --border: #d0d0d0;
+      --text: #1e1e1e;
+      --text-dim: #666;
+      --hover: #e8e8e8;
+      --accent: #3178c6;
+      --danger: #cf3d3e;
+      --success: #1f8a3d;
+      --warning: #a06800;
+    }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: sans-serif; }
+    body { display: flex; flex-direction: column; }
+    #menubar { flex: 0 0 auto; display: flex; align-items: center; background: var(--bg-alt); border-bottom: 1px solid var(--border); font-size: 13px; user-select: none; position: relative; z-index: 500; --wails-draggable: drag; }
+    #menubar .menu-item { padding: 5px 12px; cursor: pointer; color: var(--text); position: relative; --wails-draggable: no-drag; }
+    #menubar .menu-item:hover, #menubar .menu-item.open { background: var(--hover); }
+    #menubar .menu-dropdown { position: absolute; top: 100%; left: 0; background: var(--bg-alt); border: 1px solid var(--border); min-width: 190px; display: none; flex-direction: column; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+    #menubar .menu-dropdown.open { display: flex; }
+    #menubar .menu-dropdown .item { padding: 6px 12px; cursor: pointer; white-space: nowrap; }
+    #menubar .menu-dropdown .item:hover { background: var(--hover); }
+    #menubar .menu-dropdown .item.disabled { opacity: 0.4; cursor: default; pointer-events: none; }
+    #menubar .menu-dropdown .separator { border-top: 1px solid var(--border); margin: 4px 0; }
+    #menubar .menu-dropdown .item label { display: flex; align-items: center; gap: 6px; cursor: pointer; width: 100%; justify-content: space-between; }
+    /* Frameless window: this bar IS the title bar (--wails-draggable:drag
+       above), so brand/spacer/controls opt back OUT of dragging where
+       they need real clicks. */
+    #titlebar-brand { display: flex; align-items: center; gap: 6px; padding: 0 10px 0 12px; --wails-draggable: no-drag; }
+    #titlebar-brand img { width: 18px; height: 18px; border-radius: 4px; display: block; }
+    #titlebar-brand span { font-weight: 600; color: var(--text); letter-spacing: 0.2px; }
+    #titlebar-spacer { flex: 1; align-self: stretch; }
+    #titlebar-controls { display: flex; align-self: stretch; --wails-draggable: no-drag; }
+    #titlebar-controls button { width: 44px; border: none; background: transparent; color: var(--text-dim); cursor: pointer; font-size: 13px; display: flex; align-items: center; justify-content: center; }
+    #titlebar-controls button:hover { background: var(--hover); color: var(--text); }
+    #titlebar-controls button#win-close:hover { background: #e5484d; color: #ffffff; }
+    #app { flex: 1; min-height: 0; display: grid; grid-template-columns: 220px 5px 1fr 5px 1fr; }
+    #statusbar { flex: 0 0 auto; height: 22px; background: var(--bg-alt); border-top: 1px solid var(--border); display: flex; align-items: center; padding: 0 10px; font-size: 11px; color: var(--text-dim); }
+    #app.sidebar-collapsed { grid-template-columns: 0px 0px 1fr 5px 1fr; }
+    #app.sidebar-collapsed #sidebar, #app.sidebar-collapsed #resize-sidebar { display: none; }
+    .resize-handle { cursor: col-resize; background: transparent; }
+    #resize-sidebar { grid-column: 2; }
+    #resize-editor { grid-column: 4; }
+    .resize-handle:hover, .resize-handle.dragging { background: var(--accent); }
+    #sidebar { border-right: 1px solid var(--border); overflow-y: auto; padding: 8px; font-size: 13px; grid-column: 1; }
+    #sidebar .entry { padding: 4px 6px; cursor: pointer; border-radius: 4px; }
+    #sidebar .entry:hover { background: var(--hover); }
+    .session-entry { padding: 4px 6px; cursor: pointer; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
+    .session-entry:hover { background: var(--hover); }
+    .session-entry .delete-btn { opacity: 0.5; font-size: 11px; }
+    .session-entry .delete-btn:hover { opacity: 1; color: var(--danger); }
+    #terminal-pane { border-right: 1px solid var(--border); min-width: 0; display: flex; flex-direction: column; overflow: hidden; grid-column: 3; }
+    #editor-pane { min-width: 0; display: flex; flex-direction: column; overflow: hidden; grid-column: 5; }
+    #app.editor-collapsed { grid-template-columns: 220px 5px 1fr 0px 0px; }
+    #app.editor-collapsed.sidebar-collapsed { grid-template-columns: 0px 0px 1fr 0px 0px; }
+    #app.editor-collapsed #editor-pane, #app.editor-collapsed #resize-editor { display: none; }
+    #terminal { flex: 1; min-height: 0; padding: 4px; box-sizing: border-box; }
+    #editor { flex: 1; min-height: 0; }
+    .toolbar { padding: 6px 10px; font-size: 13px; background: var(--bg-alt); border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+    .toolbar input { background: var(--bg-input); border: 1px solid var(--border); color: var(--text); padding: 3px 6px; width: 90px; min-width: 0; }
+    .toolbar button { padding: 3px 8px; }
+    .tab { display: flex; align-items: center; gap: 6px; padding: 6px 10px; font-size: 12px; border-right: 1px solid var(--border); cursor: pointer; white-space: nowrap; color: var(--text-dim); }
+    .tab.active { background: var(--bg-alt); color: var(--text); border-top: 2px solid var(--accent); }
+    .tab .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #666; }
+    .tab .status-dot.connected { background: var(--success); }
+    .tab .status-dot.connecting { background: var(--warning); }
+    .tab .status-dot.disconnected { background: var(--danger); }
+    .tab .tab-close { opacity: 0.5; margin-left: 4px; }
+    .tab .tab-close:hover { opacity: 1; color: var(--danger); }
+    .tab-add { padding: 6px 10px; cursor: pointer; color: var(--text-dim); font-size: 14px; }
+    .tab-add:hover { color: var(--text); }
+    #theme-select {
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-size: 12px;
+      padding: 3px 20px 3px 6px;
+      -webkit-appearance: none;
+      appearance: none;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><path d='M0 0l5 6 5-6z' fill='%23999'/></svg>");
+      background-repeat: no-repeat;
+      background-position: right 6px center;
+      border-radius: 4px;
+    }
+    #theme-select option {
+      background: var(--bg-input);
+      color: var(--text);
+    }
+    button {
+      background: var(--accent);
+      color: #ffffff;
+      border: none;
+      border-radius: 5px;
+      padding: 6px 14px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: opacity 0.12s ease;
+    }
+    button:hover {
+      opacity: 0.85;
+    }
+    button:active {
+      opacity: 0.7;
+    }
+    .toolbar button, .picker-item, #session-picker .close {
+      background: var(--bg-input);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .toolbar button:hover {
+      opacity: 1;
+      background: var(--hover);
+    }
+    #session-picker-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 2000; }
+    #session-picker-overlay.open { display: flex; }
+    #session-picker { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; width: 280px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+    #session-picker .picker-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px; }
+    #session-picker .picker-header .close { cursor: pointer; opacity: 0.6; }
+    #session-picker .picker-header .close:hover { opacity: 1; }
+    #session-picker .picker-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; padding: 20px; }
+    #session-picker .picker-item { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--text); border: 1px solid var(--border); }
+    #session-picker .picker-item:hover { background: var(--hover); border-color: var(--accent); }
+    #session-picker .picker-item .icon { font-size: 28px; }
+    .disconnect-panel {
+      position: absolute;
+      left: 8px;
+      right: 8px;
+      bottom: 8px;
+      background: var(--bg-alt);
+      border: 1px solid var(--border);
+      border-top: 2px solid var(--danger);
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-family: Menlo, Consolas, monospace;
+      font-size: 12px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      z-index: 10;
+    }
+    .disconnect-title { color: var(--danger); font-weight: bold; margin-bottom: 6px; }
+    .disconnect-action { display: flex; align-items: center; gap: 8px; padding: 3px 2px; cursor: pointer; color: var(--text); border-radius: 4px; }
+    .disconnect-action:hover { background: var(--hover); }
+    .disconnect-key { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; padding: 1px 6px; border: 1px solid var(--accent); border-radius: 4px; color: var(--accent); font-weight: bold; font-size: 11px; }
+    /* Theme the terminal's native scrollbar to match the app instead of
+       the OS default (usually white/light, standing out badly against
+       the dark theme and any wallpaper). Only touches the scrollbar's
+       own decoration, never .xterm-viewport's background-color itself,
+       that's what broke the scrollbar entirely earlier tonight, this
+       is a completely different, safe styling surface. */
+    /* Real fix: hide the native scrollbar entirely and draw our own
+       (setupCustomScrollbar in main.ts). Two earlier attempts
+       (::-webkit-scrollbar styling, then the standard
+       scrollbar-width/scrollbar-color properties + color-scheme) both
+       worked on Linux/WebKitGTK but not Windows/WebView2, confirmed by
+       testing: WebView2 controls its native scrollbar via a separate
+       environment-level API Wails v2 doesn't expose, not something more
+       CSS properties can reach. A custom-drawn scrollbar is pure page
+       content, not dependent on any engine's native rendering, so it's
+       genuinely identical on every platform. */
+    .xterm-viewport { scrollbar-width: none; }
+    .xterm-viewport::-webkit-scrollbar { display: none; width: 0; }
+    .custom-scrollbar-track { position: absolute; top: 0; right: 2px; bottom: 0; width: 8px; z-index: 5; }
+    .custom-scrollbar-thumb { position: absolute; left: 0; right: 0; background: var(--border); border-radius: 4px; cursor: pointer; min-height: 20px; }
+    .custom-scrollbar-thumb:hover, .custom-scrollbar-thumb.dragging { background: var(--text-dim); }
+  </style>
+</head>
+<body>
+  <div id="menubar">
+    <div id="titlebar-brand"><img src="/appicon.png" alt="" /><span>Specter</span></div>
+    <div class="menu-item" data-menu="terminal">Terminal
+      <div class="menu-dropdown" id="menu-terminal">
+        <div class="item" id="menu-new-tab">New Tab</div>
+        <div class="item" id="menu-new-local-shell">New Local Shell</div>
+        <div class="item" id="menu-close-tab">Close Tab</div>
+        <div class="item" id="menu-disconnect-tab">Disconnect <span style="opacity:0.5;font-size:11px;">Ctrl+Shift+X</span></div>
+        <div class="separator"></div>
+        <div class="item" id="menu-clear-screen">Clear Screen</div>
+      </div>
+    </div>
+    <div class="menu-item" data-menu="sessions">Sessions
+      <div class="menu-dropdown" id="menu-sessions">
+        <div class="item" id="menu-new-session">New Session</div>
+        <div class="item" id="menu-new-folder">New Folder</div>
+      </div>
+    </div>
+    <div class="menu-item" data-menu="view">View
+      <div class="menu-dropdown" id="menu-view">
+        <div class="item" id="menu-toggle-editor">Toggle Editor Pane</div>
+        <div class="item" id="menu-toggle-sidebar">Toggle Sidebar <span style="opacity:0.5;font-size:11px;">Ctrl+Shift+B</span></div>
+      </div>
+    </div>
+    <div class="menu-item" data-menu="tools">Tools
+      <div class="menu-dropdown" id="menu-tools">
+        <div class="item" id="menu-tool-terminal">Terminal</div>
+        <div class="item" id="menu-tool-cmd">Command Prompt</div>
+        <div class="item" id="menu-tool-powershell">PowerShell</div>
+        <div class="separator"></div>
+        <div class="item" id="menu-tool-text-editor">Text Editor</div>
+      </div>
+    </div>
+    <div class="menu-item" data-menu="settings">Settings
+      <div class="menu-dropdown" id="menu-settings">
+        <div class="item"><label>Theme <select id="theme-select"><option value="dark">Dark</option><option value="light">Light</option></select></label></div>
+        <div class="item"><label>Terminal colors
+          <select id="colorscheme-select">
+            <option value="dark">Dark (default)</option>
+            <option value="light">Light (default)</option>
+            <option value="dracula">Dracula</option>
+            <option value="nord">Nord</option>
+            <option value="solarized-dark">Solarized Dark</option>
+            <option value="solarized-light">Solarized Light</option>
+            <option value="gruvbox-dark">Gruvbox Dark</option>
+            <option value="one-dark">One Dark</option>
+          </select>
+        </label></div>
+        <div class="item"><label>Font
+          <select id="font-select">
+            <option value="menlo">Menlo</option>
+            <option value="consolas">Consolas</option>
+            <option value="cascadia">Cascadia Code</option>
+            <option value="fira">Fira Code</option>
+            <option value="jetbrains">JetBrains Mono</option>
+            <option value="courier">Courier New</option>
+            <option value="ibmplex">IBM Plex Mono</option>
+            <option value="sourcecodepro">Source Code Pro</option>
+            <option value="inconsolata">Inconsolata</option>
+            <option value="victor">Victor Mono</option>
+            <option value="ubuntumono">Ubuntu Mono</option>
+          </select>
+        </label></div>
+        <div class="separator"></div>
+        <div class="item"><label>Wallpaper <button id="wallpaper-browse" type="button">Browse...</button></label></div>
+        <div class="item" id="wallpaper-opacity-row" style="display:none;">
+          <label>Opacity <input type="range" id="wallpaper-opacity" min="0" max="60" value="15" style="vertical-align:middle;" /></label>
+        </div>
+        <div class="item" id="wallpaper-clear-row" style="display:none;"><span id="wallpaper-clear" style="cursor:pointer;color:var(--danger);">Clear wallpaper</span></div>
+        <div class="separator"></div>
+        <div class="item"><label><input type="checkbox" id="osc52-toggle" /> OSC 52 clipboard sync (remote can write to your clipboard)</label></div>
+        <div class="item"><label><input type="checkbox" id="copy-on-select-toggle" /> Copy on select</label></div>
+        <div class="item"><label><input type="checkbox" id="rclick-paste-toggle" checked /> Right-click to paste</label></div>
+        <div class="item"><label><input type="checkbox" id="warn-multiline-paste-toggle" checked /> Warn before pasting multiple lines</label></div>
+        <div class="item"><label><input type="checkbox" id="highlight-toggle" checked /> Highlight status keywords</label></div>
+        <div class="separator"></div>
+        <div class="item" id="menu-check-updates" style="cursor:pointer;">Check for Updates&#8230; <span id="menu-version" style="opacity:0.5;font-size:11px;"></span></div>
+      </div>
+    </div>
+    <div id="titlebar-spacer"></div>
+    <div id="titlebar-controls">
+      <button id="win-minimize" title="Minimize">&#9472;</button>
+      <button id="win-maximize" title="Maximize">&#9633;</button>
+      <button id="win-close" title="Close">&#10005;</button>
+    </div>
+  </div>
+  <div id="update-banner" style="display:none;align-items:center;gap:10px;padding:6px 14px;background:#1f3a5f;border-bottom:1px solid var(--border);font-size:12px;color:#cfe3ff;">
+    <span id="update-banner-text"></span>
+    <button id="update-banner-download" style="margin-left:auto;padding:3px 10px;font-size:12px;">Download</button>
+    <span id="update-banner-dismiss" style="cursor:pointer;opacity:0.7;padding:0 4px;" title="Dismiss">&#10005;</span>
+  </div>
+  <div id="app">
+    <div id="sidebar">
+      <div class="toolbar" style="padding-left:0;display:flex;align-items:center;justify-content:space-between;">
+        <strong>Saved sessions</strong>
+        <span id="sidebar-collapse-btn" title="Hide sidebar (Ctrl+Shift+B)" style="cursor:pointer;padding:2px 6px;opacity:0.6;user-select:none;">&#10094;</span>
+      </div>
+      <input id="session-search" placeholder="Quick connect..." style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:4px 6px;margin-bottom:4px;font-size:12px;" />
+      <div id="session-list"></div>
+      <div class="toolbar" style="padding-left:0;cursor:pointer;" id="remote-files-header">
+        <strong id="remote-files-label">Remote files</strong>
+      </div>
+      <div id="file-list"></div>
+    </div>
+    <div class="resize-handle" id="resize-sidebar"></div>
+    <div id="terminal-pane">
+      <div style="display:flex;align-items:center;background:var(--bg-input);border-bottom:1px solid var(--border);">
+        <span id="sidebar-expand-btn" title="Show sidebar (Ctrl+Shift+B)" style="display:none;cursor:pointer;padding:0 8px;opacity:0.6;user-select:none;align-self:stretch;">&#10095;</span>
+        <div id="tab-bar" style="display:flex;overflow-x:auto;flex:1;"></div>
+        <span id="editor-expand-btn" title="Show editor pane" style="display:none;cursor:pointer;padding:0 8px;opacity:0.6;user-select:none;align-self:stretch;">&#10094;</span>
+      </div>
+      <div id="tab-landing" style="display:none;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:12px;">
+        <div style="font-size:14px;color:var(--text-dim);">No session yet</div>
+        <button id="new-session-btn" style="padding:8px 18px;font-size:13px;">+ New Session</button>
+      </div>
+      <div id="terminal" style="position:relative;"></div>
+    </div>
+    <div class="resize-handle" id="resize-editor"></div>
+    <div id="editor-pane">
+      <div class="toolbar"><span id="editor-path">No file open</span><span id="editor-close" style="margin-left:auto;cursor:pointer;opacity:0.5;">✕</span></div>
+      <div id="editor"></div>
+    </div>
+  </div>
+  <div id="session-picker-overlay">
+    <div id="session-picker">
+      <div class="picker-header">
+        <strong>New Session</strong>
+        <span class="close" id="session-picker-close">✕</span>
+      </div>
+      <div class="picker-grid" id="picker-grid">
+        <div class="picker-item" id="picker-ssh"><span class="icon">🔑</span><span>SSH</span></div>
+        <div class="picker-item" id="picker-shell"><span class="icon">&gt;_</span><span>Shell</span></div>
+        <div class="picker-item" id="picker-serial"><span class="icon">🔌</span><span>Serial</span></div>
+      </div>
+      <div id="picker-serial-fields" style="display:none;flex-direction:column;gap:8px;padding:16px;">
+        <input id="serial-port" placeholder="/dev/ttyUSB0 or COM3" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <select id="serial-baud" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;">
+          <option value="9600" selected>9600</option>
+          <option value="19200">19200</option>
+          <option value="38400">38400</option>
+          <option value="57600">57600</option>
+          <option value="115200">115200</option>
+        </select>
+        <button id="serial-connect" style="padding:6px;">Connect</button>
+      </div>
+      <div id="picker-ssh-fields" style="display:none;padding:16px;display:none;flex-direction:column;gap:8px;">
+        <input id="host" placeholder="host" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <input id="user" placeholder="user" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <div>
+          <label style="margin-right:10px;"><input type="radio" name="devicekind" value="host" checked /> VM / Host</label>
+          <label style="margin-right:10px;"><input type="radio" name="devicekind" value="switch" /> Switch</label>
+          <label><input type="radio" name="devicekind" value="firewall" /> Firewall</label>
+        </div>
+        <div>
+          <label style="margin-right:10px;"><input type="radio" name="authmode" value="password" checked /> Password</label>
+          <label><input type="radio" name="authmode" value="key" /> Key</label>
+        </div>
+        <span id="auth-password-fields">
+          <input id="password" placeholder="password" type="password" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <div id="caps-lock-warning" style="display:none;color:var(--warning);font-size:11px;">⚠ Caps Lock is on</div>
+        </span>
+        <span id="auth-key-fields" style="display:none;flex-direction:column;gap:8px;">
+          <input id="keyPath" placeholder="key path" readonly style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+          <button id="browse-key">Browse…</button>
+          <input id="passphrase" placeholder="passphrase (if any)" type="password" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        </span>
+        <button id="connect" style="padding:6px;">Connect</button>
+      </div>
+    </div>
+  </div>
+  <div id="statusbar">Specter</div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
+SPECTER_EOF_0
+
+cat > "frontend/src/main.ts" << 'SPECTER_EOF_1'
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import * as monaco from 'monaco-editor';
@@ -169,39 +538,6 @@ function refreshAllTerminalThemes() {
   }
 }
 
-// SPE-77: zoom drives the same persisted appSettings.fontSize shown in
-// Settings, not a separate temporary zoom layer, confirmed choice.
-// Applies to every live tab (font size is global, not per-tab, same
-// reasoning as refreshAllTerminalThemes above), refitting and notifying
-// the backend of the new terminal size for each, mirroring what
-// refitActiveTerminal does for a single tab.
-const FONT_SIZE_MIN = 8;
-const FONT_SIZE_MAX = 32;
-const FONT_SIZE_DEFAULT = 13;
-
-function applyFontSize(size: number) {
-  const clamped = Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, Math.round(size)));
-  appSettings.fontSize = clamped;
-  for (const tab of tabs.values()) {
-    if (!tab.term || !tab.fitAddon) continue;
-    tab.term.options.fontSize = clamped;
-    tab.fitAddon.fit();
-    if (tab.mode === 'local' && tab.backendId) App.ResizeLocalTerminal(tab.backendId, tab.term.cols, tab.term.rows);
-    if (tab.mode === 'ssh' && tab.backendId) App.ResizeSSH(tab.backendId, tab.term.cols, tab.term.rows);
-  }
-  // SPE-78: editor shares the same font size setting as the terminal,
-  // confirmed choice, not an independent editor-specific size.
-  editor.updateOptions({ fontSize: clamped });
-  const slider = document.getElementById('zoom-slider') as HTMLInputElement;
-  slider.value = String(clamped);
-  document.getElementById('zoom-readout')!.textContent = `${clamped}px`;
-  App.SaveSettings(appSettings);
-}
-
-function zoomBy(delta: number) {
-  applyFontSize((appSettings.fontSize || FONT_SIZE_DEFAULT) + delta);
-}
-
 function applyColorScheme(name: ColorScheme) {
   appSettings.colorScheme = name;
   App.SaveSettings(appSettings);
@@ -301,14 +637,6 @@ async function loadSettingsAndApply() {
   opacitySlider.value = String(Math.round((appSettings.wallpaperOpacity ?? 0.15) * 100));
   applyWallpaperVisual();
 
-  const keepaliveToggle = document.getElementById('ssh-keepalive-toggle') as HTMLInputElement;
-  keepaliveToggle.checked = !appSettings.sshKeepaliveDisabled;
-
-  const slider = document.getElementById('zoom-slider') as HTMLInputElement;
-  const initialSize = appSettings.fontSize || FONT_SIZE_DEFAULT;
-  slider.value = String(initialSize);
-  document.getElementById('zoom-readout')!.textContent = `${initialSize}px`;
-
   // In case a tab was created before this async load resolved (race:
   // GetSettings is an IPC round-trip), reapply font to whatever's live.
   // refreshAllTerminalThemes (called by applyWallpaperVisual above)
@@ -317,14 +645,6 @@ async function loadSettingsAndApply() {
   document.body.style.fontFamily = stack;
   for (const tab of tabs.values()) {
     if (tab.term) tab.term.options.fontFamily = stack;
-  }
-  // Same race-condition reasoning for font SIZE: the editor was created
-  // synchronously at module load, before this async settings load
-  // resolved, and terminal tabs may exist too if one connected fast.
-  const savedFontSize = appSettings.fontSize || FONT_SIZE_DEFAULT;
-  editor.updateOptions({ fontSize: savedFontSize });
-  for (const tab of tabs.values()) {
-    if (tab.term) tab.term.options.fontSize = savedFontSize;
   }
 }
 
@@ -422,27 +742,13 @@ function createPendingTab(): Tab {
   return tab;
 }
 
-// SPE-97: opt-in (defaults off), a numbered badge is a minor visual
-// addition, not a safety/correctness feature, so it follows the
-// opt-in convention rather than the default-on one.
-let showTabNumbersEnabled = localStorage.getItem('specter-show-tab-numbers') === 'on';
-
 function renderTabBar() {
   const bar = document.getElementById('tab-bar')!;
   bar.innerHTML = '';
-  let tabIndex = 0;
   for (const tab of tabs.values()) {
-    tabIndex++;
     const el = document.createElement('div');
     el.className = 'tab' + (tab.id === activeTabId ? ' active' : '');
     el.onclick = () => switchToTab(tab.id);
-
-    if (showTabNumbersEnabled) {
-      const num = document.createElement('span');
-      num.textContent = String(tabIndex);
-      num.style.cssText = 'opacity:0.5;font-size:10px;margin-right:5px;';
-      el.appendChild(num);
-    }
 
     const dot = document.createElement('span');
     dot.className = 'status-dot ' + tab.status;
@@ -499,15 +805,6 @@ function switchToTab(id: string) {
 async function closeTab(id: string) {
   const tab = tabs.get(id);
   if (!tab) return;
-
-  // SPE-81: only prompt for a genuinely live session, not the disconnect
-  // panel's own "exit tab" action (tab.stopped is already true there,
-  // there's nothing live left to lose), and not a pending/never-connected
-  // tab, matching the ticket's own scope note.
-  if (tab.status === 'connected' && !tab.stopped) {
-    const proceed = confirm(`Close this tab? The session is still connected (${tab.label}).`);
-    if (!proceed) return;
-  }
 
   if (tab.mode === 'ssh' && tab.backendId) {
     await App.CloseSSH(tab.backendId);
@@ -664,7 +961,7 @@ function createTerminalForTab(tab: Tab) {
 
   const term = new Terminal({
     fontFamily: fontStack(appSettings.fontFamily || FONT_OPTIONS[0].value),
-    fontSize: appSettings.fontSize || FONT_SIZE_DEFAULT,
+    fontSize: appSettings.fontSize || 13,
     theme: activeXtermTheme(),
   });
   const fitAddon = new FitAddon();
@@ -730,24 +1027,6 @@ function createTerminalForTab(tab: Tab) {
       navigator.clipboard.readText().then((text) => writeToTabWithPasteGuard(tab, text)).catch(() => {});
       return false;
     }
-    if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
-      // SPE-77. Accepts both '=' and '+' since Plus is Shift+Equals on
-      // most layouts, matching how browsers handle Ctrl+= zoom too.
-      zoomBy(1);
-      return false;
-    }
-    if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && e.key === '-') {
-      zoomBy(-1);
-      return false;
-    }
-    if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && e.key === '0') {
-      applyFontSize(FONT_SIZE_DEFAULT);
-      return false;
-    }
-    if (e.type === 'keydown' && e.key === 'F11') {
-      toggleFullscreen();
-      return false;
-    }
     return true;
   });
 
@@ -804,12 +1083,6 @@ const editor = monaco.editor.create(document.getElementById('editor')!, {
   language: 'plaintext',
   theme: MONACO_THEMES[currentTheme()],
   automaticLayout: true,
-  // SPE-78: shares appSettings.fontSize with the terminal (confirmed
-  // choice), appSettings isn't populated yet at this point in module
-  // load order (loadSettingsAndApply is async), loadSettingsAndApply
-  // re-applies the real value once it resolves, same race-condition
-  // pattern already used for the terminal's own font-family sync.
-  fontSize: appSettings.fontSize || FONT_SIZE_DEFAULT,
 });
 
 function toggleEditorPane() {
@@ -832,30 +1105,17 @@ document.getElementById('menu-toggle-editor')!.addEventListener('click', () => {
 
 let openFilePath: string | null = null;
 let openFileSessionId: string | null = null;
-// SPE-78: local file support alongside the existing remote (SSH) editing.
-// openFileSessionId stays null for both "nothing open" and "a local file
-// is open", this flag is what actually distinguishes the two.
-let openFileIsLocal = false;
 
-let editorStatusTimer: ReturnType<typeof setTimeout> | null = null;
-function flashEditorStatus(msg: string, isError = false) {
-  const el = document.getElementById('editor-status')!;
-  el.textContent = msg;
-  el.style.color = isError ? 'var(--danger)' : 'var(--success)';
-  el.style.opacity = '1';
-  if (editorStatusTimer) clearTimeout(editorStatusTimer);
-  editorStatusTimer = setTimeout(() => { el.style.opacity = '0'; }, 2000);
-}
-
-// Shared tail end of opening a file, whether local or remote:
-// language detection, showing/expanding the pane, loading content.
-function finishOpeningFile(path: string, content: string) {
+async function openRemoteFile(sessionId: string, path: string) {
+  const content = await App.ReadRemoteFile(sessionId, path);
+  openFilePath = path;
+  openFileSessionId = sessionId;
   document.getElementById('editor-path')!.textContent = path;
   document.getElementById('editor-close')!.style.display = 'inline';
-  // The editor pane defaults to collapsed (nothing to show until a
-  // file's actually open), opening one needs to explicitly restore it,
-  // otherwise the content loads into Monaco invisibly behind a hidden
-  // pane.
+  // The editor pane now defaults to collapsed (nothing to show until a
+  // file's actually open), so opening one needs to explicitly restore
+  // it, otherwise the content loads into Monaco invisibly behind a
+  // hidden pane.
   document.getElementById('app')!.classList.remove('editor-collapsed');
   document.getElementById('editor-expand-btn')!.style.display = 'none';
   refitActiveTerminal();
@@ -867,97 +1127,10 @@ function finishOpeningFile(path: string, content: string) {
   editor.setValue(content);
 }
 
-async function openRemoteFile(sessionId: string, path: string) {
-  const content = await App.ReadRemoteFile(sessionId, path);
-  openFilePath = path;
-  openFileSessionId = sessionId;
-  openFileIsLocal = false;
-  finishOpeningFile(path, content);
-}
-
-async function openLocalFile() {
-  const path = await App.SelectAnyFile();
-  if (!path) return; // cancelled
-  const content = await App.ReadLocalFile(path);
-  openFilePath = path;
-  openFileSessionId = null;
-  openFileIsLocal = true;
-  finishOpeningFile(path, content);
-}
-
-async function saveCurrentFile() {
-  if (!openFilePath) {
-    // Nothing open yet (Untitled), Save behaves like Save As rather
-    // than silently doing nothing, matching most editors' convention.
-    return saveAsLocal();
-  }
-  try {
-    if (openFileIsLocal) {
-      await App.WriteLocalFile(openFilePath, editor.getValue());
-    } else if (openFileSessionId) {
-      await App.WriteRemoteFile(openFileSessionId, openFilePath, editor.getValue());
-    }
-    flashEditorStatus('Saved');
-  } catch (err) {
-    flashEditorStatus(`Save failed: ${err}`, true);
-  }
-}
-
-async function saveAsLocal() {
-  const defaultName = openFilePath ? openFilePath.split(/[\\/]/).pop()! : 'Untitled.txt';
-  const path = await App.SaveTextFile(defaultName, editor.getValue());
-  if (!path) return; // cancelled
-  openFilePath = path;
-  openFileSessionId = null;
-  openFileIsLocal = true;
-  document.getElementById('editor-path')!.textContent = path;
-  document.getElementById('editor-close')!.style.display = 'inline';
-  flashEditorStatus('Saved');
-}
-
-async function saveAsRemote() {
-  const sessionId = openFileSessionId ?? (activeTabId ? tabs.get(activeTabId)?.backendId : null);
-  if (!sessionId) {
-    alert('No active SSH session to save to. Open or switch to an SSH tab first.');
-    return;
-  }
-  const defaultPath = openFilePath && !openFileIsLocal
-    ? openFilePath
-    : (currentRemotePath === '.' ? 'untitled.txt' : `${currentRemotePath}/untitled.txt`);
-  const newPath = prompt('Save to remote path:', defaultPath);
-  if (!newPath) return; // cancelled
-  try {
-    await App.WriteRemoteFile(sessionId, newPath, editor.getValue());
-    openFilePath = newPath;
-    openFileSessionId = sessionId;
-    openFileIsLocal = false;
-    document.getElementById('editor-path')!.textContent = newPath;
-    document.getElementById('editor-close')!.style.display = 'inline';
-    flashEditorStatus('Saved');
-  } catch (err) {
-    flashEditorStatus(`Save failed: ${err}`, true);
-  }
-}
-
-document.getElementById('editor-open-btn')!.addEventListener('click', () => { openLocalFile(); });
-document.getElementById('editor-save-btn')!.addEventListener('click', () => { saveCurrentFile(); });
-
-const saveAsMenu = document.getElementById('editor-saveas-menu')!;
-document.getElementById('editor-saveas-btn')!.addEventListener('click', (e) => {
-  e.stopPropagation();
-  saveAsMenu.style.display = saveAsMenu.style.display === 'block' ? 'none' : 'block';
+editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, async () => {
+  if (!openFileSessionId || !openFilePath) return;
+  await App.WriteRemoteFile(openFileSessionId, openFilePath, editor.getValue());
 });
-document.getElementById('editor-saveas-local')!.addEventListener('click', () => {
-  saveAsMenu.style.display = 'none';
-  saveAsLocal();
-});
-document.getElementById('editor-saveas-remote')!.addEventListener('click', () => {
-  saveAsMenu.style.display = 'none';
-  saveAsRemote();
-});
-document.addEventListener('click', () => { saveAsMenu.style.display = 'none'; });
-
-editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => { saveCurrentFile(); });
 
 // --- File browser (scoped to whichever SSH tab is active) ---
 
@@ -2133,31 +2306,7 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     toggleSidebar();
   }
-  // SPE-77 zoom, same global-fallback reasoning.
-  if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
-    e.preventDefault();
-    zoomBy(1);
-  }
-  if ((e.ctrlKey || e.metaKey) && e.key === '-') {
-    e.preventDefault();
-    zoomBy(-1);
-  }
-  if ((e.ctrlKey || e.metaKey) && e.key === '0') {
-    e.preventDefault();
-    applyFontSize(FONT_SIZE_DEFAULT);
-  }
-  if (e.key === 'F11') {
-    e.preventDefault();
-    toggleFullscreen();
-  }
 });
-
-document.getElementById('zoom-slider')!.addEventListener('input', (e) => {
-  applyFontSize(Number((e.target as HTMLInputElement).value));
-});
-document.getElementById('zoom-in-btn')!.addEventListener('click', () => zoomBy(1));
-document.getElementById('zoom-out-btn')!.addEventListener('click', () => zoomBy(-1));
-document.getElementById('zoom-reset-btn')!.addEventListener('click', () => applyFontSize(FONT_SIZE_DEFAULT));
 
 document.addEventListener('keyup', checkCapsLock);
 
@@ -2221,49 +2370,6 @@ applyTheme(currentTheme());
 themeSelect.addEventListener('change', () => {
   applyTheme(themeSelect.value as ThemeName);
 });
-
-// SPE-96: applied synchronously from localStorage on startup (like
-// theme above), rather than waiting on the async GetSettings() round
-// trip, no reason a same-machine layout preference needs an IPC call.
-function currentSidebarPosition(): 'left' | 'right' {
-  return localStorage.getItem('specter-sidebar-position') === 'right' ? 'right' : 'left';
-}
-// Deliberately minimal, safe to call synchronously at startup: just the
-// CSS class + localStorage, nothing that touches currentColumnTemplate
-// (a let declared much later in this file). Confirmed the hard way that
-// referencing a let before its declaration line has run throws a
-// temporal-dead-zone ReferenceError that silently halts ALL script
-// execution after it, every button below this point stopped working
-// entirely, not just this feature.
-function applySidebarPosition(pos: 'left' | 'right') {
-  document.getElementById('app')!.classList.toggle('sidebar-right', pos === 'right');
-  localStorage.setItem('specter-sidebar-position', pos);
-}
-const sidebarPositionSelect = document.getElementById('sidebar-position-select') as HTMLSelectElement;
-sidebarPositionSelect.value = currentSidebarPosition();
-applySidebarPosition(currentSidebarPosition());
-sidebarPositionSelect.addEventListener('change', () => {
-  // The currentColumnTemplate reset (safe here: this only runs on user
-  // interaction, long after the whole script, including that later let
-  // declaration, has finished loading) stays deferred to this handler,
-  // not the startup call above, same pattern toggleSidebar/
-  // toggleEditorPane already use for the identical reason.
-  const app = document.getElementById('app')!;
-  app.style.gridTemplateColumns = '';
-  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
-  applySidebarPosition(sidebarPositionSelect.value as 'left' | 'right');
-  refitActiveTerminal();
-});
-
-// SPE-98: one-click toggle in the title bar, alongside applyTheme,
-// keeping the Settings dropdown in sync so neither path shows a stale
-// value if the other one was used most recently.
-function toggleThemeQuick() {
-  const next: ThemeName = currentTheme() === 'dark' ? 'light' : 'dark';
-  applyTheme(next);
-  themeSelect.value = next;
-}
-document.getElementById('theme-toggle-btn')!.addEventListener('click', toggleThemeQuick);
 
 // SPE-61: terminal color scheme, font, and wallpaper. Loaded from the
 // backend-persisted settings.json (loadSettingsAndApply), independent
@@ -2394,24 +2500,6 @@ warnMultilinePasteToggle.addEventListener('change', () => {
   localStorage.setItem('specter-warn-multiline-paste', warnMultilinePasteEnabled ? 'on' : 'off');
 });
 
-// SPE-79: unlike the toggles above, this one lives in the Go-backed
-// config.Settings (App.SaveSettings), not localStorage, since Connect()
-// needs to read it fresh from settings.json at connect time, not just
-// the frontend's own in-memory state.
-const keepaliveToggle = document.getElementById('ssh-keepalive-toggle') as HTMLInputElement;
-keepaliveToggle.addEventListener('change', () => {
-  appSettings.sshKeepaliveDisabled = !keepaliveToggle.checked;
-  App.SaveSettings(appSettings);
-});
-
-const showTabNumbersToggle = document.getElementById('show-tab-numbers-toggle') as HTMLInputElement;
-showTabNumbersToggle.checked = showTabNumbersEnabled;
-showTabNumbersToggle.addEventListener('change', () => {
-  showTabNumbersEnabled = showTabNumbersToggle.checked;
-  localStorage.setItem('specter-show-tab-numbers', showTabNumbersEnabled ? 'on' : 'off');
-  renderTabBar();
-});
-
 const highlightToggle = document.getElementById('highlight-toggle') as HTMLInputElement;
 highlightToggle.checked = highlightEnabled;
 highlightToggle.addEventListener('change', () => {
@@ -2501,16 +2589,6 @@ function resetPickerView() {
 }
 function openSessionPicker() {
   resetPickerView();
-  // SPE-83: pre-fill with the OS username, matching MobaXterm's "same
-  // as Windows login" default, only if the field is currently empty,
-  // never overwrite something the person already typed or a saved
-  // session's own stored username.
-  const userField = document.getElementById('user') as HTMLInputElement;
-  if (!userField.value) {
-    App.GetOSUsername().then((name) => {
-      if (name && !userField.value) userField.value = name;
-    }).catch(() => {});
-  }
   document.getElementById('session-picker-overlay')!.classList.add('open');
 }
 function closeSessionPicker() {
@@ -2576,21 +2654,6 @@ function toggleSidebar() {
 document.getElementById('menu-toggle-sidebar')!.addEventListener('click', () => {
   closeAllMenus();
   toggleSidebar();
-});
-
-// SPE-95: distinct from window maximize, hides all chrome (menu bar,
-// title bar) and uses the whole screen, matching F11 convention. F11
-// itself is safe to claim globally, unlike some of the other shortcuts
-// tonight (Ctrl+B/tmux etc.), it's not a meaningful readline/shell
-// binding anywhere.
-async function toggleFullscreen() {
-  const isFull = await runtime.WindowIsFullscreen();
-  if (isFull) runtime.WindowUnfullscreen();
-  else runtime.WindowFullscreen();
-}
-document.getElementById('menu-toggle-fullscreen')!.addEventListener('click', () => {
-  closeAllMenus();
-  toggleFullscreen();
 });
 document.getElementById('sidebar-collapse-btn')!.addEventListener('click', toggleSidebar);
 document.getElementById('sidebar-expand-btn')!.addEventListener('click', toggleSidebar);
@@ -2662,3 +2725,5 @@ setupPaneResize('resize-sidebar', 0, 150);
 setupPaneResize('resize-editor', 2, 200);
 
 renderSessionList();renderSessionList();
+SPECTER_EOF_1
+

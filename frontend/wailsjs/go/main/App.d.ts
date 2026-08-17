@@ -19,7 +19,11 @@ export function DeleteGroup(arg1:string):Promise<void>;
 
 export function DeleteSession(arg1:string):Promise<void>;
 
+export function DownloadAndInstallUpdate(arg1:string):Promise<void>;
+
 export function GetClipboardText():Promise<string>;
+
+export function GetOSUsername():Promise<string>;
 
 export function GetPlatform():Promise<string>;
 
@@ -37,6 +41,8 @@ export function ListSessions():Promise<Array<config.SessionProfile>>;
 
 export function ReadImageFile(arg1:string):Promise<string>;
 
+export function ReadLocalFile(arg1:string):Promise<string>;
+
 export function ReadRemoteFile(arg1:string,arg2:string):Promise<string>;
 
 export function ResizeLocalTerminal(arg1:string,arg2:number,arg3:number):Promise<void>;
@@ -51,6 +57,8 @@ export function SaveSettings(arg1:config.Settings):Promise<void>;
 
 export function SaveTextFile(arg1:string,arg2:string):Promise<string>;
 
+export function SelectAnyFile():Promise<string>;
+
 export function SelectImageFile():Promise<string>;
 
 export function SelectKeyFile():Promise<string>;
@@ -62,6 +70,8 @@ export function TrustHost(arg1:string):Promise<void>;
 export function TrustHostDespiteChange(arg1:string):Promise<void>;
 
 export function UploadRemoteFile(arg1:string,arg2:string,arg3:string):Promise<void>;
+
+export function WriteLocalFile(arg1:string,arg2:string):Promise<void>;
 
 export function WriteLocalTerminal(arg1:string,arg2:string):Promise<void>;
 
