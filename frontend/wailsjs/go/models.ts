@@ -114,6 +114,7 @@ export namespace main {
 	    needsKeyPermConfirm?: boolean;
 	    keyPermPath?: string;
 	    keyPermMode?: string;
+	    legacyCompat?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new ConnectResult(source);
@@ -131,6 +132,7 @@ export namespace main {
 	        this.needsKeyPermConfirm = source["needsKeyPermConfirm"];
 	        this.keyPermPath = source["keyPermPath"];
 	        this.keyPermMode = source["keyPermMode"];
+	        this.legacyCompat = source["legacyCompat"];
 	    }
 	}
 	export class RemoteFile {
