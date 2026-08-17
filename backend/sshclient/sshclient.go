@@ -1,4 +1,3 @@
-
 // Package sshclient wraps golang.org/x/crypto/ssh to provide an
 
 // interactive shell session, with real host key verification against the
@@ -7,103 +6,85 @@
 
 package sshclient
 
-
-
 import (
+	"crypto/rand"
 
-"crypto/rand"
+	"encoding/hex"
 
-"encoding/hex"
+	"errors"
 
-"errors"
+	"fmt"
 
-"fmt"
+	"io"
 
-"io"
+	"net"
 
-"net"
+	"os"
 
-"os"
+	"path/filepath"
 
-"path/filepath"
+	"strings"
 
-"strings"
+	"sync"
 
-"sync"
+	"sync/atomic"
 
-"sync/atomic"
+	"time"
 
-"time"
+	"golang.org/x/crypto/ssh"
 
-
-
-"golang.org/x/crypto/ssh"
-
-"golang.org/x/crypto/ssh/knownhosts"
-
+	"golang.org/x/crypto/ssh/knownhosts"
 )
-
-
 
 var ErrPassphraseRequired = errors.New("private key is encrypted, passphrase required")
 
-
-
 type Config struct {
+	Host string
 
-Host       string
+	Port int
 
-Port       int
+	User string
 
-User       string
+	Password string
 
-Password   string
+	KeyPath string
 
-KeyPath    string
+	Passphrase string
 
-Passphrase string
+	// IgnoreKeyPermWarning skips the KeyPermissionWarning check below,
 
-// IgnoreKeyPermWarning skips the KeyPermissionWarning check below,
+	// set only after the user has explicitly acknowledged it once
 
-// set only after the user has explicitly acknowledged it once
+	// (SPE-65). Specter didn't create the user's key file, so this is a
 
-// (SPE-65). Specter didn't create the user's key file, so this is a
+	// soft warning with real user choice, not a hard block like OpenSSH
 
-// soft warning with real user choice, not a hard block like OpenSSH
+	// itself does.
 
-// itself does.
+	IgnoreKeyPermWarning bool
 
-IgnoreKeyPermWarning bool
+	// DisableKeepalive turns off the periodic no-op probe (SPE-79),
 
-// DisableKeepalive turns off the periodic no-op probe (SPE-79),
+	// read from the persisted Settings.SSHKeepaliveDisabled preference
 
-// read from the persisted Settings.SSHKeepaliveDisabled preference
+	// at connect time in app.go's Connect(), not something the caller
 
-// at connect time in app.go's Connect(), not something the caller
+	// usually sets directly.
 
-// usually sets directly.
-
-DisableKeepalive bool
-
+	DisableKeepalive bool
 }
-
-
 
 type Session struct {
+	id string
 
-id      string
+	client *ssh.Client
 
-client  *ssh.Client
+	sess *ssh.Session
 
-sess    *ssh.Session
+	stdin io.WriteCloser
 
-stdin   io.WriteCloser
-
-closing atomic.Bool
-
+	closing atomic.Bool
 }
-
-
 
 // CloseReason distinguishes why a session's read loop stopped, so the
 
@@ -117,31 +98,28 @@ closing atomic.Bool
 
 type CloseReason struct {
 
-// Deliberate is true only when the user closed this session
+	// Deliberate is true only when the user closed this session
 
-// themselves (closing the tab). No frontend notification is needed
+	// themselves (closing the tab). No frontend notification is needed
 
-// in that case, the tab is already gone.
+	// in that case, the tab is already gone.
 
-Deliberate bool
+	Deliberate bool
 
-// EOF is true when the remote side cleanly closed the connection
+	// EOF is true when the remote side cleanly closed the connection
 
-// (io.EOF), matching MobaXterm's "Remote side unexpectedly closed
+	// (io.EOF), matching MobaXterm's "Remote side unexpectedly closed
 
-// network connection" case.
+	// network connection" case.
 
-EOF bool
+	EOF bool
 
-// Err holds the underlying error for anything that isn't a clean
+	// Err holds the underlying error for anything that isn't a clean
 
-// EOF, e.g. a network-level drop or timeout.
+	// EOF, e.g. a network-level drop or timeout.
 
-Err error
-
+	Err error
 }
-
-
 
 // HostKeyUnknownError means this host has never been seen before — not in
 
@@ -150,24 +128,18 @@ Err error
 // user accepts, call TrustHost before retrying Connect.
 
 type HostKeyUnknownError struct {
+	Host string
 
-Host        string
+	Fingerprint string
 
-Fingerprint string
-
-KeyType     string
-
+	KeyType string
 }
-
-
 
 func (e *HostKeyUnknownError) Error() string {
 
-return fmt.Sprintf("unknown host key for %s (%s): %s", e.Host, e.KeyType, e.Fingerprint)
+	return fmt.Sprintf("unknown host key for %s (%s): %s", e.Host, e.KeyType, e.Fingerprint)
 
 }
-
-
 
 // HostKeyChangedError means the host IS in known_hosts, but presented a
 
@@ -176,24 +148,18 @@ return fmt.Sprintf("unknown host key for %s (%s): %s", e.Host, e.KeyType, e.Fing
 // deliberate, explicit override (TrustHostDespiteChange), never silent.
 
 type HostKeyChangedError struct {
+	Host string
 
-Host           string
+	NewFingerprint string
 
-NewFingerprint string
-
-KeyType        string
-
+	KeyType string
 }
-
-
 
 func (e *HostKeyChangedError) Error() string {
 
-return fmt.Sprintf("WARNING: host key for %s has CHANGED (%s): %s — this can mean the server was reconfigured, OR that you're being intercepted", e.Host, e.KeyType, e.NewFingerprint)
+	return fmt.Sprintf("WARNING: host key for %s has CHANGED (%s): %s — this can mean the server was reconfigured, OR that you're being intercepted", e.Host, e.KeyType, e.NewFingerprint)
 
 }
-
-
 
 // KeyPermissionWarning means the selected private key file is
 
@@ -206,22 +172,16 @@ return fmt.Sprintf("WARNING: host key for %s has CHANGED (%s): %s — this can m
 // have a real reason it's set up this way, but they should know.
 
 type KeyPermissionWarning struct {
+	Path string
 
-Path string
-
-Mode os.FileMode
-
+	Mode os.FileMode
 }
-
-
 
 func (e *KeyPermissionWarning) Error() string {
 
-return fmt.Sprintf("key file %s has overly permissive mode %04o (should not be group/world-readable)", e.Path, e.Mode.Perm())
+	return fmt.Sprintf("key file %s has overly permissive mode %04o (should not be group/world-readable)", e.Path, e.Mode.Perm())
 
 }
-
-
 
 // pendingKeys caches the offending public key by hostname between the
 
@@ -230,14 +190,10 @@ return fmt.Sprintf("key file %s has overly permissive mode %04o (should not be g
 // need to round-trip raw key bytes through the JS bridge.
 
 var (
+	pendingKeysMu sync.Mutex
 
-pendingKeysMu sync.Mutex
-
-pendingKeys   = map[string]pendingKey{}
-
+	pendingKeys = map[string]pendingKey{}
 )
-
-
 
 // pendingKeyTTL bounds how long an abandoned trust prompt's key stays in
 
@@ -249,8 +205,6 @@ pendingKeys   = map[string]pendingKey{}
 
 const pendingKeyTTL = 10 * time.Minute
 
-
-
 // sweepExpiredPendingKeys drops entries older than pendingKeyTTL. Called
 
 // lazily whenever a new pending key is added rather than on a background
@@ -261,139 +215,123 @@ const pendingKeyTTL = 10 * time.Minute
 
 func sweepExpiredPendingKeys() {
 
-cutoff := time.Now().Add(-pendingKeyTTL)
+	cutoff := time.Now().Add(-pendingKeyTTL)
 
-for host, pk := range pendingKeys {
+	for host, pk := range pendingKeys {
 
-if pk.at.Before(cutoff) {
+		if pk.at.Before(cutoff) {
 
-delete(pendingKeys, host)
+			delete(pendingKeys, host)
+
+		}
+
+	}
 
 }
-
-}
-
-}
-
-
 
 type pendingKey struct {
+	key ssh.PublicKey
 
-key  ssh.PublicKey
+	addr string
 
-addr string
-
-at   time.Time
-
+	at time.Time
 }
-
-
 
 func knownHostsPath() (string, error) {
 
-home, err := os.UserHomeDir()
+	home, err := os.UserHomeDir()
 
-if err != nil {
+	if err != nil {
 
-return "", err
+		return "", err
+
+	}
+
+	dir := filepath.Join(home, ".ssh")
+
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+
+		return "", err
+
+	}
+
+	path := filepath.Join(dir, "known_hosts")
+
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+
+		f, ferr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+
+		if ferr != nil {
+
+			return "", ferr
+
+		}
+
+		_ = f.Close()
+
+	}
+
+	return path, nil
 
 }
-
-dir := filepath.Join(home, ".ssh")
-
-if err := os.MkdirAll(dir, 0o700); err != nil {
-
-return "", err
-
-}
-
-path := filepath.Join(dir, "known_hosts")
-
-if _, err := os.Stat(path); os.IsNotExist(err) {
-
-f, ferr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
-
-if ferr != nil {
-
-return "", ferr
-
-}
-
-_ = f.Close()
-
-}
-
-return path, nil
-
-}
-
-
 
 func hostKeyCallback() (ssh.HostKeyCallback, error) {
 
-path, err := knownHostsPath()
+	path, err := knownHostsPath()
 
-if err != nil {
+	if err != nil {
 
-return nil, err
+		return nil, err
 
-}
+	}
 
-base, err := knownhosts.New(path)
+	base, err := knownhosts.New(path)
 
-if err != nil {
+	if err != nil {
 
-return nil, err
+		return nil, err
 
-}
+	}
 
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 
+		err := base(hostname, remote, key)
 
-return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		if err == nil {
 
-err := base(hostname, remote, key)
+			return nil
 
-if err == nil {
+		}
 
-return nil
+		var keyErr *knownhosts.KeyError
 
-}
+		if errors.As(err, &keyErr) {
 
+			pendingKeysMu.Lock()
 
+			sweepExpiredPendingKeys()
 
-var keyErr *knownhosts.KeyError
+			pendingKeys[hostname] = pendingKey{key: key, addr: remote.String(), at: time.Now()}
 
-if errors.As(err, &keyErr) {
+			pendingKeysMu.Unlock()
 
-pendingKeysMu.Lock()
+			fp := ssh.FingerprintSHA256(key)
 
-sweepExpiredPendingKeys()
+			if len(keyErr.Want) == 0 {
 
-pendingKeys[hostname] = pendingKey{key: key, addr: remote.String(), at: time.Now()}
+				return &HostKeyUnknownError{Host: hostname, Fingerprint: fp, KeyType: key.Type()}
 
-pendingKeysMu.Unlock()
+			}
 
+			return &HostKeyChangedError{Host: hostname, NewFingerprint: fp, KeyType: key.Type()}
 
+		}
 
-fp := ssh.FingerprintSHA256(key)
+		return err
 
-if len(keyErr.Want) == 0 {
-
-return &HostKeyUnknownError{Host: hostname, Fingerprint: fp, KeyType: key.Type()}
-
-}
-
-return &HostKeyChangedError{Host: hostname, NewFingerprint: fp, KeyType: key.Type()}
-
-}
-
-return err
-
-}, nil
+	}, nil
 
 }
-
-
 
 // TrustHost records a genuinely new host's key in known_hosts. Only valid
 
@@ -403,11 +341,9 @@ return err
 
 func TrustHost(hostname string) error {
 
-return writeTrustedKey(hostname, false)
+	return writeTrustedKey(hostname, false)
 
 }
-
-
 
 // TrustHostDespiteChange overwrites an existing, mismatched known_hosts
 
@@ -421,81 +357,69 @@ return writeTrustedKey(hostname, false)
 
 func TrustHostDespiteChange(hostname string) error {
 
-return writeTrustedKey(hostname, true)
+	return writeTrustedKey(hostname, true)
 
 }
-
-
 
 func writeTrustedKey(hostname string, replacing bool) error {
 
-pendingKeysMu.Lock()
+	pendingKeysMu.Lock()
 
-pk, ok := pendingKeys[hostname]
+	pk, ok := pendingKeys[hostname]
 
-if ok {
+	if ok {
 
-delete(pendingKeys, hostname)
+		delete(pendingKeys, hostname)
 
-}
+	}
 
-pendingKeysMu.Unlock()
+	pendingKeysMu.Unlock()
 
+	if !ok {
 
+		return fmt.Errorf("no pending host key for %s (fingerprint may have expired, try connecting again)", hostname)
 
-if !ok {
+	}
 
-return fmt.Errorf("no pending host key for %s (fingerprint may have expired, try connecting again)", hostname)
+	path, err := knownHostsPath()
 
-}
+	if err != nil {
 
+		return err
 
+	}
 
-path, err := knownHostsPath()
+	if replacing {
 
-if err != nil {
+		if err := removeHostLines(path, hostname); err != nil {
 
-return err
+			return err
 
-}
+		}
 
+	}
 
+	line := knownhosts.Line([]string{hostname}, pk.key)
 
-if replacing {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
 
-if err := removeHostLines(path, hostname); err != nil {
+	if err != nil {
 
-return err
+		return err
 
-}
+	}
 
-}
+	if _, err := f.WriteString(line + "\n"); err != nil {
 
+		_ = f.Close()
 
+		return err
 
-line := knownhosts.Line([]string{hostname}, pk.key)
+	}
 
-f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
-
-if err != nil {
-
-return err
-
-}
-
-if _, err := f.WriteString(line + "\n"); err != nil {
-
-_ = f.Close()
-
-return err
+	return f.Close()
 
 }
-
-return f.Close()
-
-}
-
-
 
 // removeHostLines strips existing known_hosts lines for hostname before a
 
@@ -503,169 +427,154 @@ return f.Close()
 
 func removeHostLines(path, hostname string) error {
 
-data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path)
 
-if err != nil {
+	if err != nil {
 
-return err
+		return err
+
+	}
+
+	lines := strings.Split(string(data), "\n")
+
+	kept := make([]string, 0, len(lines))
+
+	for _, line := range lines {
+
+		if strings.HasPrefix(strings.TrimSpace(line), hostname+" ") {
+
+			continue
+
+		}
+
+		kept = append(kept, line)
+
+	}
+
+	return os.WriteFile(path, []byte(strings.Join(kept, "\n")), 0o600)
 
 }
-
-lines := strings.Split(string(data), "\n")
-
-kept := make([]string, 0, len(lines))
-
-for _, line := range lines {
-
-if strings.HasPrefix(strings.TrimSpace(line), hostname+" ") {
-
-continue
-
-}
-
-kept = append(kept, line)
-
-}
-
-return os.WriteFile(path, []byte(strings.Join(kept, "\n")), 0o600)
-
-}
-
-
 
 func Dial(cfg Config) (*Session, error) {
 
-if cfg.Port == 0 {
+	if cfg.Port == 0 {
 
-cfg.Port = 22
+		cfg.Port = 22
+
+	}
+
+	var authMethods []ssh.AuthMethod
+
+	if cfg.KeyPath != "" {
+
+		if !cfg.IgnoreKeyPermWarning {
+
+			if info, err := os.Stat(cfg.KeyPath); err == nil {
+
+				if info.Mode().Perm()&0o077 != 0 {
+
+					return nil, &KeyPermissionWarning{Path: cfg.KeyPath, Mode: info.Mode()}
+
+				}
+
+			}
+
+			// A Stat failure here isn't fatal, os.ReadFile below will
+
+			// surface the real error (missing file, no permission to
+
+			// even stat it, etc.) with better context than this check would.
+
+		}
+
+		key, err := os.ReadFile(cfg.KeyPath)
+
+		if err != nil {
+
+			return nil, fmt.Errorf("reading key: %w", err)
+
+		}
+
+		signer, err := ssh.ParsePrivateKey(key)
+
+		if err != nil {
+
+			var passErr *ssh.PassphraseMissingError
+
+			if errors.As(err, &passErr) {
+
+				if cfg.Passphrase == "" {
+
+					return nil, ErrPassphraseRequired
+
+				}
+
+				signer, err = ssh.ParsePrivateKeyWithPassphrase(key, []byte(cfg.Passphrase))
+
+				if err != nil {
+
+					return nil, fmt.Errorf("parsing key with passphrase: %w", err)
+
+				}
+
+			} else {
+
+				return nil, fmt.Errorf("parsing key: %w", err)
+
+			}
+
+		}
+
+		authMethods = append(authMethods, ssh.PublicKeys(signer))
+
+	}
+
+	if cfg.Password != "" {
+
+		authMethods = append(authMethods, ssh.Password(cfg.Password))
+
+	}
+
+	hkCallback, err := hostKeyCallback()
+
+	if err != nil {
+
+		return nil, fmt.Errorf("setting up host key verification: %w", err)
+
+	}
+
+	sshCfg := &ssh.ClientConfig{
+
+		User: cfg.User,
+
+		Auth: authMethods,
+
+		Timeout: 10 * time.Second,
+
+		HostKeyCallback: hkCallback,
+	}
+
+	addr := net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", cfg.Port))
+
+	client, err := ssh.Dial("tcp", addr, sshCfg)
+
+	if err != nil {
+
+		return nil, err
+
+	}
+
+	sess := &Session{id: newID(), client: client}
+
+	if !cfg.DisableKeepalive {
+
+		go sess.keepaliveLoop()
+
+	}
+
+	return sess, nil
 
 }
-
-
-
-var authMethods []ssh.AuthMethod
-
-if cfg.KeyPath != "" {
-
-if !cfg.IgnoreKeyPermWarning {
-
-if info, err := os.Stat(cfg.KeyPath); err == nil {
-
-if info.Mode().Perm()&0o077 != 0 {
-
-return nil, &KeyPermissionWarning{Path: cfg.KeyPath, Mode: info.Mode()}
-
-}
-
-}
-
-// A Stat failure here isn't fatal, os.ReadFile below will
-
-// surface the real error (missing file, no permission to
-
-// even stat it, etc.) with better context than this check would.
-
-}
-
-key, err := os.ReadFile(cfg.KeyPath)
-
-if err != nil {
-
-return nil, fmt.Errorf("reading key: %w", err)
-
-}
-
-signer, err := ssh.ParsePrivateKey(key)
-
-if err != nil {
-
-var passErr *ssh.PassphraseMissingError
-
-if errors.As(err, &passErr) {
-
-if cfg.Passphrase == "" {
-
-return nil, ErrPassphraseRequired
-
-}
-
-signer, err = ssh.ParsePrivateKeyWithPassphrase(key, []byte(cfg.Passphrase))
-
-if err != nil {
-
-return nil, fmt.Errorf("parsing key with passphrase: %w", err)
-
-}
-
-} else {
-
-return nil, fmt.Errorf("parsing key: %w", err)
-
-}
-
-}
-
-authMethods = append(authMethods, ssh.PublicKeys(signer))
-
-}
-
-if cfg.Password != "" {
-
-authMethods = append(authMethods, ssh.Password(cfg.Password))
-
-}
-
-
-
-hkCallback, err := hostKeyCallback()
-
-if err != nil {
-
-return nil, fmt.Errorf("setting up host key verification: %w", err)
-
-}
-
-
-
-sshCfg := &ssh.ClientConfig{
-
-User:            cfg.User,
-
-Auth:            authMethods,
-
-Timeout:         10 * time.Second,
-
-HostKeyCallback: hkCallback,
-
-}
-
-
-
-addr := net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", cfg.Port))
-
-client, err := ssh.Dial("tcp", addr, sshCfg)
-
-if err != nil {
-
-return nil, err
-
-}
-
-
-
-sess := &Session{id: newID(), client: client}
-
-if !cfg.DisableKeepalive {
-
-go sess.keepaliveLoop()
-
-}
-
-return sess, nil
-
-}
-
-
 
 // keepaliveLoop periodically probes the connection with a no-op SSH
 
@@ -687,37 +596,33 @@ return sess, nil
 
 func (s *Session) keepaliveLoop() {
 
-ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(30 * time.Second)
 
-defer ticker.Stop()
+	defer ticker.Stop()
 
-for range ticker.C {
+	for range ticker.C {
 
-if s.closing.Load() {
+		if s.closing.Load() {
 
-return
+			return
+
+		}
+
+		if _, _, err := s.client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+
+			_ = s.Close()
+
+			return
+
+		}
+
+	}
 
 }
 
-if _, _, err := s.client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
-
-_ = s.Close()
-
-return
-
-}
-
-}
-
-}
-
-
-
-func (s *Session) ID() string             { return s.id }
+func (s *Session) ID() string { return s.id }
 
 func (s *Session) SSHClient() *ssh.Client { return s.client }
-
-
 
 // StartShell opens an interactive shell on the session. onData streams
 
@@ -731,157 +636,147 @@ func (s *Session) SSHClient() *ssh.Client { return s.client }
 
 func (s *Session) StartShell(onData func([]byte), onClose func(CloseReason)) error {
 
-sess, err := s.client.NewSession()
+	sess, err := s.client.NewSession()
 
-if err != nil {
+	if err != nil {
 
-return err
+		return err
+
+	}
+
+	modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
+
+	if err := sess.RequestPty("xterm-256color", 40, 120, modes); err != nil {
+
+		_ = sess.Close()
+
+		return err
+
+	}
+
+	stdout, err := sess.StdoutPipe()
+
+	if err != nil {
+
+		_ = sess.Close()
+
+		return err
+
+	}
+
+	stdin, err := sess.StdinPipe()
+
+	if err != nil {
+
+		_ = sess.Close()
+
+		return err
+
+	}
+
+	if err := sess.Shell(); err != nil {
+
+		_ = sess.Close()
+
+		return err
+
+	}
+
+	s.sess = sess
+
+	s.stdin = stdin
+
+	go func() {
+
+		buf := make([]byte, 4096)
+
+		for {
+
+			n, err := stdout.Read(buf)
+
+			if n > 0 {
+
+				chunk := make([]byte, n)
+
+				copy(chunk, buf[:n])
+
+				onData(chunk)
+
+			}
+
+			if err != nil {
+
+				if onClose != nil {
+
+					onClose(CloseReason{
+
+						Deliberate: s.closing.Load(),
+
+						EOF: errors.Is(err, io.EOF),
+
+						Err: err,
+					})
+
+				}
+
+				return
+
+			}
+
+		}
+
+	}()
+
+	return nil
 
 }
-
-modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
-
-if err := sess.RequestPty("xterm-256color", 40, 120, modes); err != nil {
-
-_ = sess.Close()
-
-return err
-
-}
-
-stdout, err := sess.StdoutPipe()
-
-if err != nil {
-
-_ = sess.Close()
-
-return err
-
-}
-
-stdin, err := sess.StdinPipe()
-
-if err != nil {
-
-_ = sess.Close()
-
-return err
-
-}
-
-if err := sess.Shell(); err != nil {
-
-_ = sess.Close()
-
-return err
-
-}
-
-s.sess = sess
-
-s.stdin = stdin
-
-go func() {
-
-buf := make([]byte, 4096)
-
-for {
-
-n, err := stdout.Read(buf)
-
-if n > 0 {
-
-chunk := make([]byte, n)
-
-copy(chunk, buf[:n])
-
-onData(chunk)
-
-}
-
-if err != nil {
-
-if onClose != nil {
-
-onClose(CloseReason{
-
-Deliberate: s.closing.Load(),
-
-EOF:        errors.Is(err, io.EOF),
-
-Err:        err,
-
-})
-
-}
-
-return
-
-}
-
-}
-
-}()
-
-return nil
-
-}
-
-
 
 func (s *Session) Write(data []byte) error {
 
-if s.stdin == nil {
+	if s.stdin == nil {
 
-return fmt.Errorf("shell not started")
+		return fmt.Errorf("shell not started")
+
+	}
+
+	_, err := s.stdin.Write(data)
+
+	return err
 
 }
-
-_, err := s.stdin.Write(data)
-
-return err
-
-}
-
-
 
 func (s *Session) Resize(cols, rows int) error {
 
-if s.sess == nil {
+	if s.sess == nil {
 
-return fmt.Errorf("shell not started")
+		return fmt.Errorf("shell not started")
+
+	}
+
+	return s.sess.WindowChange(rows, cols)
 
 }
-
-return s.sess.WindowChange(rows, cols)
-
-}
-
-
 
 func (s *Session) Close() error {
 
-s.closing.Store(true)
+	s.closing.Store(true)
 
-if s.sess != nil {
+	if s.sess != nil {
 
-_ = s.sess.Close()
+		_ = s.sess.Close()
+
+	}
+
+	return s.client.Close()
 
 }
-
-return s.client.Close()
-
-}
-
-
 
 func newID() string {
 
-b := make([]byte, 8)
+	b := make([]byte, 8)
 
-_, _ = rand.Read(b)
+	_, _ = rand.Read(b)
 
-return hex.EncodeToString(b)
+	return hex.EncodeToString(b)
 
 }
-

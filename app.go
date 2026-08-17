@@ -1,111 +1,89 @@
-
 package main
 
-
-
 import (
+	"context"
 
-"context"
+	"crypto/rand"
 
-"crypto/rand"
+	"encoding/base64"
 
-"encoding/base64"
+	"encoding/hex"
 
-"encoding/hex"
+	"errors"
 
-"errors"
+	"fmt"
 
-"fmt"
+	"io"
 
-"io"
+	"mime"
 
-"mime"
+	"os"
 
-"os"
+	"os/user"
 
-"os/user"
+	"path/filepath"
 
-"path/filepath"
+	"strings"
 
-"strings"
+	"specter/backend/config"
 
+	"specter/backend/pty"
 
+	"specter/backend/serialclient"
 
-"specter/backend/config"
+	"specter/backend/sftpclient"
 
-"specter/backend/pty"
+	"specter/backend/sshclient"
 
-"specter/backend/serialclient"
-
-"specter/backend/sftpclient"
-
-"specter/backend/sshclient"
-
-
-
-"github.com/wailsapp/wails/v2/pkg/runtime"
-
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-
-
 type App struct {
+	ctx context.Context
 
-ctx      context.Context
+	sessions map[string]*sshclient.Session
 
-sessions map[string]*sshclient.Session
+	locals map[string]*pty.LocalTerminal
 
-locals   map[string]*pty.LocalTerminal
-
-serials  map[string]*serialclient.Session
-
+	serials map[string]*serialclient.Session
 }
-
-
 
 func NewApp() *App {
 
-return &App{
+	return &App{
 
-sessions: make(map[string]*sshclient.Session),
+		sessions: make(map[string]*sshclient.Session),
 
-locals:   make(map[string]*pty.LocalTerminal),
+		locals: make(map[string]*pty.LocalTerminal),
 
-serials:  make(map[string]*serialclient.Session),
+		serials: make(map[string]*serialclient.Session),
+	}
 
 }
-
-}
-
-
 
 func (a *App) startup(ctx context.Context) { a.ctx = ctx }
 
-
-
 func (a *App) shutdown(ctx context.Context) {
 
-for _, s := range a.sessions {
+	for _, s := range a.sessions {
 
-s.Close()
+		s.Close()
+
+	}
+
+	for _, l := range a.locals {
+
+		l.Close()
+
+	}
+
+	for _, sc := range a.serials {
+
+		sc.Close()
+
+	}
 
 }
-
-for _, l := range a.locals {
-
-l.Close()
-
-}
-
-for _, sc := range a.serials {
-
-sc.Close()
-
-}
-
-}
-
-
 
 // SessionClosedEvent is emitted as "ssh:closed:<id>" / "serial:closed:<id>"
 
@@ -116,18 +94,12 @@ sc.Close()
 // since there's nothing useful to tell them at that point.
 
 type SessionClosedEvent struct {
+	EOF bool `json:"eof"`
 
-EOF     bool   `json:"eof"`
-
-Message string `json:"message"`
-
+	Message string `json:"message"`
 }
 
-
-
 // --- Local terminals (one per tab) ---
-
-
 
 // StartLocalTerminal spawns a new local shell PTY and returns its ID.
 
@@ -137,81 +109,71 @@ Message string `json:"message"`
 
 func (a *App) StartLocalTerminal(shell string) (string, error) {
 
-id := newID()
+	id := newID()
 
-lt, err := pty.New(func(data []byte) {
+	lt, err := pty.New(func(data []byte) {
 
-runtime.EventsEmit(a.ctx, "local:data:"+id, string(data))
+		runtime.EventsEmit(a.ctx, "local:data:"+id, string(data))
 
-}, shell)
+	}, shell)
 
-if err != nil {
+	if err != nil {
 
-return "", err
+		return "", err
+
+	}
+
+	a.locals[id] = lt
+
+	return id, nil
 
 }
-
-a.locals[id] = lt
-
-return id, nil
-
-}
-
-
 
 func (a *App) WriteLocalTerminal(id string, data string) error {
 
-lt, ok := a.locals[id]
+	lt, ok := a.locals[id]
 
-if !ok {
+	if !ok {
 
-return fmt.Errorf("no such local terminal: %s", id)
+		return fmt.Errorf("no such local terminal: %s", id)
+
+	}
+
+	return lt.Write([]byte(data))
 
 }
-
-return lt.Write([]byte(data))
-
-}
-
-
 
 func (a *App) ResizeLocalTerminal(id string, cols, rows int) error {
 
-lt, ok := a.locals[id]
+	lt, ok := a.locals[id]
 
-if !ok {
+	if !ok {
 
-return fmt.Errorf("no such local terminal: %s", id)
+		return fmt.Errorf("no such local terminal: %s", id)
+
+	}
+
+	return lt.Resize(cols, rows)
 
 }
-
-return lt.Resize(cols, rows)
-
-}
-
-
 
 func (a *App) CloseLocalTerminal(id string) error {
 
-lt, ok := a.locals[id]
+	lt, ok := a.locals[id]
 
-if !ok {
+	if !ok {
 
-return nil
+		return nil
+
+	}
+
+	delete(a.locals, id)
+
+	return lt.Close()
 
 }
-
-delete(a.locals, id)
-
-return lt.Close()
-
-}
-
-
 
 // --- Serial/COM port console (direct hardware console access) ---
-
-
 
 // ConnectSerial opens a serial port at the given baud rate (8N1, no flow
 
@@ -221,77 +183,70 @@ return lt.Close()
 
 func (a *App) ConnectSerial(portName string, baud int) (string, error) {
 
-id := newID()
+	id := newID()
 
-sc, err := serialclient.Open(portName, baud, func(data []byte) {
+	sc, err := serialclient.Open(portName, baud, func(data []byte) {
 
-runtime.EventsEmit(a.ctx, "serial:data:"+id, string(data))
+		runtime.EventsEmit(a.ctx, "serial:data:"+id, string(data))
 
-}, func(reason serialclient.CloseReason) {
+	}, func(reason serialclient.CloseReason) {
 
-if reason.Deliberate {
+		if reason.Deliberate {
 
-return
+			return
+
+		}
+
+		runtime.EventsEmit(a.ctx, "serial:closed:"+id, SessionClosedEvent{
+
+			EOF: reason.EOF,
+
+			Message: closeErrorMessage(reason.Err),
+		})
+
+	})
+
+	if err != nil {
+
+		return "", err
+
+	}
+
+	a.serials[id] = sc
+
+	return id, nil
 
 }
-
-runtime.EventsEmit(a.ctx, "serial:closed:"+id, SessionClosedEvent{
-
-EOF:     reason.EOF,
-
-Message: closeErrorMessage(reason.Err),
-
-})
-
-})
-
-if err != nil {
-
-return "", err
-
-}
-
-a.serials[id] = sc
-
-return id, nil
-
-}
-
-
 
 func (a *App) WriteSerial(id string, data string) error {
 
-sc, ok := a.serials[id]
+	sc, ok := a.serials[id]
 
-if !ok {
+	if !ok {
 
-return fmt.Errorf("no such serial session: %s", id)
+		return fmt.Errorf("no such serial session: %s", id)
+
+	}
+
+	return sc.Write([]byte(data))
 
 }
-
-return sc.Write([]byte(data))
-
-}
-
-
 
 func (a *App) CloseSerial(id string) error {
 
-sc, ok := a.serials[id]
+	sc, ok := a.serials[id]
 
-if !ok {
+	if !ok {
 
-return nil
+		return nil
+
+	}
+
+	delete(a.serials, id)
+
+	return sc.Close()
 
 }
-
-delete(a.serials, id)
-
-return sc.Close()
-
-}
-
-
 
 // ListSerialPorts returns available serial port device paths for a
 
@@ -299,195 +254,170 @@ return sc.Close()
 
 func (a *App) ListSerialPorts() ([]string, error) {
 
-return serialclient.ListPorts()
+	return serialclient.ListPorts()
 
 }
-
-
 
 // --- SSH sessions ---
 
-
-
 type ConnectRequest struct {
+	Host string `json:"host"`
 
-Host       string `json:"host"`
+	Port int `json:"port"`
 
-Port       int    `json:"port"`
+	User string `json:"user"`
 
-User       string `json:"user"`
+	Password string `json:"password,omitempty"`
 
-Password   string `json:"password,omitempty"`
+	KeyPath string `json:"keyPath,omitempty"`
 
-KeyPath    string `json:"keyPath,omitempty"`
+	Passphrase string `json:"passphrase,omitempty"`
 
-Passphrase string `json:"passphrase,omitempty"`
+	// IgnoreKeyPermWarning: user already saw and accepted the SPE-65
 
-// IgnoreKeyPermWarning: user already saw and accepted the SPE-65
+	// KeyPermissionWarning once for this attempt, skip the check.
 
-// KeyPermissionWarning once for this attempt, skip the check.
-
-IgnoreKeyPermWarning bool `json:"ignoreKeyPermWarning,omitempty"`
-
+	IgnoreKeyPermWarning bool `json:"ignoreKeyPermWarning,omitempty"`
 }
-
-
 
 type ConnectResult struct {
+	SessionID string `json:"sessionId,omitempty"`
 
-SessionID       string `json:"sessionId,omitempty"`
+	NeedsTrust bool `json:"needsTrust,omitempty"`
 
-NeedsTrust      bool   `json:"needsTrust,omitempty"`
+	Changed bool `json:"changed,omitempty"`
 
-Changed         bool   `json:"changed,omitempty"`
+	Host string `json:"host,omitempty"`
 
-Host            string `json:"host,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
 
-Fingerprint     string `json:"fingerprint,omitempty"`
+	KeyType string `json:"keyType,omitempty"`
 
-KeyType         string `json:"keyType,omitempty"`
+	NeedsPassphrase bool `json:"needsPassphrase,omitempty"`
 
-NeedsPassphrase bool   `json:"needsPassphrase,omitempty"`
+	// NeedsKeyPermConfirm (SPE-65): the selected key file is
 
-// NeedsKeyPermConfirm (SPE-65): the selected key file is
+	// group/world-readable. Soft warning, not a hard block, retry with
 
-// group/world-readable. Soft warning, not a hard block, retry with
+	// IgnoreKeyPermWarning once the user's explicitly acknowledged it.
 
-// IgnoreKeyPermWarning once the user's explicitly acknowledged it.
+	NeedsKeyPermConfirm bool `json:"needsKeyPermConfirm,omitempty"`
 
-NeedsKeyPermConfirm bool   `json:"needsKeyPermConfirm,omitempty"`
+	KeyPermPath string `json:"keyPermPath,omitempty"`
 
-KeyPermPath         string `json:"keyPermPath,omitempty"`
-
-KeyPermMode         string `json:"keyPermMode,omitempty"`
-
+	KeyPermMode string `json:"keyPermMode,omitempty"`
 }
-
-
 
 func (a *App) Connect(req ConnectRequest) (ConnectResult, error) {
 
-// Loaded fresh per-connect rather than cached, GetSettings/SaveSettings
+	// Loaded fresh per-connect rather than cached, GetSettings/SaveSettings
 
-// don't cache anything on App either, matches the existing pattern.
+	// don't cache anything on App either, matches the existing pattern.
 
-// A load failure isn't fatal to connecting, defaults to keepalive
+	// A load failure isn't fatal to connecting, defaults to keepalive
 
-// enabled (the safe default) rather than blocking the connection.
+	// enabled (the safe default) rather than blocking the connection.
 
-settings, _ := config.LoadSettings()
+	settings, _ := config.LoadSettings()
 
-sess, err := sshclient.Dial(sshclient.Config{
+	sess, err := sshclient.Dial(sshclient.Config{
 
-Host: req.Host, Port: req.Port, User: req.User,
+		Host: req.Host, Port: req.Port, User: req.User,
 
-Password: req.Password, KeyPath: req.KeyPath, Passphrase: req.Passphrase,
+		Password: req.Password, KeyPath: req.KeyPath, Passphrase: req.Passphrase,
 
-IgnoreKeyPermWarning: req.IgnoreKeyPermWarning,
+		IgnoreKeyPermWarning: req.IgnoreKeyPermWarning,
 
-DisableKeepalive:     settings.SSHKeepaliveDisabled,
+		DisableKeepalive: settings.SSHKeepaliveDisabled,
+	})
 
-})
+	if err != nil {
 
-if err != nil {
+		if errors.Is(err, sshclient.ErrPassphraseRequired) {
 
-if errors.Is(err, sshclient.ErrPassphraseRequired) {
+			return ConnectResult{NeedsPassphrase: true}, nil
 
-return ConnectResult{NeedsPassphrase: true}, nil
+		}
 
-}
+		var permWarning *sshclient.KeyPermissionWarning
 
-var permWarning *sshclient.KeyPermissionWarning
+		if errors.As(err, &permWarning) {
 
-if errors.As(err, &permWarning) {
+			return ConnectResult{
 
-return ConnectResult{
+				NeedsKeyPermConfirm: true,
 
-NeedsKeyPermConfirm: true,
+				KeyPermPath: permWarning.Path,
 
-KeyPermPath:         permWarning.Path,
+				KeyPermMode: fmt.Sprintf("%04o", permWarning.Mode.Perm()),
+			}, nil
 
-KeyPermMode:         fmt.Sprintf("%04o", permWarning.Mode.Perm()),
+		}
 
-}, nil
+		var unknown *sshclient.HostKeyUnknownError
 
-}
+		if errors.As(err, &unknown) {
 
-var unknown *sshclient.HostKeyUnknownError
+			return ConnectResult{
 
-if errors.As(err, &unknown) {
+				NeedsTrust: true, Changed: false,
 
-return ConnectResult{
+				Host: unknown.Host, Fingerprint: unknown.Fingerprint, KeyType: unknown.KeyType,
+			}, nil
 
-NeedsTrust: true, Changed: false,
+		}
 
-Host: unknown.Host, Fingerprint: unknown.Fingerprint, KeyType: unknown.KeyType,
+		var changed *sshclient.HostKeyChangedError
 
-}, nil
+		if errors.As(err, &changed) {
 
-}
+			return ConnectResult{
 
-var changed *sshclient.HostKeyChangedError
+				NeedsTrust: true, Changed: true,
 
-if errors.As(err, &changed) {
+				Host: changed.Host, Fingerprint: changed.NewFingerprint, KeyType: changed.KeyType,
+			}, nil
 
-return ConnectResult{
+		}
 
-NeedsTrust: true, Changed: true,
+		return ConnectResult{}, err
 
-Host: changed.Host, Fingerprint: changed.NewFingerprint, KeyType: changed.KeyType,
+	}
 
-}, nil
+	id := sess.ID()
 
-}
+	a.sessions[id] = sess
 
-return ConnectResult{}, err
+	err = sess.StartShell(func(data []byte) {
 
-}
+		runtime.EventsEmit(a.ctx, "ssh:data:"+id, string(data))
 
+	}, func(reason sshclient.CloseReason) {
 
+		if reason.Deliberate {
 
-id := sess.ID()
+			return
 
-a.sessions[id] = sess
+		}
 
+		runtime.EventsEmit(a.ctx, "ssh:closed:"+id, SessionClosedEvent{
 
+			EOF: reason.EOF,
 
-err = sess.StartShell(func(data []byte) {
+			Message: closeErrorMessage(reason.Err),
+		})
 
-runtime.EventsEmit(a.ctx, "ssh:data:"+id, string(data))
+	})
 
-}, func(reason sshclient.CloseReason) {
+	if err != nil {
 
-if reason.Deliberate {
+		return ConnectResult{}, err
 
-return
+	}
 
-}
-
-runtime.EventsEmit(a.ctx, "ssh:closed:"+id, SessionClosedEvent{
-
-EOF:     reason.EOF,
-
-Message: closeErrorMessage(reason.Err),
-
-})
-
-})
-
-if err != nil {
-
-return ConnectResult{}, err
+	return ConnectResult{SessionID: id}, nil
 
 }
-
-
-
-return ConnectResult{SessionID: id}, nil
-
-}
-
-
 
 // closeErrorMessage renders a CloseReason's error for display, matching
 
@@ -497,45 +427,39 @@ return ConnectResult{SessionID: id}, nil
 
 func closeErrorMessage(err error) string {
 
-if err == nil {
+	if err == nil {
 
-return "Session ended"
+		return "Session ended"
+
+	}
+
+	if errors.Is(err, io.EOF) {
+
+		return "Remote side closed the connection"
+
+	}
+
+	if errors.Is(err, os.ErrClosed) {
+
+		return "Session ended"
+
+	}
+
+	return err.Error()
 
 }
-
-if errors.Is(err, io.EOF) {
-
-return "Remote side closed the connection"
-
-}
-
-if errors.Is(err, os.ErrClosed) {
-
-return "Session ended"
-
-}
-
-return err.Error()
-
-}
-
-
 
 func (a *App) TrustHost(host string) error {
 
-return sshclient.TrustHost(host)
+	return sshclient.TrustHost(host)
 
 }
-
-
 
 func (a *App) TrustHostDespiteChange(host string) error {
 
-return sshclient.TrustHostDespiteChange(host)
+	return sshclient.TrustHostDespiteChange(host)
 
 }
-
-
 
 // GetPlatform returns "windows", "darwin", or "linux", used by the
 
@@ -543,11 +467,9 @@ return sshclient.TrustHostDespiteChange(host)
 
 func (a *App) GetPlatform() string {
 
-return runtime.Environment(a.ctx).Platform
+	return runtime.Environment(a.ctx).Platform
 
 }
-
-
 
 // GetClipboardText reads the OS clipboard via Wails' native runtime,
 
@@ -561,11 +483,9 @@ return runtime.Environment(a.ctx).Platform
 
 func (a *App) GetClipboardText() (string, error) {
 
-return runtime.ClipboardGetText(a.ctx)
+	return runtime.ClipboardGetText(a.ctx)
 
 }
-
-
 
 // GetOSUsername pre-fills the New Session username field (SPE-83),
 
@@ -577,45 +497,40 @@ return runtime.ClipboardGetText(a.ctx)
 
 func (a *App) GetOSUsername() string {
 
-u, err := user.Current()
+	u, err := user.Current()
 
-if err != nil {
+	if err != nil {
 
-return ""
+		return ""
+
+	}
+
+	// Windows returns "COMPUTERNAME\username" or "DOMAIN\username", not
+
+	// just the bare name, confirmed real os/user behavior, not assumed.
+
+	// An SSH username has no domain prefix, strip it if present.
+
+	name := u.Username
+
+	if idx := strings.LastIndex(name, `\`); idx != -1 {
+
+		name = name[idx+1:]
+
+	}
+
+	return name
 
 }
-
-// Windows returns "COMPUTERNAME\username" or "DOMAIN\username", not
-
-// just the bare name, confirmed real os/user behavior, not assumed.
-
-// An SSH username has no domain prefix, strip it if present.
-
-name := u.Username
-
-if idx := strings.LastIndex(name, `\`); idx != -1 {
-
-name = name[idx+1:]
-
-}
-
-return name
-
-}
-
-
 
 func (a *App) SelectKeyFile() (string, error) {
 
-return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
 
-Title: "Select SSH Private Key",
-
-})
+		Title: "Select SSH Private Key",
+	})
 
 }
-
-
 
 // SelectImageFile prompts for an image file, used by the wallpaper
 
@@ -623,21 +538,17 @@ Title: "Select SSH Private Key",
 
 func (a *App) SelectImageFile() (string, error) {
 
-return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
 
-Title: "Select Terminal Wallpaper",
+		Title: "Select Terminal Wallpaper",
 
-Filters: []runtime.FileFilter{
+		Filters: []runtime.FileFilter{
 
-{DisplayName: "Images (*.png;*.jpg;*.jpeg;*.gif;*.webp)", Pattern: "*.png;*.jpg;*.jpeg;*.gif;*.webp"},
-
-},
-
-})
+			{DisplayName: "Images (*.png;*.jpg;*.jpeg;*.gif;*.webp)", Pattern: "*.png;*.jpg;*.jpeg;*.gif;*.webp"},
+		},
+	})
 
 }
-
-
 
 // SelectAnyFile prompts for any local file to open in the editor
 
@@ -649,15 +560,12 @@ Filters: []runtime.FileFilter{
 
 func (a *App) SelectAnyFile() (string, error) {
 
-return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
 
-Title: "Open File",
-
-})
+		Title: "Open File",
+	})
 
 }
-
-
 
 // ReadLocalFile and WriteLocalFile (SPE-78) round out local file
 
@@ -669,27 +577,23 @@ Title: "Open File",
 
 func (a *App) ReadLocalFile(path string) (string, error) {
 
-data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path)
 
-if err != nil {
+	if err != nil {
 
-return "", err
+		return "", err
+
+	}
+
+	return string(data), nil
 
 }
-
-return string(data), nil
-
-}
-
-
 
 func (a *App) WriteLocalFile(path string, content string) error {
 
-return os.WriteFile(path, []byte(content), 0o644)
+	return os.WriteFile(path, []byte(content), 0o644)
 
 }
-
-
 
 // ReadImageFile reads an arbitrary local image path and returns it as a
 
@@ -701,27 +605,25 @@ return os.WriteFile(path, []byte(content), 0o644)
 
 func (a *App) ReadImageFile(path string) (string, error) {
 
-data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path)
 
-if err != nil {
+	if err != nil {
 
-return "", err
+		return "", err
+
+	}
+
+	mimeType := mime.TypeByExtension(filepath.Ext(path))
+
+	if mimeType == "" {
+
+		mimeType = "application/octet-stream"
+
+	}
+
+	return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
 
 }
-
-mimeType := mime.TypeByExtension(filepath.Ext(path))
-
-if mimeType == "" {
-
-mimeType = "application/octet-stream"
-
-}
-
-return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
-
-}
-
-
 
 // SaveTextFile prompts for a destination path and writes content to it,
 
@@ -733,199 +635,176 @@ return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data)
 
 func (a *App) SaveTextFile(defaultFilename string, content string) (string, error) {
 
-path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
 
-Title:           "Save Terminal Output",
+		Title: "Save Terminal Output",
 
-DefaultFilename: defaultFilename,
+		DefaultFilename: defaultFilename,
+	})
 
-})
+	if err != nil {
 
-if err != nil {
+		return "", err
 
-return "", err
+	}
+
+	if path == "" {
+
+		return "", nil
+
+	}
+
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+
+		return "", err
+
+	}
+
+	return path, nil
 
 }
-
-if path == "" {
-
-return "", nil
-
-}
-
-if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-
-return "", err
-
-}
-
-return path, nil
-
-}
-
-
 
 // --- Terminal personalization (SPE-61) ---
 
-
-
 func (a *App) GetSettings() (config.Settings, error) {
 
-return config.LoadSettings()
+	return config.LoadSettings()
 
 }
-
-
 
 func (a *App) SaveSettings(s config.Settings) error {
 
-return config.SaveSettings(s)
+	return config.SaveSettings(s)
 
 }
-
-
 
 // --- Saved sessions ---
 
-
-
 func (a *App) ListSessions() ([]config.SessionProfile, error) {
 
-return config.LoadSessions()
+	return config.LoadSessions()
 
 }
-
-
 
 func (a *App) SaveSession(profile config.SessionProfile) error {
 
-sessions, err := config.LoadSessions()
+	sessions, err := config.LoadSessions()
 
-if err != nil {
+	if err != nil {
 
-return err
+		return err
+
+	}
+
+	if profile.ID == "" {
+
+		profile.ID = newID()
+
+	}
+
+	replaced := false
+
+	for i, s := range sessions {
+
+		if s.ID == profile.ID {
+
+			sessions[i] = profile
+
+			replaced = true
+
+			break
+
+		}
+
+	}
+
+	if !replaced {
+
+		sessions = append(sessions, profile)
+
+	}
+
+	return config.SaveSessions(sessions)
 
 }
-
-if profile.ID == "" {
-
-profile.ID = newID()
-
-}
-
-replaced := false
-
-for i, s := range sessions {
-
-if s.ID == profile.ID {
-
-sessions[i] = profile
-
-replaced = true
-
-break
-
-}
-
-}
-
-if !replaced {
-
-sessions = append(sessions, profile)
-
-}
-
-return config.SaveSessions(sessions)
-
-}
-
-
 
 func (a *App) DeleteSession(id string) error {
 
-sessions, err := config.LoadSessions()
+	sessions, err := config.LoadSessions()
 
-if err != nil {
+	if err != nil {
 
-return err
+		return err
+
+	}
+
+	kept := sessions[:0]
+
+	for _, s := range sessions {
+
+		if s.ID != id {
+
+			kept = append(kept, s)
+
+		}
+
+	}
+
+	return config.SaveSessions(kept)
 
 }
-
-kept := sessions[:0]
-
-for _, s := range sessions {
-
-if s.ID != id {
-
-kept = append(kept, s)
-
-}
-
-}
-
-return config.SaveSessions(kept)
-
-}
-
-
 
 // --- Session groups (folders) ---
 
-
-
 func (a *App) ListGroups() ([]config.SessionGroup, error) {
 
-return config.LoadGroups()
+	return config.LoadGroups()
 
 }
-
-
 
 // SaveGroup creates a new group, or updates one with a matching ID.
 
 func (a *App) SaveGroup(group config.SessionGroup) error {
 
-groups, err := config.LoadGroups()
+	groups, err := config.LoadGroups()
 
-if err != nil {
+	if err != nil {
 
-return err
+		return err
+
+	}
+
+	if group.ID == "" {
+
+		group.ID = newID()
+
+	}
+
+	replaced := false
+
+	for i, g := range groups {
+
+		if g.ID == group.ID {
+
+			groups[i] = group
+
+			replaced = true
+
+			break
+
+		}
+
+	}
+
+	if !replaced {
+
+		groups = append(groups, group)
+
+	}
+
+	return config.SaveGroups(groups)
 
 }
-
-if group.ID == "" {
-
-group.ID = newID()
-
-}
-
-replaced := false
-
-for i, g := range groups {
-
-if g.ID == group.ID {
-
-groups[i] = group
-
-replaced = true
-
-break
-
-}
-
-}
-
-if !replaced {
-
-groups = append(groups, group)
-
-}
-
-return config.SaveGroups(groups)
-
-}
-
-
 
 // DeleteGroup removes a group and ungroups any sessions inside it
 
@@ -933,211 +812,187 @@ return config.SaveGroups(groups)
 
 func (a *App) DeleteGroup(id string) error {
 
-groups, err := config.LoadGroups()
+	groups, err := config.LoadGroups()
 
-if err != nil {
+	if err != nil {
 
-return err
+		return err
 
-}
+	}
 
-kept := groups[:0]
+	kept := groups[:0]
 
-for _, g := range groups {
+	for _, g := range groups {
 
-if g.ID != id {
+		if g.ID != id {
 
-kept = append(kept, g)
+			kept = append(kept, g)
 
-}
+		}
 
-}
+	}
 
-if err := config.SaveGroups(kept); err != nil {
+	if err := config.SaveGroups(kept); err != nil {
 
-return err
+		return err
 
-}
+	}
 
+	sessions, err := config.LoadSessions()
 
+	if err != nil {
 
-sessions, err := config.LoadSessions()
+		return err
 
-if err != nil {
+	}
 
-return err
+	changed := false
 
-}
+	for i, s := range sessions {
 
-changed := false
+		if s.GroupID == id {
 
-for i, s := range sessions {
+			sessions[i].GroupID = ""
 
-if s.GroupID == id {
+			changed = true
 
-sessions[i].GroupID = ""
+		}
 
-changed = true
+	}
 
-}
+	if changed {
 
-}
+		return config.SaveSessions(sessions)
 
-if changed {
+	}
 
-return config.SaveSessions(sessions)
-
-}
-
-return nil
+	return nil
 
 }
-
-
 
 func newID() string {
 
-b := make([]byte, 8)
+	b := make([]byte, 8)
 
-_, _ = rand.Read(b)
+	_, _ = rand.Read(b)
 
-return hex.EncodeToString(b)
+	return hex.EncodeToString(b)
 
 }
-
-
 
 func (a *App) WriteSSH(id string, data string) error {
 
-sess, ok := a.sessions[id]
+	sess, ok := a.sessions[id]
 
-if !ok {
+	if !ok {
 
-return fmt.Errorf("no such session: %s", id)
+		return fmt.Errorf("no such session: %s", id)
+
+	}
+
+	return sess.Write([]byte(data))
 
 }
-
-return sess.Write([]byte(data))
-
-}
-
-
 
 func (a *App) ResizeSSH(id string, cols, rows int) error {
 
-sess, ok := a.sessions[id]
+	sess, ok := a.sessions[id]
 
-if !ok {
+	if !ok {
 
-return fmt.Errorf("no such session: %s", id)
+		return fmt.Errorf("no such session: %s", id)
+
+	}
+
+	return sess.Resize(cols, rows)
 
 }
-
-return sess.Resize(cols, rows)
-
-}
-
-
 
 func (a *App) CloseSSH(id string) error {
 
-sess, ok := a.sessions[id]
+	sess, ok := a.sessions[id]
 
-if !ok {
+	if !ok {
 
-return nil
+		return nil
+
+	}
+
+	delete(a.sessions, id)
+
+	return sess.Close()
 
 }
-
-delete(a.sessions, id)
-
-return sess.Close()
-
-}
-
-
 
 // --- SFTP / remote file editing ---
 
-
-
 type RemoteFile struct {
+	Name string `json:"name"`
 
-Name  string `json:"name"`
+	Path string `json:"path"`
 
-Path  string `json:"path"`
+	IsDir bool `json:"isDir"`
 
-IsDir bool   `json:"isDir"`
-
-Size  int64  `json:"size"`
-
+	Size int64 `json:"size"`
 }
-
-
 
 func (a *App) ListRemoteDir(id string, path string) ([]RemoteFile, error) {
 
-sess, ok := a.sessions[id]
+	sess, ok := a.sessions[id]
 
-if !ok {
+	if !ok {
 
-return nil, fmt.Errorf("no such session: %s", id)
+		return nil, fmt.Errorf("no such session: %s", id)
+
+	}
+
+	entries, err := sftpclient.ListDir(sess.SSHClient(), path)
+
+	if err != nil {
+
+		return nil, err
+
+	}
+
+	out := make([]RemoteFile, 0, len(entries))
+
+	for _, e := range entries {
+
+		out = append(out, RemoteFile{Name: e.Name, Path: e.Path, IsDir: e.IsDir, Size: e.Size})
+
+	}
+
+	return out, nil
 
 }
-
-entries, err := sftpclient.ListDir(sess.SSHClient(), path)
-
-if err != nil {
-
-return nil, err
-
-}
-
-out := make([]RemoteFile, 0, len(entries))
-
-for _, e := range entries {
-
-out = append(out, RemoteFile{Name: e.Name, Path: e.Path, IsDir: e.IsDir, Size: e.Size})
-
-}
-
-return out, nil
-
-}
-
-
 
 func (a *App) ReadRemoteFile(id string, path string) (string, error) {
 
-sess, ok := a.sessions[id]
+	sess, ok := a.sessions[id]
 
-if !ok {
+	if !ok {
 
-return "", fmt.Errorf("no such session: %s", id)
+		return "", fmt.Errorf("no such session: %s", id)
+
+	}
+
+	return sftpclient.ReadFile(sess.SSHClient(), path)
 
 }
-
-return sftpclient.ReadFile(sess.SSHClient(), path)
-
-}
-
-
 
 func (a *App) WriteRemoteFile(id string, path string, content string) error {
 
-sess, ok := a.sessions[id]
+	sess, ok := a.sessions[id]
 
-if !ok {
+	if !ok {
 
-return fmt.Errorf("no such session: %s", id)
+		return fmt.Errorf("no such session: %s", id)
+
+	}
+
+	return sftpclient.WriteFile(sess.SSHClient(), path, content)
 
 }
-
-return sftpclient.WriteFile(sess.SSHClient(), path, content)
-
-}
-
-
 
 // UploadRemoteFile writes a base64-encoded file to a remote path. Base64
 
@@ -1149,23 +1004,22 @@ return sftpclient.WriteFile(sess.SSHClient(), path, content)
 
 func (a *App) UploadRemoteFile(id string, path string, base64Content string) error {
 
-sess, ok := a.sessions[id]
+	sess, ok := a.sessions[id]
 
-if !ok {
+	if !ok {
 
-return fmt.Errorf("no such session: %s", id)
+		return fmt.Errorf("no such session: %s", id)
+
+	}
+
+	data, err := base64.StdEncoding.DecodeString(base64Content)
+
+	if err != nil {
+
+		return fmt.Errorf("invalid base64 upload payload: %w", err)
+
+	}
+
+	return sftpclient.UploadFile(sess.SSHClient(), path, data)
 
 }
-
-data, err := base64.StdEncoding.DecodeString(base64Content)
-
-if err != nil {
-
-return fmt.Errorf("invalid base64 upload payload: %w", err)
-
-}
-
-return sftpclient.UploadFile(sess.SSHClient(), path, data)
-
-}
-

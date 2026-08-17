@@ -1,19 +1,12 @@
-
 package config
 
-
-
 import (
+	"encoding/json"
 
-"encoding/json"
+	"os"
 
-"os"
-
-"path/filepath"
-
+	"path/filepath"
 )
-
-
 
 // Settings holds global terminal personalization (SPE-61): a background
 
@@ -25,137 +18,129 @@ import (
 
 type Settings struct {
 
-// WallpaperPath references an image file on disk. Deliberately a
+	// WallpaperPath references an image file on disk. Deliberately a
 
-// path rather than embedding the image as base64 in this config
+	// path rather than embedding the image as base64 in this config
 
-// file, confirmed choice, keeps settings.json small and lets the
+	// file, confirmed choice, keeps settings.json small and lets the
 
-// user swap the image file without re-saving settings.
+	// user swap the image file without re-saving settings.
 
-WallpaperPath string `json:"wallpaperPath,omitempty"`
+	WallpaperPath string `json:"wallpaperPath,omitempty"`
 
-// WallpaperOpacity is 0.0-1.0, how visible the image is behind the
+	// WallpaperOpacity is 0.0-1.0, how visible the image is behind the
 
-// terminal text. Defaults to 0.15 (applied client-side if unset/0)
+	// terminal text. Defaults to 0.15 (applied client-side if unset/0)
 
-// so text stays legible without the user needing to tune it first.
+	// so text stays legible without the user needing to tune it first.
 
-WallpaperOpacity float64 `json:"wallpaperOpacity,omitempty"`
+	WallpaperOpacity float64 `json:"wallpaperOpacity,omitempty"`
 
-// ColorScheme is a preset name matching a key in the frontend's
+	// ColorScheme is a preset name matching a key in the frontend's
 
-// XTERM_THEMES map (e.g. "dark", "light", "dracula", "nord").
+	// XTERM_THEMES map (e.g. "dark", "light", "dracula", "nord").
 
-// Plain string, not a Go enum, so new presets are a frontend-only
+	// Plain string, not a Go enum, so new presets are a frontend-only
 
-// addition, no backend schema change needed.
+	// addition, no backend schema change needed.
 
-ColorScheme string `json:"colorScheme,omitempty"`
+	ColorScheme string `json:"colorScheme,omitempty"`
 
-// FontFamily is one of a curated cross-platform-safe list on the
+	// FontFamily is one of a curated cross-platform-safe list on the
 
-// frontend, not free text, so a user can't select a font that
+	// frontend, not free text, so a user can't select a font that
 
-// doesn't exist on their OS.
+	// doesn't exist on their OS.
 
-FontFamily string `json:"fontFamily,omitempty"`
+	FontFamily string `json:"fontFamily,omitempty"`
 
-// FontSize in points. 0 means "use default" (13).
+	// FontSize in points. 0 means "use default" (13).
 
-FontSize int `json:"fontSize,omitempty"`
+	FontSize int `json:"fontSize,omitempty"`
 
-// SSHKeepaliveDisabled (SPE-79). Inverted polarity deliberately:
+	// SSHKeepaliveDisabled (SPE-79). Inverted polarity deliberately:
 
-// keepalive should default to ON, and Go's zero value for bool is
+	// keepalive should default to ON, and Go's zero value for bool is
 
-// false, so "Disabled" (zero value = false = not disabled = on)
+	// false, so "Disabled" (zero value = false = not disabled = on)
 
-// gets that default for free, including for any settings.json
+	// gets that default for free, including for any settings.json
 
-// written before this field existed. A plain "Enabled bool" would
+	// written before this field existed. A plain "Enabled bool" would
 
-// have silently defaulted every existing user to keepalive OFF.
+	// have silently defaulted every existing user to keepalive OFF.
 
-SSHKeepaliveDisabled bool `json:"sshKeepaliveDisabled,omitempty"`
-
+	SSHKeepaliveDisabled bool `json:"sshKeepaliveDisabled,omitempty"`
 }
-
-
 
 func settingsPath() (string, error) {
 
-dir, err := configDir()
+	dir, err := configDir()
 
-if err != nil {
+	if err != nil {
 
-return "", err
+		return "", err
+
+	}
+
+	return filepath.Join(dir, "settings.json"), nil
 
 }
-
-return filepath.Join(dir, "settings.json"), nil
-
-}
-
-
 
 func LoadSettings() (Settings, error) {
 
-path, err := settingsPath()
+	path, err := settingsPath()
 
-if err != nil {
+	if err != nil {
 
-return Settings{}, err
+		return Settings{}, err
+
+	}
+
+	data, err := os.ReadFile(path)
+
+	if os.IsNotExist(err) {
+
+		return Settings{}, nil
+
+	}
+
+	if err != nil {
+
+		return Settings{}, err
+
+	}
+
+	var s Settings
+
+	if err := json.Unmarshal(data, &s); err != nil {
+
+		return Settings{}, err
+
+	}
+
+	return s, nil
 
 }
-
-data, err := os.ReadFile(path)
-
-if os.IsNotExist(err) {
-
-return Settings{}, nil
-
-}
-
-if err != nil {
-
-return Settings{}, err
-
-}
-
-var s Settings
-
-if err := json.Unmarshal(data, &s); err != nil {
-
-return Settings{}, err
-
-}
-
-return s, nil
-
-}
-
-
 
 func SaveSettings(s Settings) error {
 
-path, err := settingsPath()
+	path, err := settingsPath()
 
-if err != nil {
+	if err != nil {
 
-return err
+		return err
+
+	}
+
+	data, err := json.MarshalIndent(s, "", "  ")
+
+	if err != nil {
+
+		return err
+
+	}
+
+	return os.WriteFile(path, data, 0o600)
 
 }
-
-data, err := json.MarshalIndent(s, "", "  ")
-
-if err != nil {
-
-return err
-
-}
-
-return os.WriteFile(path, data, 0o600)
-
-}
-
