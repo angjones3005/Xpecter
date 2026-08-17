@@ -1,3 +1,8 @@
+#!/usr/bin/env bash
+# Run from the root of your Specter repo.
+set -euo pipefail
+
+cat > ".github/workflows/release.yml" << 'SPECTER_EOF_RELEASEYML'
 name: Release
 
 on:
@@ -162,3 +167,5 @@ jobs:
           generate_release_notes: true
           repository: Dawnrail/Dawnrail
           token: ${{ secrets.DAWNRAIL_TOKEN }}
+SPECTER_EOF_RELEASEYML
+
