@@ -170,6 +170,15 @@
     #session-picker .picker-item { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--text); border: 1px solid var(--border); }
     #session-picker .picker-item:hover { background: var(--hover); border-color: var(--accent); }
     #session-picker .picker-item .icon { font-size: 28px; }
+    /* SPE-102: local shell profile editor, same overlay/dialog shell as
+       #session-picker, own ID so both can exist independently. */
+    #lsp-editor-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 2000; }
+    #lsp-editor-overlay.open { display: flex; }
+    #lsp-editor { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; width: 320px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+    #lsp-editor .picker-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px; }
+    #lsp-editor .picker-header .close { cursor: pointer; opacity: 0.6; }
+    #lsp-editor .picker-header .close:hover { opacity: 1; }
+    #lsp-editor .fields { display: flex; flex-direction: column; gap: 8px; padding: 16px; }
     .disconnect-panel {
       position: absolute;
       left: 8px;
@@ -219,7 +228,9 @@
       <div class="menu-dropdown" id="menu-terminal">
         <div class="item" id="menu-new-tab">New Tab</div>
         <div class="item" id="menu-new-local-shell">New Local Shell</div>
+        <div id="menu-local-shell-profiles"></div>
         <div class="item" id="menu-new-local-shell-in-dir">New Local Shell in Directory…</div>
+        <div class="item" id="menu-manage-local-shell-profiles">Manage Local Shell Profiles…</div>
         <div class="item" id="menu-close-tab">Close Tab</div>
         <div class="item" id="menu-disconnect-tab">Disconnect <span style="opacity:0.5;font-size:11px;">Ctrl+Shift+X</span></div>
         <div class="separator"></div>
@@ -318,6 +329,11 @@
       </div>
       <input id="session-search" placeholder="Quick connect..." style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:4px 6px;margin-bottom:4px;font-size:12px;" />
       <div id="session-list"></div>
+      <div class="toolbar" style="padding-left:0;display:flex;align-items:center;justify-content:space-between;">
+        <strong>Local shell profiles</strong>
+        <span id="lsp-add-btn" title="Add local shell profile" style="cursor:pointer;padding:2px 6px;opacity:0.7;user-select:none;">+</span>
+      </div>
+      <div id="local-shell-profile-list"></div>
       <div class="toolbar" style="padding-left:0;cursor:pointer;" id="remote-files-header">
         <strong id="remote-files-label">Remote files</strong>
       </div>
@@ -406,6 +422,33 @@
           <input id="passphrase" placeholder="passphrase (if any)" type="password" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
         </span>
         <button id="connect" style="padding:6px;">Connect</button>
+      </div>
+    </div>
+  </div>
+  <div id="lsp-editor-overlay">
+    <div id="lsp-editor">
+      <div class="picker-header">
+        <strong id="lsp-editor-title">New local shell profile</strong>
+        <span class="close" id="lsp-editor-close">✕</span>
+      </div>
+      <div class="fields">
+        <input id="lsp-name" placeholder="Name" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <input id="lsp-command" placeholder="Command line (e.g. /bin/zsh, powershell.exe, wsl.exe -d Ubuntu-24.04)" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <div style="display:flex;gap:6px;">
+          <input id="lsp-dir" placeholder="Same as Specter" readonly style="flex:1;min-width:0;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+          <button id="lsp-browse-dir" type="button">Browse…</button>
+        </div>
+        <select id="lsp-icon" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 6px;">
+          <option value="">Generic terminal</option>
+          <option value="powershell">PowerShell</option>
+          <option value="cmd">Command Prompt</option>
+          <option value="wsl">WSL / Linux</option>
+        </select>
+        <input id="lsp-tabtitle" placeholder="Tab title (defaults to name)" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <div style="display:flex;justify-content:flex-end;gap:6px;margin-top:4px;">
+          <button id="lsp-cancel" type="button" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);">Cancel</button>
+          <button id="lsp-save" type="button">Save</button>
+        </div>
       </div>
     </div>
   </div>

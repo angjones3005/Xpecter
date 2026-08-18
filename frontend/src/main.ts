@@ -24,7 +24,7 @@ import '@fontsource/victor-mono/400.css';
 import '@fontsource/victor-mono/700.css';
 import '@fontsource/ubuntu-mono/400.css';
 import '@fontsource/ubuntu-mono/700.css';
-import type { RemoteFile, ConnectRequest, SessionProfile, SessionGroup, SessionClosedEvent, Settings, UpdateInfo } from '../wailsjs.d.ts';
+import type { RemoteFile, ConnectRequest, SessionProfile, SessionGroup, SessionClosedEvent, Settings, UpdateInfo, LocalShellProfile } from '../wailsjs.d.ts';
 
 type ThemeName = 'dark' | 'light';
 
@@ -2444,6 +2444,133 @@ highlightToggle.addEventListener('change', () => {
   localStorage.setItem('specter-highlight', highlightEnabled ? 'on' : 'off');
 });
 
+// --- Local shell profiles (SPE-102) ---
+
+function localShellProfileIcon(icon?: string): string {
+  switch (icon) {
+    case 'powershell': return '\ud83d\udd37';
+    case 'cmd': return '\u2b1b';
+    case 'wsl': return '\ud83d\udc27';
+    default: return '>_';
+  }
+}
+
+async function renderLocalShellProfileList() {
+  const profiles = await App.ListLocalShellProfiles();
+  const list = document.getElementById('local-shell-profile-list')!;
+  list.innerHTML = '';
+  for (const p of profiles) {
+    const row = document.createElement('div');
+    row.className = 'session-entry';
+    row.style.paddingLeft = '18px';
+
+    const label = document.createElement('span');
+    label.textContent = localShellProfileIcon(p.icon) + ' ' + p.name;
+    label.style.flex = '1';
+    label.onclick = () => newLocalShellTab(p.command, p.tabTitle || p.name, p.startingDir || '');
+    row.appendChild(label);
+
+    const edit = document.createElement('span');
+    edit.textContent = '\u270e';
+    edit.className = 'delete-btn';
+    edit.title = 'Edit';
+    edit.onclick = (e) => {
+      e.stopPropagation();
+      openLocalShellProfileEditor(p);
+    };
+    row.appendChild(edit);
+
+    const del = document.createElement('span');
+    del.textContent = '\u2715';
+    del.className = 'delete-btn';
+    del.title = 'Delete';
+    del.onclick = async (e) => {
+      e.stopPropagation();
+      await App.DeleteLocalShellProfile(p.id);
+      renderLocalShellProfileList();
+      renderLocalShellProfilesMenu();
+    };
+    row.appendChild(del);
+
+    list.appendChild(row);
+  }
+}
+
+async function renderLocalShellProfilesMenu() {
+  const profiles = await App.ListLocalShellProfiles();
+  const container = document.getElementById('menu-local-shell-profiles')!;
+  container.innerHTML = '';
+  for (const p of profiles) {
+    const item = document.createElement('div');
+    item.className = 'item';
+    item.textContent = localShellProfileIcon(p.icon) + ' ' + p.name;
+    item.onclick = () => {
+      closeAllMenus();
+      newLocalShellTab(p.command, p.tabTitle || p.name, p.startingDir || '');
+    };
+    container.appendChild(item);
+  }
+}
+
+// Handles both "New" (profile undefined) and "Edit" (profile passed).
+// Save/Cancel/close/browse handlers are reassigned via .onclick rather
+// than addEventListener each open, so repeated opens don't accumulate
+// duplicate handlers.
+function openLocalShellProfileEditor(profile?: LocalShellProfile) {
+  const overlay = document.getElementById('lsp-editor-overlay')!;
+  const title = document.getElementById('lsp-editor-title')!;
+  const nameInput = document.getElementById('lsp-name') as HTMLInputElement;
+  const commandInput = document.getElementById('lsp-command') as HTMLInputElement;
+  const dirInput = document.getElementById('lsp-dir') as HTMLInputElement;
+  const iconSelect = document.getElementById('lsp-icon') as HTMLSelectElement;
+  const tabTitleInput = document.getElementById('lsp-tabtitle') as HTMLInputElement;
+
+  title.textContent = profile ? 'Edit local shell profile' : 'New local shell profile';
+  nameInput.value = profile?.name ?? '';
+  commandInput.value = profile?.command ?? '';
+  dirInput.value = profile?.startingDir ?? '';
+  iconSelect.value = profile?.icon ?? '';
+  tabTitleInput.value = profile?.tabTitle ?? '';
+
+  overlay.classList.add('open');
+
+  const close = () => overlay.classList.remove('open');
+
+  (document.getElementById('lsp-browse-dir') as HTMLButtonElement).onclick = async () => {
+    const dir = await App.SelectDirectory();
+    if (dir) dirInput.value = dir;
+  };
+
+  (document.getElementById('lsp-save') as HTMLButtonElement).onclick = async () => {
+    const name = nameInput.value.trim();
+    if (!name) {
+      nameInput.focus();
+      return;
+    }
+    await App.SaveLocalShellProfile({
+      id: profile?.id ?? '',
+      name,
+      command: commandInput.value.trim(),
+      startingDir: dirInput.value,
+      icon: iconSelect.value,
+      tabTitle: tabTitleInput.value.trim(),
+    });
+    close();
+    renderLocalShellProfileList();
+    renderLocalShellProfilesMenu();
+  };
+
+  (document.getElementById('lsp-cancel') as HTMLButtonElement).onclick = close;
+  (document.getElementById('lsp-editor-close') as HTMLSpanElement).onclick = close;
+}
+
+document.getElementById('lsp-add-btn')!.addEventListener('click', () => openLocalShellProfileEditor());
+document.getElementById('lsp-editor-overlay')!.addEventListener('click', (e) => {
+  if (e.target === document.getElementById('lsp-editor-overlay')) {
+    document.getElementById('lsp-editor-overlay')!.classList.remove('open');
+  }
+});
+
 // --- Menu bar ---
 
 function closeAllMenus() {
@@ -2506,6 +2633,10 @@ document.getElementById('menu-new-local-shell')!.addEventListener('click', () =>
 document.getElementById('menu-new-local-shell-in-dir')!.addEventListener('click', () => {
   closeAllMenus();
   newLocalShellInDirectory();
+});
+document.getElementById('menu-manage-local-shell-profiles')!.addEventListener('click', () => {
+  closeAllMenus();
+  openLocalShellProfileEditor();
 });
 document.getElementById('menu-close-tab')!.addEventListener('click', () => {
   closeAllMenus();
@@ -2691,3 +2822,5 @@ setupPaneResize('resize-sidebar', 0, 150);
 setupPaneResize('resize-editor', 2, 200);
 
 renderSessionList();renderSessionList();
+renderLocalShellProfileList();
+renderLocalShellProfilesMenu();

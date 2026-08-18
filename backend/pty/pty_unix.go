@@ -5,6 +5,7 @@ package pty
 import (
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/creack/pty"
 )
@@ -22,7 +23,20 @@ func newPlatformTerminal(onData func([]byte), shell string, dir string) (termina
 		}
 	}
 
-	cmd := exec.Command(shell)
+	// shell may be a full command line (e.g. "/bin/bash --login", or a
+	// saved local shell profile's Command field, SPE-102), not just a
+	// bare executable. exec.Command needs the executable and its
+	// arguments split apart; ConPTY on Windows (pty_windows.go) already
+	// accepts a full command line natively, so this split is Unix-only.
+	// Whitespace-only split, no quoted-argument support yet: sufficient
+	// for every command shipped so far, documented v1 limitation.
+	parts := strings.Fields(shell)
+	if len(parts) == 0 {
+		// Guards against a profile saved with a blank/whitespace-only
+		// Command; fail toward the same safe default as an empty shell.
+		parts = []string{"/bin/bash"}
+	}
+	cmd := exec.Command(parts[0], parts[1:]...)
 	// Dir is a standard os/exec.Cmd field, empty string means "inherit
 	// the current process's working directory", exec's own documented
 	// default, so leaving dir unset here behaves identically to before

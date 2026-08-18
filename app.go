@@ -448,6 +448,48 @@ func (a *App) DeleteSession(id string) error {
 	return config.SaveSessions(kept)
 }
 
+// --- Local shell profiles (SPE-102) ---
+
+func (a *App) ListLocalShellProfiles() ([]config.LocalShellProfile, error) {
+	return config.LoadLocalShellProfiles()
+}
+
+func (a *App) SaveLocalShellProfile(profile config.LocalShellProfile) error {
+	profiles, err := config.LoadLocalShellProfiles()
+	if err != nil {
+		return err
+	}
+	if profile.ID == "" {
+		profile.ID = newID()
+	}
+	replaced := false
+	for i, p := range profiles {
+		if p.ID == profile.ID {
+			profiles[i] = profile
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		profiles = append(profiles, profile)
+	}
+	return config.SaveLocalShellProfiles(profiles)
+}
+
+func (a *App) DeleteLocalShellProfile(id string) error {
+	profiles, err := config.LoadLocalShellProfiles()
+	if err != nil {
+		return err
+	}
+	kept := profiles[:0]
+	for _, p := range profiles {
+		if p.ID != id {
+			kept = append(kept, p)
+		}
+	}
+	return config.SaveLocalShellProfiles(kept)
+}
+
 // --- Session groups (folders) ---
 
 func (a *App) ListGroups() ([]config.SessionGroup, error) {

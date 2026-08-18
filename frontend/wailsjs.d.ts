@@ -54,6 +54,17 @@ export interface SessionGroup {
   name: string;
   parentId?: string;
 }
+// SPE-102: saved, reusable local shell profile (Windows Terminal-style).
+// Distinct from SessionProfile, which covers SSH/serial.
+export interface LocalShellProfile {
+  id: string;
+  name: string;
+  command: string;
+  startingDir?: string;
+  // '' (generic terminal, default), 'powershell', 'cmd', or 'wsl'.
+  icon?: string;
+  tabTitle?: string;
+}
 export interface RemoteFile {
   name: string;
   path: string;
@@ -121,6 +132,9 @@ export interface AppBindings {
   WriteSerial(id: string, data: string): Promise<void>;
   CloseSerial(id: string): Promise<void>;
   ListSerialPorts(): Promise<string[]>;
+  ListLocalShellProfiles(): Promise<LocalShellProfile[]>;
+  SaveLocalShellProfile(profile: LocalShellProfile): Promise<void>;
+  DeleteLocalShellProfile(id: string): Promise<void>;
   ListSessions(): Promise<SessionProfile[]>;
   SaveSession(profile: SessionProfile): Promise<void>;
   DeleteSession(id: string): Promise<void>;
