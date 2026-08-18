@@ -104,6 +104,20 @@
     #app.sidebar-right #sidebar { grid-column: 5; border-right: none; border-left: 1px solid var(--border); }
     #app.sidebar-right #terminal-pane { border-right: none; border-left: 1px solid var(--border); }
     #terminal { flex: 1; min-height: 0; padding: 4px; box-sizing: border-box; }
+    /* SPE-92: split-pane terminal layouts. A 1-cell grid (the default,
+       tab.layout === 'single') looks identical to a plain block
+       container, so every tab uses this same structure uniformly,
+       whether split or not. */
+    .tab-pane-grid { width: 100%; height: 100%; display: grid; gap: 2px; background: var(--border); }
+    .pane-wrapper { background: var(--bg); display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; outline: 2px solid transparent; outline-offset: -2px; }
+    .pane-wrapper.focused { outline-color: var(--accent); }
+    .pane-header { display: flex; align-items: center; justify-content: space-between; padding: 2px 8px; font-size: 11px; background: var(--bg-alt); border-bottom: 1px solid var(--border); user-select: none; cursor: default; }
+    .pane-header-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pane-header-close { opacity: 0.5; cursor: pointer; padding: 0 2px; }
+    .pane-header-close:hover { opacity: 1; color: var(--danger); }
+    .pane-term-host { flex: 1; min-height: 0; }
+    .pane-landing { flex: 1; display: flex; align-items: center; justify-content: center; }
+    .pane-landing-btn { padding: 8px 18px; font-size: 13px; }
     #editor { flex: 1; min-height: 0; }
     .toolbar { padding: 6px 10px; font-size: 13px; background: var(--bg-alt); border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
     .toolbar input { background: var(--bg-input); border: 1px solid var(--border); color: var(--text); padding: 3px 6px; width: 90px; min-width: 0; }
@@ -262,6 +276,11 @@
       <div class="menu-dropdown" id="menu-view">
         <div class="item" id="menu-toggle-editor">Toggle Editor Pane</div>
         <div class="item" id="menu-toggle-sidebar">Toggle Sidebar <span style="opacity:0.5;font-size:11px;">Ctrl+Shift+B</span></div>
+        <div class="separator"></div>
+        <div class="item" id="menu-layout-single">Single Pane</div>
+        <div class="item" id="menu-layout-2v">Split Vertical (2) <span style="opacity:0.5;font-size:11px;">Ctrl+Shift+D</span></div>
+        <div class="item" id="menu-layout-2h">Split Horizontal (2) <span style="opacity:0.5;font-size:11px;">Ctrl+Shift+Enter</span></div>
+        <div class="item" id="menu-layout-4">4-Pane Grid</div>
         <div class="item" id="menu-toggle-fullscreen">Fullscreen <span style="opacity:0.5;font-size:11px;">F11</span></div>
       </div>
     </div>

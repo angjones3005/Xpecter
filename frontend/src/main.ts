@@ -165,7 +165,9 @@ function activeXtermTheme(): Record<string, string> {
 
 function refreshAllTerminalThemes() {
   for (const tab of tabs.values()) {
-    if (tab.term) tab.term.options.theme = activeXtermTheme();
+    for (const s of allSessions(tab)) {
+      if (s.term) s.term.options.theme = activeXtermTheme();
+    }
   }
 }
 
@@ -183,11 +185,13 @@ function applyFontSize(size: number) {
   const clamped = Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, Math.round(size)));
   appSettings.fontSize = clamped;
   for (const tab of tabs.values()) {
-    if (!tab.term || !tab.fitAddon) continue;
-    tab.term.options.fontSize = clamped;
-    tab.fitAddon.fit();
-    if (tab.mode === 'local' && tab.backendId) App.ResizeLocalTerminal(tab.backendId, tab.term.cols, tab.term.rows);
-    if (tab.mode === 'ssh' && tab.backendId) App.ResizeSSH(tab.backendId, tab.term.cols, tab.term.rows);
+    for (const s of allSessions(tab)) {
+      if (!s.term || !s.fitAddon) continue;
+      s.term.options.fontSize = clamped;
+      s.fitAddon.fit();
+      if (s.mode === 'local' && s.backendId) App.ResizeLocalTerminal(s.backendId, s.term.cols, s.term.rows);
+      if (s.mode === 'ssh' && s.backendId) App.ResizeSSH(s.backendId, s.term.cols, s.term.rows);
+    }
   }
   // SPE-78: editor shares the same font size setting as the terminal,
   // confirmed choice, not an independent editor-specific size.
@@ -246,9 +250,9 @@ function wallpaperBackgroundImage(): string {
   return `linear-gradient(rgba(0,0,0,${dim}), rgba(0,0,0,${dim})), url("${appSettings.wallpaperDataUrl}")`;
 }
 
-function applyWallpaperToTab(tab: Tab) {
-  if (!tab.term?.element) return;
-  const viewport = tab.term.element.querySelector('.xterm-viewport') as HTMLElement | null;
+function applyWallpaperToSession(session: Session) {
+  if (!session.term?.element) return;
+  const viewport = session.term.element.querySelector('.xterm-viewport') as HTMLElement | null;
   if (!viewport) return;
   const bg = wallpaperBackgroundImage();
   if (bg) {
@@ -261,7 +265,9 @@ function applyWallpaperToTab(tab: Tab) {
 }
 
 function applyWallpaperVisual() {
-  for (const tab of tabs.values()) applyWallpaperToTab(tab);
+  for (const tab of tabs.values()) {
+    for (const s of allSessions(tab)) applyWallpaperToSession(s);
+  }
   document.getElementById('wallpaper-opacity-row')!.style.display = appSettings.wallpaperPath ? 'flex' : 'none';
   document.getElementById('wallpaper-clear-row')!.style.display = appSettings.wallpaperPath ? 'flex' : 'none';
   refreshAllTerminalThemes();
@@ -351,10 +357,13 @@ function refitActiveTerminal() {
   // own. Force it after any layout change that affects terminal width.
   requestAnimationFrame(() => {
     const tab = activeTabId ? tabs.get(activeTabId) : null;
-    if (!tab?.fitAddon || !tab.term) return;
-    tab.fitAddon.fit();
-    if (tab.mode === 'local' && tab.backendId) App.ResizeLocalTerminal(tab.backendId, tab.term.cols, tab.term.rows);
-    if (tab.mode === 'ssh' && tab.backendId) App.ResizeSSH(tab.backendId, tab.term.cols, tab.term.rows);
+    if (!tab) return;
+    for (const s of allSessions(tab)) {
+      if (!s.fitAddon || !s.term) continue;
+      s.fitAddon.fit();
+      if (s.mode === 'local' && s.backendId) App.ResizeLocalTerminal(s.backendId, s.term.cols, s.term.rows);
+      if (s.mode === 'ssh' && s.backendId) App.ResizeSSH(s.backendId, s.term.cols, s.term.rows);
+    }
   });
 }
 
@@ -375,7 +384,16 @@ const runtime = window.runtime;
 type TabMode = 'pending' | 'local' | 'ssh' | 'serial';
 type TabStatus = 'connecting' | 'connected' | 'disconnected';
 
-interface Tab {
+// SPE-92: Session describes everything a single live terminal needs.
+// Both Tab (a tab's own primary session) and Pane (an additional split
+// pane) satisfy this shape structurally, so functions that only need
+// to read/write one live terminal's own state (writeToTerminal,
+// showDisconnectPanel, setupCustomScrollbar, the paste guard, keyboard
+// handling, reconnect, etc.) take a Session and work identically
+// whether called for a whole tab or one split pane inside it. No
+// existing single-pane logic is rewritten, only its parameter type is
+// widened.
+interface Session {
   id: string;
   mode: TabMode;
   backendId: string | null; // sessionId (ssh) or local terminal id
@@ -393,6 +411,34 @@ interface Tab {
   // power the panel's "R to restart session" action. null for local
   // shell tabs (out of scope for SPE-59, see ticket).
   reconnect: (() => void | Promise<void>) | null;
+  // The Tab (in the `tabs` map) this session lives inside, itself for
+  // a Tab's own primary session. Looked up fresh every time rather
+  // than storing a pane index directly, since closing a sibling pane
+  // shifts indices, a stored index would go stale.
+  ownerTabId: string;
+}
+
+// A split pane alongside a tab's primary session. Same shape as
+// Session, kept as its own name for clarity at call sites.
+type Pane = Session;
+
+type Layout = 'single' | '2v' | '2h' | '4';
+
+interface Tab extends Session {
+  // 'single' (default): behaves exactly as before this feature
+  // existed, just this tab's own Session fields above, no extraPanes.
+  // '2v'/'2h'/'4' show extraPanes alongside it in a fixed CSS grid.
+  layout: Layout;
+  extraPanes: Pane[];
+  // 0 = the tab's own primary session; 1..extraPanes.length index into
+  // extraPanes. Drives which session receives keyboard input/paste and
+  // which pane shows a focus outline.
+  focusedPaneIndex: number;
+  // Wrapping grid element for every session's pane-wrapper, created
+  // once a tab's first session starts connecting. A 1-cell grid looks
+  // identical to a plain block container, so this exists even for
+  // 'single' tabs, one uniform code path rather than two.
+  paneGrid: HTMLDivElement | null;
 }
 
 const tabs = new Map<string, Tab>();
@@ -405,8 +451,9 @@ function newTabId(): string {
 }
 
 function createPendingTab(): Tab {
+  const id = newTabId();
   const tab: Tab = {
-    id: newTabId(),
+    id,
     mode: 'pending',
     backendId: null,
     label: 'New Tab',
@@ -417,9 +464,32 @@ function createPendingTab(): Tab {
     stopped: false,
     overlay: null,
     reconnect: null,
+    ownerTabId: id,
+    layout: 'single',
+    extraPanes: [],
+    focusedPaneIndex: 0,
+    paneGrid: null,
   };
   tabs.set(tab.id, tab);
   return tab;
+}
+
+// --- Pane helpers (SPE-92) ---
+
+function allSessions(tab: Tab): Session[] {
+  return [tab, ...tab.extraPanes];
+}
+
+function focusedSession(tab: Tab): Session {
+  return tab.focusedPaneIndex === 0 ? tab : tab.extraPanes[tab.focusedPaneIndex - 1];
+}
+
+// 0 for the tab's own primary session, 1-based into extraPanes
+// otherwise. Computed fresh every call rather than cached, see the
+// ownerTabId comment on Session above.
+function paneIndexOf(tab: Tab, session: Session): number {
+  if (session === tab) return 0;
+  return 1 + tab.extraPanes.indexOf(session as Pane);
 }
 
 // SPE-97: opt-in (defaults off), a numbered badge is a minor visual
@@ -469,58 +539,87 @@ function renderTabBar() {
     switchToTab(tab.id);
   };
   bar.appendChild(addBtn);
+
+  // SPE-92: reactive re-render of the active tab's pane headers
+  // (label/status/focus), same "just re-render on every call" pattern
+  // as the tab-row loop above.
+  const active = activeTabId ? tabs.get(activeTabId) : null;
+  if (active) {
+    allSessions(active).forEach((s, i) => {
+      const wrapper = s.container;
+      if (!wrapper) return;
+      const labelEl = wrapper.querySelector('.pane-header-label');
+      if (labelEl) {
+        labelEl.textContent = (s.mode === 'local' ? '💻 ' : s.mode === 'ssh' ? '🌐 ' : s.mode === 'serial' ? '🔌 ' : '') + s.label;
+      }
+      wrapper.classList.toggle('focused', active.layout !== 'single' && i === active.focusedPaneIndex);
+    });
+  }
 }
 
 function switchToTab(id: string) {
   activeTabId = id;
   const tab = tabs.get(id)!;
 
-  // Hide all terminal containers, show only the active one (or the connect
-  // form if this tab hasn't connected yet).
-  document.querySelectorAll('.term-instance').forEach((el) => {
+  // Hide every tab's pane grid, show only the active one (or the
+  // connect form if this tab hasn't connected yet).
+  document.querySelectorAll('.tab-pane-grid').forEach((el) => {
     (el as HTMLElement).style.display = 'none';
   });
   document.getElementById('tab-landing')!.style.display = tab.mode === 'pending' ? 'flex' : 'none';
 
-  if (tab.container) {
-    tab.container.style.display = 'block';
-    tab.fitAddon?.fit();
-    if (tab.mode === 'ssh' && tab.backendId) App.ResizeSSH(tab.backendId, tab.term!.cols, tab.term!.rows);
-    if (tab.mode === 'local' && tab.backendId) App.ResizeLocalTerminal(tab.backendId, tab.term!.cols, tab.term!.rows);
+  if (tab.paneGrid) {
+    tab.paneGrid.style.display = 'grid';
+    for (const s of allSessions(tab)) {
+      s.fitAddon?.fit();
+      if (s.mode === 'ssh' && s.backendId && s.term) App.ResizeSSH(s.backendId, s.term.cols, s.term.rows);
+      if (s.mode === 'local' && s.backendId && s.term) App.ResizeLocalTerminal(s.backendId, s.term.cols, s.term.rows);
+    }
   }
 
-  if (tab.mode === 'ssh' && tab.backendId) {
-    refreshFileList('.', tab.backendId);
+  const focused = focusedSession(tab);
+  if (focused.mode === 'ssh' && focused.backendId) {
+    refreshFileList('.', focused.backendId);
   }
 
   renderTabBar();
+}
+
+// Shared backend-close + local cleanup for one Session, used by both
+// closeTab (loops over every session in the tab) and closePane
+// (closes just one split pane, leaving the tab and its other panes
+// open).
+async function closeSessionBackend(s: Session) {
+  if (s.mode === 'ssh' && s.backendId) {
+    await App.CloseSSH(s.backendId);
+    runtime.EventsOff('ssh:data:' + s.backendId, 'ssh:closed:' + s.backendId);
+  }
+  if (s.mode === 'local' && s.backendId) await App.CloseLocalTerminal(s.backendId);
+  if (s.mode === 'serial' && s.backendId) {
+    await App.CloseSerial(s.backendId);
+    runtime.EventsOff('serial:data:' + s.backendId, 'serial:closed:' + s.backendId);
+  }
+  s.overlay?.remove();
+  s.term?.dispose();
+  s.container?.remove();
 }
 
 async function closeTab(id: string) {
   const tab = tabs.get(id);
   if (!tab) return;
 
-  // SPE-81: only prompt for a genuinely live session, not the disconnect
-  // panel's own "exit tab" action (tab.stopped is already true there,
-  // there's nothing live left to lose), and not a pending/never-connected
-  // tab, matching the ticket's own scope note.
-  if (tab.status === 'connected' && !tab.stopped) {
-    const proceed = confirm(`Close this tab? The session is still connected (${tab.label}).`);
+  // SPE-81: only prompt if something in this tab is genuinely live, not
+  // the disconnect panel's own "exit tab" action, and not a
+  // pending/never-connected tab, matching the ticket's own scope note.
+  const anyConnected = allSessions(tab).some((s) => s.status === 'connected' && !s.stopped);
+  if (anyConnected) {
+    const what = tab.extraPanes.length > 0 ? 'One or more panes are' : 'The session is';
+    const proceed = confirm(`Close this tab? ${what} still connected (${tab.label}).`);
     if (!proceed) return;
   }
 
-  if (tab.mode === 'ssh' && tab.backendId) {
-    await App.CloseSSH(tab.backendId);
-    runtime.EventsOff('ssh:data:' + tab.backendId, 'ssh:closed:' + tab.backendId);
-  }
-  if (tab.mode === 'local' && tab.backendId) await App.CloseLocalTerminal(tab.backendId);
-  if (tab.mode === 'serial' && tab.backendId) {
-    await App.CloseSerial(tab.backendId);
-    runtime.EventsOff('serial:data:' + tab.backendId, 'serial:closed:' + tab.backendId);
-  }
-  tab.overlay?.remove();
-  tab.term?.dispose();
-  tab.container?.remove();
+  for (const s of allSessions(tab)) await closeSessionBackend(s);
+  tab.paneGrid?.remove();
   tabs.delete(id);
 
   if (activeTabId === id) {
@@ -536,22 +635,211 @@ async function closeTab(id: string) {
   }
 }
 
+// SPE-92: closes one split pane, keeping the tab (and its other panes)
+// open. paneIndex 0 always means the tab's own primary session, closing
+// that closes the whole tab, same as closing any single-pane tab always
+// has.
+async function closePane(tab: Tab, paneIndex: number) {
+  if (paneIndex === 0) {
+    await closeTab(tab.id);
+    return;
+  }
+  const pane = tab.extraPanes[paneIndex - 1];
+  if (!pane) return;
+  if (pane.status === 'connected' && !pane.stopped) {
+    const proceed = confirm(`Close this pane? The session is still connected (${pane.label}).`);
+    if (!proceed) return;
+  }
+  await closeSessionBackend(pane);
+  tab.extraPanes.splice(paneIndex - 1, 1);
+  if (tab.extraPanes.length === 0) tab.layout = 'single';
+  if (tab.focusedPaneIndex >= tab.extraPanes.length + 1) {
+    tab.focusedPaneIndex = tab.extraPanes.length;
+  }
+  applyPaneGridLayout(tab);
+  if (activeTabId === tab.id) switchToTab(tab.id);
+  else renderTabBar();
+}
+
+// SPE-92: when set, the next New Session picker flow (SSH connect,
+// local shell, or serial connect) targets this pane instead of the
+// active tab's own primary session. Set by openSplitPanePicker, reset
+// to null by openSessionPicker (the ordinary New-Session-from-menu
+// flow), so a stale target can never leak into an unrelated later
+// connect.
+let pendingPaneTarget: Pane | null = null;
+
+function createEmptyPane(tab: Tab): Pane {
+  return {
+    id: newTabId(),
+    mode: 'pending',
+    backendId: null,
+    label: 'New Pane',
+    status: 'disconnected',
+    term: null,
+    fitAddon: null,
+    container: null,
+    stopped: false,
+    overlay: null,
+    reconnect: null,
+    ownerTabId: tab.id,
+  };
+}
+
+function ensurePaneGrid(tab: Tab) {
+  if (tab.paneGrid) return;
+  const grid = document.createElement('div');
+  grid.className = 'tab-pane-grid';
+  grid.style.display = 'none'; // switchToTab shows it once this tab is active
+  document.getElementById('terminal')!.appendChild(grid);
+  tab.paneGrid = grid;
+}
+
+function buildPaneHeader(session: Session, tab: Tab): HTMLDivElement {
+  const header = document.createElement('div');
+  header.className = 'pane-header';
+  header.style.display = tab.layout === 'single' ? 'none' : 'flex';
+  const labelEl = document.createElement('span');
+  labelEl.className = 'pane-header-label';
+  labelEl.textContent = session.label;
+  header.appendChild(labelEl);
+  const closeEl = document.createElement('span');
+  closeEl.className = 'pane-header-close';
+  closeEl.textContent = '\u2715';
+  closeEl.title = 'Close pane';
+  closeEl.onclick = (e) => {
+    e.stopPropagation();
+    closePane(tab, paneIndexOf(tab, session));
+  };
+  header.appendChild(closeEl);
+  return header;
+}
+
+// Empty placeholder for a freshly split pane: header + a "+ New
+// Session" button, no live Terminal yet. createTerminalForSession
+// reuses this same wrapper once a session is actually chosen, rather
+// than creating a second one, so nothing needs tearing down.
+function createPaneShell(pane: Pane, tab: Tab) {
+  ensurePaneGrid(tab);
+  const wrapper = document.createElement('div');
+  wrapper.className = 'pane-wrapper';
+  wrapper.appendChild(buildPaneHeader(pane, tab));
+
+  const landing = document.createElement('div');
+  landing.className = 'pane-landing';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'pane-landing-btn';
+  btn.textContent = '+ New Session';
+  btn.onclick = () => openSplitPanePicker(pane);
+  landing.appendChild(btn);
+  wrapper.appendChild(landing);
+
+  // No term-host here: this pane has no live session yet, and a
+  // term-host with flex:1 would otherwise compete with the landing
+  // placeholder above (both flex:1, both visible at once) for the same
+  // space. createTerminalForSession creates the real term-host once a
+  // session is actually chosen, removing this landing div then.
+  wrapper.addEventListener('mousedown', () => focusPane(tab, paneIndexOf(tab, pane)));
+  tab.paneGrid!.appendChild(wrapper);
+  pane.container = wrapper;
+}
+
+function focusPane(tab: Tab, paneIndex: number) {
+  if (tab.focusedPaneIndex === paneIndex) return;
+  tab.focusedPaneIndex = paneIndex;
+  renderTabBar();
+}
+
+// Pure layout-geometry update for a tab's paneGrid CSS grid-template.
+// Never touches any session's term/container/backend, safe to call any
+// time the layout or pane count changes.
+function applyPaneGridLayout(tab: Tab) {
+  if (!tab.paneGrid) return;
+  const cols = tab.layout === '2v' || tab.layout === '4' ? '1fr 1fr' : '1fr';
+  const rows = tab.layout === '2h' || tab.layout === '4' ? '1fr 1fr' : '1fr';
+  tab.paneGrid.style.gridTemplateColumns = cols;
+  tab.paneGrid.style.gridTemplateRows = rows;
+  for (const s of allSessions(tab)) {
+    const header = s.container?.querySelector('.pane-header') as HTMLElement | null;
+    if (header) header.style.display = tab.layout === 'single' ? 'none' : 'flex';
+    const landing = s.container?.querySelector('.pane-landing') as HTMLElement | null;
+    if (landing) landing.style.display = tab.layout === 'single' ? 'none' : 'flex';
+  }
+  if (activeTabId === tab.id) refitActiveTerminal();
+}
+
+// Switches a tab to a fixed target layout (SPE-92: single / 2 vertical
+// / 2 horizontal / 4-pane grid), creating empty panes as needed or
+// closing extra ones from the end if shrinking. New panes start empty
+// (mode 'pending', showing a small "+ New Session" placeholder) rather
+// than auto-opening the New Session picker for each one, so switching
+// straight to a 4-pane grid doesn't stack three modals on top of each
+// other.
+async function setTabLayout(tab: Tab, layout: Layout) {
+  // A still-pending tab (never connected its own primary session) has
+  // no paneGrid yet and shows the big #tab-landing view instead. That
+  // view and a newly split pane's own landing would otherwise both be
+  // visible at once, stacked, pushing the new pane down the page.
+  // Simplest correct fix: require the tab's own session first, split
+  // afterward.
+  if (layout !== 'single' && tab.mode === 'pending') {
+    alert('Connect a session in this tab first, then split it into panes.');
+    return;
+  }
+
+  const targetCount = layout === 'single' ? 1 : layout === '4' ? 4 : 2;
+  const currentCount = 1 + tab.extraPanes.length;
+
+  if (targetCount < currentCount) {
+    const removing = tab.extraPanes.slice(targetCount - 1);
+    const anyConnected = removing.some((p) => p.status === 'connected' && !p.stopped);
+    if (anyConnected) {
+      const proceed = confirm(`Switch layout? ${removing.length} connected pane(s) will be closed.`);
+      if (!proceed) return;
+    }
+    for (const p of removing) await closeSessionBackend(p);
+    tab.extraPanes = tab.extraPanes.slice(0, targetCount - 1);
+  }
+
+  tab.layout = layout;
+  if (tab.focusedPaneIndex >= targetCount) tab.focusedPaneIndex = 0;
+
+  ensurePaneGrid(tab);
+
+  while (1 + tab.extraPanes.length < targetCount) {
+    const pane = createEmptyPane(tab);
+    tab.extraPanes.push(pane);
+    createPaneShell(pane, tab);
+  }
+
+  applyPaneGridLayout(tab);
+  if (activeTabId === tab.id) switchToTab(tab.id);
+  else renderTabBar();
+}
+
 // Custom-drawn scrollbar (see the CSS comment above the .xterm-viewport
 // rules for why this exists): the native scrollbar is hidden entirely,
 // this is pure page content instead, so it looks and behaves
 // identically across Linux/Windows/macOS regardless of what each
 // platform's webview engine does or doesn't expose for native scrollbar
 // styling.
-function setupCustomScrollbar(tab: Tab) {
-  if (!tab.term || !tab.container) return;
-  const term = tab.term;
+function setupCustomScrollbar(session: Session) {
+  if (!session.term || !session.container) return;
+  const term = session.term;
+  // Anchored to the term host (position:relative), not the outer pane
+  // wrapper, since SPE-92 the wrapper also contains the pane header,
+  // an absolutely-positioned track on the wrapper would overlay the
+  // header too.
+  const termHost = term.element?.parentElement;
+  if (!termHost) return;
 
   const track = document.createElement('div');
   track.className = 'custom-scrollbar-track';
   const thumb = document.createElement('div');
   thumb.className = 'custom-scrollbar-thumb';
   track.appendChild(thumb);
-  tab.container.appendChild(track);
+  termHost.appendChild(track);
 
   function update() {
     const buffer = term.buffer.active;
@@ -643,7 +931,7 @@ function setupCustomScrollbar(tab: Tab) {
 // on every multi-line paste.
 let warnMultilinePasteEnabled = localStorage.getItem('specter-warn-multiline-paste') !== 'off';
 
-function writeToTabWithPasteGuard(tab: Tab, text: string) {
+function writeToSessionWithPasteGuard(session: Session, text: string) {
   if (warnMultilinePasteEnabled) {
     const lines = text.split(/\r\n|\r|\n/).filter((l, i, arr) => !(i === arr.length - 1 && l === ''));
     if (lines.length > 1) {
@@ -651,16 +939,39 @@ function writeToTabWithPasteGuard(tab: Tab, text: string) {
       if (!proceed) return;
     }
   }
-  if (tab.mode === 'local' && tab.backendId) App.WriteLocalTerminal(tab.backendId, text);
-  if (tab.mode === 'ssh' && tab.backendId) App.WriteSSH(tab.backendId, text);
-  if (tab.mode === 'serial' && tab.backendId) App.WriteSerial(tab.backendId, text);
+  if (session.mode === 'local' && session.backendId) App.WriteLocalTerminal(session.backendId, text);
+  if (session.mode === 'ssh' && session.backendId) App.WriteSSH(session.backendId, text);
+  if (session.mode === 'serial' && session.backendId) App.WriteSerial(session.backendId, text);
 }
 
-function createTerminalForTab(tab: Tab) {
-  const container = document.createElement('div');
-  container.className = 'term-instance';
-  container.style.cssText = 'height:100%;padding:4px;box-sizing:border-box;position:relative;';
-  document.getElementById('terminal')!.appendChild(container);
+// SPE-92: creates (or fills in) the live xterm.js Terminal for one
+// Session, whether that's a tab's own primary session (the original,
+// unchanged behavior) or a split pane. If `session.container` already
+// exists (a pane created via createPaneShell, still showing its "+ New
+// Session" placeholder), that same wrapper/header is reused, its
+// landing placeholder removed, rather than creating a second wrapper.
+function createTerminalForSession(session: Session, tab: Tab) {
+  ensurePaneGrid(tab);
+
+  let wrapper = session.container;
+  if (wrapper) {
+    // Reused from createPaneShell's empty-landing placeholder: keep the
+    // header, drop the landing button, the real term-host below is
+    // always created fresh either way.
+    wrapper.querySelector('.pane-landing')?.remove();
+  } else {
+    wrapper = document.createElement('div');
+    wrapper.className = 'pane-wrapper';
+    wrapper.appendChild(buildPaneHeader(session, tab));
+    wrapper.addEventListener('mousedown', () => focusPane(tab, paneIndexOf(tab, session)));
+    tab.paneGrid!.appendChild(wrapper);
+  }
+
+  const termHost = document.createElement('div');
+  termHost.className = 'pane-term-host term-instance';
+  termHost.style.cssText = 'padding:4px;box-sizing:border-box;position:relative;';
+  wrapper.appendChild(termHost);
+  const container = termHost;
 
   const term = new Terminal({
     fontFamily: fontStack(appSettings.fontFamily || FONT_OPTIONS[0].value),
@@ -705,18 +1016,20 @@ function createTerminalForTab(tab: Tab) {
   // Also handles the SPE-59 disconnected-session panel: while a session is
   // stopped, R/S/Enter drive the panel's actions and everything else is
   // swallowed rather than typed into a dead PTY.
+  // SPE-92: split/close/focus-pane shortcuts, checked against every
+  // existing binding (Ctrl+Shift+X/B/V, Ctrl+/-/0, F11), no collisions.
   term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
-    if (tab.stopped) {
+    if (session.stopped) {
       if (e.type === 'keydown') {
         const key = e.key.toLowerCase();
-        if (key === 'enter') closeTab(tab.id);
-        else if (key === 'r') reconnectTab(tab);
-        else if (key === 's') saveTabOutput(tab);
+        if (key === 'enter') closePane(tab, paneIndexOf(tab, session));
+        else if (key === 'r') reconnectSession(session);
+        else if (key === 's') saveSessionOutput(session);
       }
       return false;
     }
     if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'x') {
-      disconnectTab(tab);
+      disconnectSession(session);
       return false;
     }
     if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
@@ -727,7 +1040,7 @@ function createTerminalForTab(tab: Tab) {
       return false;
     }
     if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
-      navigator.clipboard.readText().then((text) => writeToTabWithPasteGuard(tab, text)).catch(() => {});
+      navigator.clipboard.readText().then((text) => writeToSessionWithPasteGuard(session, text)).catch(() => {});
       return false;
     }
     if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
@@ -748,6 +1061,22 @@ function createTerminalForTab(tab: Tab) {
       toggleFullscreen();
       return false;
     }
+    if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
+      setTabLayout(tab, tab.layout === '2h' ? '4' : '2v');
+      return false;
+    }
+    if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      setTabLayout(tab, tab.layout === '2v' ? '4' : '2h');
+      return false;
+    }
+    if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'w') {
+      closePane(tab, paneIndexOf(tab, session));
+      return false;
+    }
+    if (e.type === 'keydown' && e.altKey && tab.layout !== 'single' && e.key.startsWith('Arrow')) {
+      focusAdjacentPane(tab, e.key as 'ArrowLeft' | 'ArrowRight' | 'ArrowUp' | 'ArrowDown');
+      return false;
+    }
     return true;
   });
 
@@ -755,7 +1084,7 @@ function createTerminalForTab(tab: Tab) {
   container.addEventListener('contextmenu', (e) => {
     if (!rightClickPasteEnabled) return;
     e.preventDefault();
-    App.GetClipboardText().then((text) => writeToTabWithPasteGuard(tab, text)).catch(() => {});
+    App.GetClipboardText().then((text) => writeToSessionWithPasteGuard(session, text)).catch(() => {});
   });
 
   // Native browser paste (Ctrl+V, middle-click on Linux, right-click ->
@@ -769,20 +1098,42 @@ function createTerminalForTab(tab: Tab) {
     e.preventDefault();
     e.stopPropagation();
     const text = e.clipboardData.getData('text');
-    if (text) writeToTabWithPasteGuard(tab, text);
+    if (text) writeToSessionWithPasteGuard(session, text);
   }, true);
 
   term.onData((data) => {
-    if (tab.mode === 'local' && tab.backendId) App.WriteLocalTerminal(tab.backendId, data);
-    if (tab.mode === 'ssh' && tab.backendId) App.WriteSSH(tab.backendId, data);
-    if (tab.mode === 'serial' && tab.backendId) App.WriteSerial(tab.backendId, data);
+    if (session.mode === 'local' && session.backendId) App.WriteLocalTerminal(session.backendId, data);
+    if (session.mode === 'ssh' && session.backendId) App.WriteSSH(session.backendId, data);
+    if (session.mode === 'serial' && session.backendId) App.WriteSerial(session.backendId, data);
   });
 
-  tab.term = term;
-  tab.fitAddon = fitAddon;
-  tab.container = container;
-  applyWallpaperToTab(tab);
-  setupCustomScrollbar(tab);
+  session.term = term;
+  session.fitAddon = fitAddon;
+  session.container = wrapper;
+  applyWallpaperToSession(session);
+  setupCustomScrollbar(session);
+}
+
+// SPE-92: Alt+Arrow moves focus between panes by rough screen
+// direction. With at most 4 panes in a fixed 2x2 grid, a simple
+// left/right/up/down split on the current index covers every case,
+// no real geometry needed.
+function focusAdjacentPane(tab: Tab, key: 'ArrowLeft' | 'ArrowRight' | 'ArrowUp' | 'ArrowDown') {
+  const count = 1 + tab.extraPanes.length;
+  const i = tab.focusedPaneIndex;
+  let next = i;
+  if (tab.layout === '2v') {
+    if (key === 'ArrowLeft' || key === 'ArrowRight') next = i === 0 ? 1 : 0;
+  } else if (tab.layout === '2h') {
+    if (key === 'ArrowUp' || key === 'ArrowDown') next = i === 0 ? 1 : 0;
+  } else if (tab.layout === '4') {
+    // Grid order: 0 top-left, 1 top-right, 2 bottom-left, 3 bottom-right.
+    if (key === 'ArrowLeft') next = i % 2 === 1 ? i - 1 : i;
+    if (key === 'ArrowRight') next = i % 2 === 0 ? i + 1 : i;
+    if (key === 'ArrowUp') next = i >= 2 ? i - 2 : i;
+    if (key === 'ArrowDown') next = i < 2 ? i + 2 : i;
+  }
+  if (next >= 0 && next < count) focusPane(tab, next);
 }
 
 let resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -790,10 +1141,13 @@ window.addEventListener('resize', () => {
   if (resizeDebounceTimer) clearTimeout(resizeDebounceTimer);
   resizeDebounceTimer = setTimeout(() => {
     const tab = activeTabId ? tabs.get(activeTabId) : null;
-    if (!tab || !tab.fitAddon || !tab.term) return;
-    tab.fitAddon.fit();
-    if (tab.mode === 'local' && tab.backendId) App.ResizeLocalTerminal(tab.backendId, tab.term.cols, tab.term.rows);
-    if (tab.mode === 'ssh' && tab.backendId) App.ResizeSSH(tab.backendId, tab.term.cols, tab.term.rows);
+    if (!tab) return;
+    for (const s of allSessions(tab)) {
+      if (!s.fitAddon || !s.term) continue;
+      s.fitAddon.fit();
+      if (s.mode === 'local' && s.backendId) App.ResizeLocalTerminal(s.backendId, s.term.cols, s.term.rows);
+      if (s.mode === 'ssh' && s.backendId) App.ResizeSSH(s.backendId, s.term.cols, s.term.rows);
+    }
   }, 100);
 });
 
@@ -916,7 +1270,8 @@ async function saveAsLocal() {
 }
 
 async function saveAsRemote() {
-  const sessionId = openFileSessionId ?? (activeTabId ? tabs.get(activeTabId)?.backendId : null);
+  const activeTab = activeTabId ? tabs.get(activeTabId) : null;
+  const sessionId = openFileSessionId ?? (activeTab ? focusedSession(activeTab).backendId : null);
   if (!sessionId) {
     alert('No active SSH session to save to. Open or switch to an SSH tab first.');
     return;
@@ -1087,6 +1442,19 @@ function passwordCacheKey(host: string, port: number, user: string): string {
 
 }
 
+// SPE-92: clicking a saved session in the sidebar targets the
+// currently focused pane if the active tab is split AND that pane is
+// genuinely empty (nothing live to silently replace); otherwise
+// behaves exactly as before, connecting into a plain new/pending tab.
+function targetEmptyFocusedPane(): Pane | null {
+  const tab = activeTabId ? tabs.get(activeTabId) : null;
+  if (!tab || tab.layout === 'single') return null;
+  const focused = focusedSession(tab);
+  if (focused === tab) return null; // pane 0 is the tab itself, not a split pane
+  if (focused.mode !== 'pending') return null; // already live, don't silently replace it
+  return focused as Pane;
+}
+
 async function useSession(s: SessionProfile) {
   if (s.type === 'serial') {
     await useSerialSession(s);
@@ -1099,7 +1467,13 @@ async function useSSHSession(s: SessionProfile) {
 
   await App.SaveSession({ ...s, lastUsed: new Date().toISOString() });
 
-  ensurePendingTab();
+  const paneTarget = targetEmptyFocusedPane();
+  if (paneTarget) {
+    pendingPaneTarget = paneTarget;
+  } else {
+    pendingPaneTarget = null;
+    ensurePendingTab();
+  }
 
   (document.getElementById('host') as HTMLInputElement).value = s.host ?? '';
 
@@ -1123,11 +1497,11 @@ async function useSSHSession(s: SessionProfile) {
 
     await connectActiveTab({ host: s.host ?? '', port: s.port ?? 22, user: s.user ?? '', keyPath: s.keyPath });
 
-    const tab = tabs.get(activeTabId!);
+    const connected = paneTarget ?? tabs.get(activeTabId!);
 
-    if (tab) {
+    if (connected) {
 
-      tab.label = s.name;
+      connected.label = s.name;
 
       renderTabBar();
 
@@ -1145,11 +1519,11 @@ async function useSSHSession(s: SessionProfile) {
 
       await connectActiveTab({ host: s.host ?? '', port: s.port ?? 22, user: s.user ?? '', password: cachedPassword });
 
-      const tab = tabs.get(activeTabId!);
+      const connected = paneTarget ?? tabs.get(activeTabId!);
 
-      if (tab) {
+      if (connected) {
 
-        tab.label = s.name;
+        connected.label = s.name;
 
         renderTabBar();
 
@@ -1160,6 +1534,13 @@ async function useSSHSession(s: SessionProfile) {
       pendingSessionName = s.name;
 
       openSessionPicker();
+
+      // openSessionPicker() above always resets pendingPaneTarget to
+      // null (it's the entry point for the ordinary New Session flow),
+      // reassert the pane target here since this call is really the
+      // "connect a saved session" flow reusing the picker's password
+      // field, not a fresh New Session.
+      pendingPaneTarget = paneTarget;
 
       document.getElementById('picker-grid')!.style.display = 'none';
 
@@ -1179,7 +1560,13 @@ async function useSSHSession(s: SessionProfile) {
 
 async function useSerialSession(s: SessionProfile) {
   await App.SaveSession({ ...s, lastUsed: new Date().toISOString() });
-  ensurePendingTab();
+  const paneTarget = targetEmptyFocusedPane();
+  if (paneTarget) {
+    pendingPaneTarget = paneTarget;
+  } else {
+    pendingPaneTarget = null;
+    ensurePendingTab();
+  }
   skipSerialSavePrompt = true;
   await connectSerialInActiveTab(s.serialPort ?? '', s.baud ?? 9600);
 }
@@ -1543,8 +1930,8 @@ function applyOutputHighlighting(text: string): string {
   return result;
 }
 
-function writeToTerminal(tab: Tab, data: string) {
-  tab.term!.write(applyOutputHighlighting(data));
+function writeToTerminal(session: Session, data: string) {
+  session.term!.write(applyOutputHighlighting(data));
 }
 
 // --- Disconnected-session panel (SPE-59) ---
@@ -1566,10 +1953,10 @@ function terminalTextContent(term: Terminal): string {
   return lines.join('\n');
 }
 
-async function saveTabOutput(tab: Tab) {
-  if (!tab.term) return;
-  const content = terminalTextContent(tab.term);
-  const defaultName = `${tab.label.replace(/[^a-zA-Z0-9._@-]+/g, '_')}.log`;
+async function saveSessionOutput(session: Session) {
+  if (!session.term) return;
+  const content = terminalTextContent(session.term);
+  const defaultName = `${session.label.replace(/[^a-zA-Z0-9._@-]+/g, '_')}.log`;
   try {
     await App.SaveTextFile(defaultName, content);
   } catch (err) {
@@ -1577,16 +1964,16 @@ async function saveTabOutput(tab: Tab) {
   }
 }
 
-function clearDisconnectPanel(tab: Tab) {
-  tab.stopped = false;
-  tab.overlay?.remove();
-  tab.overlay = null;
+function clearDisconnectPanel(session: Session) {
+  session.stopped = false;
+  session.overlay?.remove();
+  session.overlay = null;
 }
 
-async function reconnectTab(tab: Tab) {
-  if (!tab.reconnect) return;
-  clearDisconnectPanel(tab);
-  await tab.reconnect();
+async function reconnectSession(session: Session) {
+  if (!session.reconnect) return;
+  clearDisconnectPanel(session);
+  await session.reconnect();
 }
 
 // Manual "Disconnect" (Terminal menu): closes the underlying session but
@@ -1596,25 +1983,25 @@ async function reconnectTab(tab: Tab) {
 // to pull a cable every time. Reuses CloseSSH/CloseSerial, which mark
 // the close as deliberate on the backend (no ssh:closed/serial:closed
 // event fires), so the panel is shown here on the frontend side instead.
-async function disconnectTab(tab: Tab) {
-  if (tab.stopped) return;
-  if (tab.mode === 'ssh' && tab.backendId) {
-    await App.CloseSSH(tab.backendId);
-  } else if (tab.mode === 'serial' && tab.backendId) {
-    await App.CloseSerial(tab.backendId);
+async function disconnectSession(session: Session) {
+  if (session.stopped) return;
+  if (session.mode === 'ssh' && session.backendId) {
+    await App.CloseSSH(session.backendId);
+  } else if (session.mode === 'serial' && session.backendId) {
+    await App.CloseSerial(session.backendId);
   } else {
-    return; // nothing live to disconnect (pending or local shell tabs)
+    return; // nothing live to disconnect (pending or local shell sessions)
   }
-  showDisconnectPanel(tab, 'Disconnected.');
+  showDisconnectPanel(session, 'Disconnected.');
 }
 
-function showDisconnectPanel(tab: Tab, message: string) {
-  if (!tab.term || !tab.container) return;
-  tab.stopped = true;
-  tab.status = 'disconnected';
+function showDisconnectPanel(session: Session, message: string) {
+  if (!session.term || !session.container) return;
+  session.stopped = true;
+  session.status = 'disconnected';
   renderTabBar();
 
-  const term = tab.term;
+  const term = session.term;
   const cols = term.cols || 80;
   const divider = '-'.repeat(cols);
   // Red inline message + divider, written as real terminal content so it
@@ -1622,7 +2009,7 @@ function showDisconnectPanel(tab: Tab, message: string) {
   term.write(`\r\n\x1b[31m${message}\x1b[0m\r\n`);
   term.write(`\x1b[36m${divider}\x1b[0m\r\n`);
 
-  tab.overlay?.remove();
+  session.overlay?.remove();
   const overlay = document.createElement('div');
   overlay.className = 'disconnect-panel';
 
@@ -1631,10 +2018,11 @@ function showDisconnectPanel(tab: Tab, message: string) {
   title.textContent = 'Session stopped';
   overlay.appendChild(title);
 
+  const ownerTab = tabs.get(session.ownerTabId)!;
   const actions: { key: string; label: string; run: () => void; enabled: boolean }[] = [
-    { key: 'Enter', label: 'exit tab', run: () => closeTab(tab.id), enabled: true },
-    { key: 'R', label: 'restart session', run: () => { reconnectTab(tab); }, enabled: !!tab.reconnect },
-    { key: 'S', label: 'save terminal output to file', run: () => { saveTabOutput(tab); }, enabled: true },
+    { key: 'Enter', label: 'exit pane', run: () => closePane(ownerTab, paneIndexOf(ownerTab, session)), enabled: true },
+    { key: 'R', label: 'restart session', run: () => { reconnectSession(session); }, enabled: !!session.reconnect },
+    { key: 'S', label: 'save terminal output to file', run: () => { saveSessionOutput(session); }, enabled: true },
   ];
 
   for (const action of actions) {
@@ -1652,8 +2040,12 @@ function showDisconnectPanel(tab: Tab, message: string) {
     overlay.appendChild(row);
   }
 
-  tab.container.appendChild(overlay);
-  tab.overlay = overlay;
+  // Anchored to the term host (position:relative), same reasoning as
+  // the custom scrollbar track above, the outer pane wrapper also
+  // contains the header now.
+  const termHost = term.element?.parentElement ?? session.container;
+  termHost.appendChild(overlay);
+  session.overlay = overlay;
 }
 
 function sessionMatchesQuery(s: SessionProfile, query: string): boolean {
@@ -1886,12 +2278,12 @@ function clearConnectError() {
 // wireSSHEvents attaches the data/close listeners for a live SSH session
 // and (re)installs the tab's reconnect closure, used both on first
 // connect and after SPE-59's "R to restart session" action.
-function wireSSHEvents(tab: Tab, sessionId: string, req: ConnectRequest) {
-  runtime.EventsOn('ssh:data:' + sessionId, (data: unknown) => writeToTerminal(tab, data as string));
+function wireSSHEvents(session: Session, sessionId: string, req: ConnectRequest) {
+  runtime.EventsOn('ssh:data:' + sessionId, (data: unknown) => writeToTerminal(session, data as string));
   runtime.EventsOn('ssh:closed:' + sessionId, (payload: unknown) => {
-    showDisconnectPanel(tab, (payload as SessionClosedEvent).message);
+    showDisconnectPanel(session, (payload as SessionClosedEvent).message);
   });
-  tab.reconnect = () => reconnectSSH(tab, req);
+  session.reconnect = () => reconnectSSH(session, req);
 }
 
 // reconnectSSH re-runs Connect() on an already-live tab (as opposed to
@@ -1907,22 +2299,22 @@ function notifyLegacyCompat(host: string) {
   alert(`Connected to ${host} using legacy compatibility mode: this device only supports older SSH algorithms, so this connection uses reduced security compared to Specter's normal defaults.`);
 }
 
-async function reconnectSSH(tab: Tab, req: ConnectRequest): Promise<void> {
-  tab.status = 'connecting';
+async function reconnectSSH(session: Session, req: ConnectRequest): Promise<void> {
+  session.status = 'connecting';
   renderTabBar();
 
   let result;
   try {
     result = await App.Connect(req);
   } catch (err) {
-    showDisconnectPanel(tab, String(err));
+    showDisconnectPanel(session, String(err));
     return;
   }
 
   if (result.needsPassphrase) {
     showPassphrasePrompt({
-      onSubmit: (passphrase) => { reconnectSSH(tab, { ...req, passphrase }); },
-      onCancel: () => showDisconnectPanel(tab, 'Reconnect cancelled.'),
+      onSubmit: (passphrase) => { reconnectSSH(session, { ...req, passphrase }); },
+      onCancel: () => showDisconnectPanel(session, 'Reconnect cancelled.'),
     });
     return;
   }
@@ -1930,8 +2322,8 @@ async function reconnectSSH(tab: Tab, req: ConnectRequest): Promise<void> {
   if (result.needsKeyPermConfirm) {
     showKeyPermWarning({
       path: result.keyPermPath!, mode: result.keyPermMode!,
-      onProceed: () => { reconnectSSH(tab, { ...req, ignoreKeyPermWarning: true }); },
-      onCancel: () => showDisconnectPanel(tab, 'Reconnect cancelled.'),
+      onProceed: () => { reconnectSSH(session, { ...req, ignoreKeyPermWarning: true }); },
+      onCancel: () => showDisconnectPanel(session, 'Reconnect cancelled.'),
     });
     return;
   }
@@ -1942,27 +2334,33 @@ async function reconnectSSH(tab: Tab, req: ConnectRequest): Promise<void> {
       onAccept: async () => {
         if (result.changed) await App.TrustHostDespiteChange(result.host!);
         else await App.TrustHost(result.host!);
-        await reconnectSSH(tab, req);
+        await reconnectSSH(session, req);
       },
-      onReject: () => showDisconnectPanel(tab, 'Reconnect cancelled.'),
+      onReject: () => showDisconnectPanel(session, 'Reconnect cancelled.'),
     });
     return;
   }
 
   if (result.sessionId) {
-    tab.backendId = result.sessionId;
-    tab.status = 'connected';
+    session.backendId = result.sessionId;
+    session.status = 'connected';
     renderTabBar();
-    tab.term!.write('\r\n\x1b[32mReconnected.\x1b[0m\r\n');
-    wireSSHEvents(tab, result.sessionId, req);
+    session.term!.write('\r\n\x1b[32mReconnected.\x1b[0m\r\n');
+    wireSSHEvents(session, result.sessionId, req);
     if (result.legacyCompat) notifyLegacyCompat(req.host);
   }
 }
 
+// SPE-92: connects into pendingPaneTarget if the New Session picker was
+// opened via openSplitPanePicker (targets a specific split pane),
+// otherwise into the active tab's own primary session, exactly as
+// before this feature existed. Everything else (password cache,
+// passphrase/trust/key-perm prompts, save-session prompt) is unchanged.
 async function connectActiveTab(req: ConnectRequest) {
-  const tab = tabs.get(activeTabId!)!;
-  tab.status = 'connecting';
-  tab.label = `${req.user}@${req.host}`;
+  const ownerTab = tabs.get(activeTabId!)!;
+  const target: Session = pendingPaneTarget ?? ownerTab;
+  target.status = 'connecting';
+  target.label = `${req.user}@${req.host}`;
   renderTabBar();
   clearConnectError();
 
@@ -1970,7 +2368,7 @@ async function connectActiveTab(req: ConnectRequest) {
   try {
     result = await App.Connect(req);
   } catch (err) {
-    tab.status = 'disconnected';
+    target.status = 'disconnected';
     renderTabBar();
     showConnectError(String(err));
     return;
@@ -1979,7 +2377,7 @@ async function connectActiveTab(req: ConnectRequest) {
   if (result.needsPassphrase) {
     showPassphrasePrompt({
       onSubmit: (passphrase) => { connectActiveTab({ ...req, passphrase }); },
-      onCancel: () => { tab.status = 'disconnected'; renderTabBar(); },
+      onCancel: () => { target.status = 'disconnected'; renderTabBar(); },
     });
     return;
   }
@@ -1988,7 +2386,7 @@ async function connectActiveTab(req: ConnectRequest) {
     showKeyPermWarning({
       path: result.keyPermPath!, mode: result.keyPermMode!,
       onProceed: () => { connectActiveTab({ ...req, ignoreKeyPermWarning: true }); },
-      onCancel: () => { tab.status = 'disconnected'; renderTabBar(); },
+      onCancel: () => { target.status = 'disconnected'; renderTabBar(); },
     });
     return;
   }
@@ -2001,20 +2399,20 @@ async function connectActiveTab(req: ConnectRequest) {
         else await App.TrustHost(result.host!);
         await connectActiveTab(req);
       },
-      onReject: () => { tab.status = 'disconnected'; renderTabBar(); },
+      onReject: () => { target.status = 'disconnected'; renderTabBar(); },
     });
     return;
   }
 
   if (result.sessionId) {
-    tab.mode = 'ssh';
-    tab.backendId = result.sessionId;
-    tab.status = 'connected';
-    createTerminalForTab(tab);
-    wireSSHEvents(tab, result.sessionId, req);
-    switchToTab(tab.id);
+    target.mode = 'ssh';
+    target.backendId = result.sessionId;
+    target.status = 'connected';
+    createTerminalForSession(target, ownerTab);
+    wireSSHEvents(target, result.sessionId, req);
+    switchToTab(ownerTab.id);
     closeSessionPicker();
-    refreshFileList('.', result.sessionId);
+    if (target === focusedSession(ownerTab)) refreshFileList('.', result.sessionId);
     if (result.legacyCompat) notifyLegacyCompat(req.host);
 
     if (!skipSavePrompt) {
@@ -2043,13 +2441,17 @@ document.getElementById('connect')!.addEventListener('click', async () => {
     req = { host, port: 22, user, password };
   }
 
+  // SPE-92: the same session connectActiveTab just used, a split pane
+  // if the picker was opened via openSplitPanePicker, otherwise the
+  // active tab's own primary session, exactly as before this feature
+  // existed.
+  const connectedTarget: Session | undefined = pendingPaneTarget ?? tabs.get(activeTabId!);
+
   await connectActiveTab(req);
 
   if (authMode !== 'key') {
 
-    const tab = tabs.get(activeTabId!);
-
-    if (tab && tab.status === 'connected') {
+    if (connectedTarget && connectedTarget.status === 'connected') {
 
       const password = (document.getElementById('password') as HTMLInputElement).value;
 
@@ -2060,11 +2462,9 @@ document.getElementById('connect')!.addEventListener('click', async () => {
   }
   if (pendingSessionName) {
 
-    const tab = tabs.get(activeTabId!);
+    if (connectedTarget) {
 
-    if (tab) {
-
-      tab.label = pendingSessionName;
+      connectedTarget.label = pendingSessionName;
 
       renderTabBar();
 
@@ -2094,27 +2494,33 @@ document.getElementById('connect')!.addEventListener('click', async () => {
 // front so there's always somewhere to show the message, reuses the
 // same disconnect panel SPE-59 built rather than a separate error UI.
 async function startLocalShellInActiveTab(shell: string, label: string, dir = '') {
-  const tab = tabs.get(activeTabId!)!;
-  tab.label = label;
-  tab.mode = 'local';
-  createTerminalForTab(tab);
-  switchToTab(tab.id);
+  const ownerTab = tabs.get(activeTabId!)!;
+  const target: Session = pendingPaneTarget ?? ownerTab;
+  target.label = label;
+  target.mode = 'local';
+  createTerminalForSession(target, ownerTab);
+  switchToTab(ownerTab.id);
 
   let id: string;
   try {
     id = await App.StartLocalTerminal(shell, dir);
   } catch (err) {
-    showDisconnectPanel(tab, String(err));
+    showDisconnectPanel(target, String(err));
     return;
   }
 
-  tab.backendId = id;
-  tab.status = 'connected';
+  target.backendId = id;
+  target.status = 'connected';
   renderTabBar();
-  runtime.EventsOn('local:data:' + id, (data: unknown) => writeToTerminal(tab, data as string));
+  runtime.EventsOn('local:data:' + id, (data: unknown) => writeToTerminal(target, data as string));
 }
 
 async function newLocalShellTab(shell: string, label: string, dir = '') {
+  // SPE-92: always targets the fresh tab just created here, not a
+  // pendingPaneTarget left over from an earlier split (this entry
+  // point doesn't go through the session picker, the one place that
+  // normally resets it).
+  pendingPaneTarget = null;
   const tab = createPendingTab();
   switchToTab(tab.id);
   await startLocalShellInActiveTab(shell, label, dir);
@@ -2136,29 +2542,29 @@ async function newLocalShellInDirectory() {
 
 // wireSerialEvents mirrors wireSSHEvents for serial console sessions,
 // the direct-hardware-console analogue of a dropped SSH session (SPE-59).
-function wireSerialEvents(tab: Tab, id: string, portName: string, baud: number) {
-  runtime.EventsOn('serial:data:' + id, (data: unknown) => writeToTerminal(tab, data as string));
+function wireSerialEvents(session: Session, id: string, portName: string, baud: number) {
+  runtime.EventsOn('serial:data:' + id, (data: unknown) => writeToTerminal(session, data as string));
   runtime.EventsOn('serial:closed:' + id, (payload: unknown) => {
-    showDisconnectPanel(tab, (payload as SessionClosedEvent).message);
+    showDisconnectPanel(session, (payload as SessionClosedEvent).message);
   });
-  tab.reconnect = () => reconnectSerial(tab, portName, baud);
+  session.reconnect = () => reconnectSerial(session, portName, baud);
 }
 
-async function reconnectSerial(tab: Tab, portName: string, baud: number): Promise<void> {
-  tab.status = 'connecting';
+async function reconnectSerial(session: Session, portName: string, baud: number): Promise<void> {
+  session.status = 'connecting';
   renderTabBar();
   let id: string;
   try {
     id = await App.ConnectSerial(portName, baud);
   } catch (err) {
-    showDisconnectPanel(tab, String(err));
+    showDisconnectPanel(session, String(err));
     return;
   }
-  tab.backendId = id;
-  tab.status = 'connected';
+  session.backendId = id;
+  session.status = 'connected';
   renderTabBar();
-  tab.term!.write('\r\n\x1b[32mReconnected.\x1b[0m\r\n');
-  wireSerialEvents(tab, id, portName, baud);
+  session.term!.write('\r\n\x1b[32mReconnected.\x1b[0m\r\n');
+  wireSerialEvents(session, id, portName, baud);
 }
 
 // Same bug class as the SSH connect flow above and SPE-31's local-shell
@@ -2166,9 +2572,12 @@ async function reconnectSerial(tab: Tab, portName: string, baud: number): Promis
 // before this even ran, so a bad port left the user with zero feedback
 // anywhere. Now shows the error via showConnectError (picker stays
 // open, matching the SSH flow) rather than an unhandled rejection.
+// SPE-92: targets pendingPaneTarget (a split pane) if set, otherwise
+// the active tab's own primary session, same pattern as connectActiveTab.
 async function connectSerialInActiveTab(portName: string, baud: number) {
-  const tab = tabs.get(activeTabId!)!;
-  tab.label = portName;
+  const ownerTab = tabs.get(activeTabId!)!;
+  const target: Session = pendingPaneTarget ?? ownerTab;
+  target.label = portName;
 
   let id: string;
   try {
@@ -2178,12 +2587,12 @@ async function connectSerialInActiveTab(portName: string, baud: number) {
     return;
   }
 
-  tab.mode = 'serial';
-  tab.backendId = id;
-  tab.status = 'connected';
-  createTerminalForTab(tab);
-  wireSerialEvents(tab, id, portName, baud);
-  switchToTab(tab.id);
+  target.mode = 'serial';
+  target.backendId = id;
+  target.status = 'connected';
+  createTerminalForSession(target, ownerTab);
+  wireSerialEvents(target, id, portName, baud);
+  switchToTab(ownerTab.id);
   closeSessionPicker();
 
   if (!skipSerialSavePrompt) {
@@ -2513,6 +2922,19 @@ function localShellProfileIcon(icon?: string): string {
   }
 }
 
+// SPE-92: same targeting rule as useSSHSession/useSerialSession above,
+// launches into the focused pane if the active tab is split and that
+// pane is empty, otherwise a plain new tab exactly as before.
+async function launchLocalShellProfile(p: LocalShellProfile) {
+  const paneTarget = targetEmptyFocusedPane();
+  if (paneTarget) {
+    pendingPaneTarget = paneTarget;
+    await startLocalShellInActiveTab(p.command, p.tabTitle || p.name, p.startingDir || '');
+  } else {
+    await newLocalShellTab(p.command, p.tabTitle || p.name, p.startingDir || '');
+  }
+}
+
 async function renderLocalShellProfileList() {
   const profiles = await App.ListLocalShellProfiles();
   const list = document.getElementById('local-shell-profile-list')!;
@@ -2525,7 +2947,7 @@ async function renderLocalShellProfileList() {
     const label = document.createElement('span');
     label.textContent = localShellProfileIcon(p.icon) + ' ' + p.name;
     label.style.flex = '1';
-    label.onclick = () => newLocalShellTab(p.command, p.tabTitle || p.name, p.startingDir || '');
+    label.onclick = () => launchLocalShellProfile(p);
     row.appendChild(label);
 
     const edit = document.createElement('span');
@@ -2564,7 +2986,7 @@ async function renderLocalShellProfilesMenu() {
     item.textContent = localShellProfileIcon(p.icon) + ' ' + p.name;
     item.onclick = () => {
       closeAllMenus();
-      newLocalShellTab(p.command, p.tabTitle || p.name, p.startingDir || '');
+      launchLocalShellProfile(p);
     };
     container.appendChild(item);
   }
@@ -2703,12 +3125,12 @@ document.getElementById('menu-close-tab')!.addEventListener('click', () => {
 document.getElementById('menu-disconnect-tab')!.addEventListener('click', () => {
   closeAllMenus();
   const tab = activeTabId ? tabs.get(activeTabId) : null;
-  if (tab) disconnectTab(tab);
+  if (tab) disconnectSession(focusedSession(tab));
 });
 document.getElementById('menu-clear-screen')!.addEventListener('click', () => {
   closeAllMenus();
   const tab = activeTabId ? tabs.get(activeTabId) : null;
-  tab?.term?.clear();
+  if (tab) focusedSession(tab).term?.clear();
 });
 
 // Sessions menu
@@ -2718,11 +3140,30 @@ function resetPickerView() {
   document.getElementById('picker-serial-fields')!.style.display = 'none';
 }
 function openSessionPicker() {
+  // SPE-92: an ordinary New Session, targets the active tab's own
+  // primary session, never a leftover split-pane target from earlier.
+  pendingPaneTarget = null;
   resetPickerView();
   // SPE-83: pre-fill with the OS username, matching MobaXterm's "same
   // as Windows login" default, only if the field is currently empty,
   // never overwrite something the person already typed or a saved
   // session's own stored username.
+  const userField = document.getElementById('user') as HTMLInputElement;
+  if (!userField.value) {
+    App.GetOSUsername().then((name) => {
+      if (name && !userField.value) userField.value = name;
+    }).catch(() => {});
+  }
+  document.getElementById('session-picker-overlay')!.classList.add('open');
+}
+
+// SPE-92: opens the same New Session picker, but targets a specific
+// split pane instead of the active tab's own primary session. The
+// picker itself (SSH/Shell/Serial icons and their flows) is entirely
+// unchanged, only which Session object ends up connected differs.
+function openSplitPanePicker(pane: Pane) {
+  pendingPaneTarget = pane;
+  resetPickerView();
   const userField = document.getElementById('user') as HTMLInputElement;
   if (!userField.value) {
     App.GetOSUsername().then((name) => {
@@ -2774,7 +3215,10 @@ document.getElementById('serial-connect')!.addEventListener('click', async () =>
   await connectSerialInActiveTab(portName, baud);
 });
 document.getElementById('picker-shell')!.addEventListener('click', () => {
-  ensurePendingTab();
+  // SPE-92: ensurePendingTab would wrongly create/switch to a whole new
+  // tab when this picker was actually opened for a split pane, only
+  // needed for the ordinary "New Session" flow.
+  if (!pendingPaneTarget) ensurePendingTab();
   closeSessionPicker();
   startLocalShellInActiveTab('', 'Local shell');
 });
@@ -2794,6 +3238,33 @@ function toggleSidebar() {
 document.getElementById('menu-toggle-sidebar')!.addEventListener('click', () => {
   closeAllMenus();
   toggleSidebar();
+});
+
+// SPE-92: split-pane layouts. Ctrl+Shift+D / Ctrl+Shift+Enter / Ctrl+Shift+W
+// / Alt+Arrow also drive these, see the keyboard handler in
+// createTerminalForSession.
+function currentTabForLayout(): Tab | null {
+  return activeTabId ? (tabs.get(activeTabId) ?? null) : null;
+}
+document.getElementById('menu-layout-single')!.addEventListener('click', () => {
+  closeAllMenus();
+  const tab = currentTabForLayout();
+  if (tab) setTabLayout(tab, 'single');
+});
+document.getElementById('menu-layout-2v')!.addEventListener('click', () => {
+  closeAllMenus();
+  const tab = currentTabForLayout();
+  if (tab) setTabLayout(tab, '2v');
+});
+document.getElementById('menu-layout-2h')!.addEventListener('click', () => {
+  closeAllMenus();
+  const tab = currentTabForLayout();
+  if (tab) setTabLayout(tab, '2h');
+});
+document.getElementById('menu-layout-4')!.addEventListener('click', () => {
+  closeAllMenus();
+  const tab = currentTabForLayout();
+  if (tab) setTabLayout(tab, '4');
 });
 
 // SPE-95: distinct from window maximize, hides all chrome (menu bar,
