@@ -30,6 +30,10 @@ export function DeleteGroup(arg1) {
   return window['go']['main']['App']['DeleteGroup'](arg1);
 }
 
+export function DeleteLocalShellProfile(arg1) {
+  return window['go']['main']['App']['DeleteLocalShellProfile'](arg1);
+}
+
 export function DeleteSession(arg1) {
   return window['go']['main']['App']['DeleteSession'](arg1);
 }
@@ -60,6 +64,10 @@ export function GetVersion() {
 
 export function ListGroups() {
   return window['go']['main']['App']['ListGroups']();
+}
+
+export function ListLocalShellProfiles() {
+  return window['go']['main']['App']['ListLocalShellProfiles']();
 }
 
 export function ListRemoteDir(arg1, arg2) {
@@ -96,6 +104,10 @@ export function ResizeSSH(arg1, arg2, arg3) {
 
 export function SaveGroup(arg1) {
   return window['go']['main']['App']['SaveGroup'](arg1);
+}
+
+export function SaveLocalShellProfile(arg1) {
+  return window['go']['main']['App']['SaveLocalShellProfile'](arg1);
 }
 
 export function SaveSession(arg1) {

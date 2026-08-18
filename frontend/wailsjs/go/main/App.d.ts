@@ -17,6 +17,8 @@ export function ConnectSerial(arg1:string,arg2:number):Promise<string>;
 
 export function DeleteGroup(arg1:string):Promise<void>;
 
+export function DeleteLocalShellProfile(arg1:string):Promise<void>;
+
 export function DeleteSession(arg1:string):Promise<void>;
 
 export function DownloadAndInstallUpdate(arg1:string):Promise<void>;
@@ -32,6 +34,8 @@ export function GetSettings():Promise<config.Settings>;
 export function GetVersion():Promise<string>;
 
 export function ListGroups():Promise<Array<config.SessionGroup>>;
+
+export function ListLocalShellProfiles():Promise<Array<config.LocalShellProfile>>;
 
 export function ListRemoteDir(arg1:string,arg2:string):Promise<Array<main.RemoteFile>>;
 
@@ -50,6 +54,8 @@ export function ResizeLocalTerminal(arg1:string,arg2:number,arg3:number):Promise
 export function ResizeSSH(arg1:string,arg2:number,arg3:number):Promise<void>;
 
 export function SaveGroup(arg1:config.SessionGroup):Promise<void>;
+
+export function SaveLocalShellProfile(arg1:config.LocalShellProfile):Promise<void>;
 
 export function SaveSession(arg1:config.SessionProfile):Promise<void>;
 

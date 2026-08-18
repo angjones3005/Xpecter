@@ -1,5 +1,27 @@
 export namespace config {
 	
+	export class LocalShellProfile {
+	    id: string;
+	    name: string;
+	    command: string;
+	    startingDir?: string;
+	    icon?: string;
+	    tabTitle?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new LocalShellProfile(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.command = source["command"];
+	        this.startingDir = source["startingDir"];
+	        this.icon = source["icon"];
+	        this.tabTitle = source["tabTitle"];
+	    }
+	}
 	export class SessionGroup {
 	    id: string;
 	    name: string;
