@@ -59,11 +59,13 @@ export function SaveTextFile(arg1:string,arg2:string):Promise<string>;
 
 export function SelectAnyFile():Promise<string>;
 
+export function SelectDirectory():Promise<string>;
+
 export function SelectImageFile():Promise<string>;
 
 export function SelectKeyFile():Promise<string>;
 
-export function StartLocalTerminal(arg1:string):Promise<string>;
+export function StartLocalTerminal(arg1:string,arg2:string):Promise<string>;
 
 export function TrustHost(arg1:string):Promise<void>;
 

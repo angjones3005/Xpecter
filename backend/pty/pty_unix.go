@@ -14,7 +14,7 @@ type unixTerminal struct {
 	cmd *exec.Cmd
 }
 
-func newPlatformTerminal(onData func([]byte), shell string) (terminalImpl, error) {
+func newPlatformTerminal(onData func([]byte), shell string, dir string) (terminalImpl, error) {
 	if shell == "" {
 		shell = os.Getenv("SHELL")
 		if shell == "" {
@@ -23,6 +23,11 @@ func newPlatformTerminal(onData func([]byte), shell string) (terminalImpl, error
 	}
 
 	cmd := exec.Command(shell)
+	// Dir is a standard os/exec.Cmd field, empty string means "inherit
+	// the current process's working directory", exec's own documented
+	// default, so leaving dir unset here behaves identically to before
+	// this option existed.
+	cmd.Dir = dir
 	f, err := pty.Start(cmd)
 	if err != nil {
 		return nil, err

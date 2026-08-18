@@ -96,7 +96,7 @@ export interface UpdateInfo {
   assetUrl: string;
 }
 export interface AppBindings {
-  StartLocalTerminal(shell: string): Promise<string>;
+  StartLocalTerminal(shell: string, dir: string): Promise<string>;
   WriteLocalTerminal(id: string, data: string): Promise<void>;
   ResizeLocalTerminal(id: string, cols: number, rows: number): Promise<void>;
   CloseLocalTerminal(id: string): Promise<void>;
@@ -106,6 +106,7 @@ export interface AppBindings {
   ReadImageFile(path: string): Promise<string>;
   SaveTextFile(defaultFilename: string, content: string): Promise<string>;
   SelectAnyFile(): Promise<string>;
+  SelectDirectory(): Promise<string>;
   ReadLocalFile(path: string): Promise<string>;
   WriteLocalFile(path: string, content: string): Promise<void>;
   GetSettings(): Promise<Settings>;

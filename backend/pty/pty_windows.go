@@ -17,7 +17,7 @@ type windowsTerminal struct {
 	cpty *conpty.ConPty
 }
 
-func newPlatformTerminal(onData func([]byte), shell string) (terminalImpl, error) {
+func newPlatformTerminal(onData func([]byte), shell string, dir string) (terminalImpl, error) {
 	if shell == "" {
 		shell = os.Getenv("COMSPEC")
 		if shell == "" {
@@ -25,7 +25,11 @@ func newPlatformTerminal(onData func([]byte), shell string) (terminalImpl, error
 		}
 	}
 
-	cpty, err := conpty.Start(shell)
+	var opts []conpty.ConPtyOption
+	if dir != "" {
+		opts = append(opts, conpty.ConPtyWorkDir(dir))
+	}
+	cpty, err := conpty.Start(shell, opts...)
 	if err != nil {
 		return nil, err
 	}

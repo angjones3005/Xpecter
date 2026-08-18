@@ -66,11 +66,11 @@ type SessionClosedEvent struct {
 // StartLocalTerminal spawns a new local shell PTY and returns its ID.
 // Output streams to the frontend via the "local:data:<id>" event, matching
 // the "ssh:data:<id>" pattern already used for SSH sessions.
-func (a *App) StartLocalTerminal(shell string) (string, error) {
+func (a *App) StartLocalTerminal(shell string, dir string) (string, error) {
 	id := newID()
 	lt, err := pty.New(func(data []byte) {
 		runtime.EventsEmit(a.ctx, "local:data:"+id, string(data))
-	}, shell)
+	}, shell, dir)
 	if err != nil {
 		return "", err
 	}
@@ -331,6 +331,15 @@ func (a *App) SelectImageFile() (string, error) {
 func (a *App) SelectAnyFile() (string, error) {
 	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
 		Title: "Open File",
+	})
+}
+
+// SelectDirectory prompts for a folder, used for choosing a local
+// shell's starting directory. Returns "" (no error) if the user
+// cancels.
+func (a *App) SelectDirectory() (string, error) {
+	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Choose Starting Directory",
 	})
 }
 

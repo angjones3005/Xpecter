@@ -2035,7 +2035,7 @@ document.getElementById('connect')!.addEventListener('click', async () => {
 // confusing for a first impression. Creates the terminal container up
 // front so there's always somewhere to show the message, reuses the
 // same disconnect panel SPE-59 built rather than a separate error UI.
-async function startLocalShellInActiveTab(shell: string, label: string) {
+async function startLocalShellInActiveTab(shell: string, label: string, dir = '') {
   const tab = tabs.get(activeTabId!)!;
   tab.label = label;
   tab.mode = 'local';
@@ -2044,7 +2044,7 @@ async function startLocalShellInActiveTab(shell: string, label: string) {
 
   let id: string;
   try {
-    id = await App.StartLocalTerminal(shell);
+    id = await App.StartLocalTerminal(shell, dir);
   } catch (err) {
     showDisconnectPanel(tab, String(err));
     return;
@@ -2056,10 +2056,24 @@ async function startLocalShellInActiveTab(shell: string, label: string) {
   runtime.EventsOn('local:data:' + id, (data: unknown) => writeToTerminal(tab, data as string));
 }
 
-async function newLocalShellTab(shell: string, label: string) {
+async function newLocalShellTab(shell: string, label: string, dir = '') {
   const tab = createPendingTab();
   switchToTab(tab.id);
-  await startLocalShellInActiveTab(shell, label);
+  await startLocalShellInActiveTab(shell, label, dir);
+}
+
+// SPE: lets a local shell start somewhere other than Specter's own
+// working directory. A native folder picker rather than a free-text
+// path field, avoids typos and matches the existing SelectKeyFile/
+// SelectAnyFile pattern. Cancelling the picker just skips launching,
+// rather than falling back to the default silently, the person asked
+// for a specific directory and getting a different one without any
+// signal would be more confusing than nothing happening.
+async function newLocalShellInDirectory() {
+  const dir = await App.SelectDirectory();
+  if (!dir) return;
+  const label = dir.split(/[\\/]/).filter(Boolean).pop() || dir;
+  await newLocalShellTab('', label, dir);
 }
 
 // wireSerialEvents mirrors wireSSHEvents for serial console sessions,
@@ -2488,6 +2502,10 @@ document.getElementById('menu-new-tab')!.addEventListener('click', () => {
 document.getElementById('menu-new-local-shell')!.addEventListener('click', () => {
   closeAllMenus();
   newLocalShellTab('', 'Local shell');
+});
+document.getElementById('menu-new-local-shell-in-dir')!.addEventListener('click', () => {
+  closeAllMenus();
+  newLocalShellInDirectory();
 });
 document.getElementById('menu-close-tab')!.addEventListener('click', () => {
   closeAllMenus();

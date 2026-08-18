@@ -20,8 +20,11 @@ type terminalImpl interface {
 // used (COMSPEC/PowerShell fallback on Windows, $SHELL/bash on Unix).
 // A non-empty shell requests a specific executable, e.g. "cmd.exe" or
 // "powershell.exe" on Windows, used by the Tools menu's quick launchers.
-func New(onData func([]byte), shell string) (*LocalTerminal, error) {
-	impl, err := newPlatformTerminal(onData, shell)
+// If dir is empty, the shell starts in Specter's own current working
+// directory (each platform's own documented default for an unset
+// working directory), same as before this option existed.
+func New(onData func([]byte), shell string, dir string) (*LocalTerminal, error) {
+	impl, err := newPlatformTerminal(onData, shell, dir)
 	if err != nil {
 		return nil, err
 	}

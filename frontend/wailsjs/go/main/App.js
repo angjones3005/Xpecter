@@ -114,6 +114,10 @@ export function SelectAnyFile() {
   return window['go']['main']['App']['SelectAnyFile']();
 }
 
+export function SelectDirectory() {
+  return window['go']['main']['App']['SelectDirectory']();
+}
+
 export function SelectImageFile() {
   return window['go']['main']['App']['SelectImageFile']();
 }
@@ -122,8 +126,8 @@ export function SelectKeyFile() {
   return window['go']['main']['App']['SelectKeyFile']();
 }
 
-export function StartLocalTerminal(arg1) {
-  return window['go']['main']['App']['StartLocalTerminal'](arg1);
+export function StartLocalTerminal(arg1, arg2) {
+  return window['go']['main']['App']['StartLocalTerminal'](arg1, arg2);
 }
 
 export function TrustHost(arg1) {
