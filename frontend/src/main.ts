@@ -1238,38 +1238,8 @@ const DEVICE_KINDS: { value: 'host' | 'switch' | 'firewall'; label: string }[] =
   { value: 'firewall', label: 'Firewall' },
 ];
 
-// Flyout submenu for device type, kept separate from the main session
-// context menu so that menu doesn't grow a new row every time a device
-// kind is added (router, load balancer, AP, ...). Opens anchored to the
-// "Device type ▸" item that triggered it.
-function showDeviceKindMenu(x: number, y: number, s: SessionProfile) {
-  const existing = document.getElementById('session-context-menu');
-  if (existing) existing.remove();
-
-  const menu = document.createElement('div');
-  menu.id = 'session-context-menu';
-  menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;background:var(--bg-alt);border:1px solid var(--border);border-radius:4px;padding:4px 0;z-index:2000;min-width:140px;font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,0.4);`;
-
-  const current = s.deviceKind === 'switch' || s.deviceKind === 'firewall' ? s.deviceKind : 'host';
-  for (const k of DEVICE_KINDS) {
-    const kindItem = document.createElement('div');
-    kindItem.textContent = (k.value === current ? '\u2713 ' : '\u2003') + k.label;
-    kindItem.style.cssText = 'padding:6px 12px;cursor:pointer;';
-    kindItem.onmouseenter = () => { kindItem.style.background = 'var(--hover)'; };
-    kindItem.onmouseleave = () => { kindItem.style.background = ''; };
-    kindItem.onclick = async () => {
-      menu.remove();
-      if (k.value === current) return;
-      await App.SaveSession({ ...s, deviceKind: k.value });
-      renderSessionList();
-    };
-    menu.appendChild(kindItem);
-  }
-
-  document.body.appendChild(menu);
-  attachMenuAutoClose(menu);
-}
-
+// SPE-62: single "Edit session" entry replaces the old Rename prompt()
+// and Device-type flyout, both folded into the real edit dialog now.
 function showSessionContextMenu(x: number, y: number, s: SessionProfile) {
   const existing = document.getElementById('session-context-menu');
   if (existing) existing.remove();
@@ -1278,17 +1248,14 @@ function showSessionContextMenu(x: number, y: number, s: SessionProfile) {
   menu.id = 'session-context-menu';
   menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;background:var(--bg-alt);border:1px solid var(--border);border-radius:4px;padding:4px 0;z-index:2000;min-width:120px;font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,0.4);`;
 
-  const renameItem = document.createElement('div');
-  renameItem.textContent = 'Rename';
-  renameItem.style.cssText = 'padding:6px 12px;cursor:pointer;';
-  renameItem.onmouseenter = () => { renameItem.style.background = 'var(--hover)'; };
-  renameItem.onmouseleave = () => { renameItem.style.background = ''; };
-  renameItem.onclick = async () => {
+  const editItem = document.createElement('div');
+  editItem.textContent = 'Edit session';
+  editItem.style.cssText = 'padding:6px 12px;cursor:pointer;';
+  editItem.onmouseenter = () => { editItem.style.background = 'var(--hover)'; };
+  editItem.onmouseleave = () => { editItem.style.background = ''; };
+  editItem.onclick = () => {
     menu.remove();
-    const newName = prompt('Rename session:', s.name);
-    if (!newName || newName === s.name) return;
-    await App.SaveSession({ ...s, name: newName });
-    renderSessionList();
+    openSessionEditor(s);
   };
 
   const deleteItem = document.createElement('div');
@@ -1302,35 +1269,126 @@ function showSessionContextMenu(x: number, y: number, s: SessionProfile) {
     renderSessionList();
   };
 
-  menu.appendChild(renameItem);
-
-  // Single flyout entry instead of one row per device kind, only
-  // meaningful for SSH sessions, serial always shows its own icon.
-  if (s.type !== 'serial') {
-    const kindItem = document.createElement('div');
-    kindItem.style.cssText = 'padding:6px 12px;cursor:pointer;display:flex;justify-content:space-between;gap:12px;';
-    const kindLabel = document.createElement('span');
-    kindLabel.textContent = 'Device type';
-    const arrow = document.createElement('span');
-    arrow.textContent = '\u25b8';
-    arrow.style.opacity = '0.6';
-    kindItem.appendChild(kindLabel);
-    kindItem.appendChild(arrow);
-    kindItem.onmouseenter = () => { kindItem.style.background = 'var(--hover)'; };
-    kindItem.onmouseleave = () => { kindItem.style.background = ''; };
-    kindItem.onclick = (e) => {
-      e.stopPropagation();
-      const rect = kindItem.getBoundingClientRect();
-      menu.remove();
-      showDeviceKindMenu(rect.right, rect.top, s);
-    };
-    menu.appendChild(kindItem);
-  }
-
+  menu.appendChild(editItem);
   menu.appendChild(deleteItem);
   document.body.appendChild(menu);
   attachMenuAutoClose(menu);
 }
+
+// --- Edit session dialog (SPE-62) ---
+
+let sessionEditorTarget: SessionProfile | null = null;
+
+function switchSessionEditorTab(tab: 'basic' | 'advanced') {
+  document.querySelectorAll('#session-editor .editor-tab').forEach((el) => {
+    el.classList.toggle('active', (el as HTMLElement).dataset.tab === tab);
+  });
+  document.getElementById('session-editor-tab-basic')!.style.display = tab === 'basic' ? 'flex' : 'none';
+  document.getElementById('session-editor-tab-advanced')!.style.display = tab === 'advanced' ? 'flex' : 'none';
+}
+
+document.querySelectorAll('#session-editor .editor-tab').forEach((el) => {
+  el.addEventListener('click', () => switchSessionEditorTab((el as HTMLElement).dataset.tab as 'basic' | 'advanced'));
+});
+
+async function openSessionEditor(s: SessionProfile) {
+  sessionEditorTarget = s;
+  const isSerial = s.type === 'serial';
+
+  switchSessionEditorTab('basic');
+
+  (document.getElementById('se-name') as HTMLInputElement).value = s.name;
+
+  document.getElementById('se-ssh-basic-fields')!.style.display = isSerial ? 'none' : 'flex';
+  document.getElementById('se-serial-basic-fields')!.style.display = isSerial ? 'flex' : 'none';
+  // Device kind / key path only apply to SSH sessions, serial always
+  // shows its own icon (matches the pre-SPE-62 context menu behavior).
+  document.getElementById('se-ssh-advanced-fields')!.style.display = isSerial ? 'none' : 'flex';
+
+  if (isSerial) {
+    (document.getElementById('se-serial-port') as HTMLInputElement).value = s.serialPort ?? '';
+    (document.getElementById('se-baud') as HTMLSelectElement).value = String(s.baud ?? 9600);
+  } else {
+    (document.getElementById('se-host') as HTMLInputElement).value = s.host ?? '';
+    (document.getElementById('se-port') as HTMLInputElement).value = String(s.port ?? 22);
+    (document.getElementById('se-user') as HTMLInputElement).value = s.user ?? '';
+    (document.getElementById('se-keypath') as HTMLInputElement).value = s.keyPath ?? '';
+
+    const radios = document.getElementById('se-devicekind-radios')!;
+    radios.innerHTML = '';
+    const current = s.deviceKind === 'switch' || s.deviceKind === 'firewall' ? s.deviceKind : 'host';
+    for (const k of DEVICE_KINDS) {
+      const label = document.createElement('label');
+      const radio = document.createElement('input');
+      radio.type = 'radio';
+      radio.name = 'se-devicekind';
+      radio.value = k.value;
+      radio.checked = k.value === current;
+      label.appendChild(radio);
+      label.appendChild(document.createTextNode(' ' + k.label));
+      radios.appendChild(label);
+    }
+  }
+
+  const groupSelect = document.getElementById('se-group') as HTMLSelectElement;
+  groupSelect.innerHTML = '<option value="">No folder</option>';
+  const groups = await App.ListGroups();
+  for (const g of groups) {
+    const opt = document.createElement('option');
+    opt.value = g.id;
+    opt.textContent = g.name;
+    groupSelect.appendChild(opt);
+  }
+  groupSelect.value = s.groupId ?? '';
+
+  document.getElementById('session-editor-overlay')!.classList.add('open');
+}
+
+function closeSessionEditor() {
+  document.getElementById('session-editor-overlay')!.classList.remove('open');
+  sessionEditorTarget = null;
+}
+
+document.getElementById('session-editor-close')!.addEventListener('click', closeSessionEditor);
+document.getElementById('se-cancel')!.addEventListener('click', closeSessionEditor);
+document.getElementById('session-editor-overlay')!.addEventListener('click', (e) => {
+  if (e.target === document.getElementById('session-editor-overlay')) closeSessionEditor();
+});
+
+document.getElementById('se-browse-key')!.addEventListener('click', async () => {
+  const path = await App.SelectKeyFile();
+  if (path) (document.getElementById('se-keypath') as HTMLInputElement).value = path;
+});
+document.getElementById('se-clear-key')!.addEventListener('click', () => {
+  (document.getElementById('se-keypath') as HTMLInputElement).value = '';
+});
+
+document.getElementById('se-save')!.addEventListener('click', async () => {
+  const s = sessionEditorTarget;
+  if (!s) return;
+  const name = (document.getElementById('se-name') as HTMLInputElement).value.trim();
+  if (!name) return;
+
+  const groupId = (document.getElementById('se-group') as HTMLSelectElement).value;
+  const updated: SessionProfile = { ...s, name, groupId: groupId || undefined };
+
+  if (s.type === 'serial') {
+    updated.serialPort = (document.getElementById('se-serial-port') as HTMLInputElement).value.trim();
+    updated.baud = parseInt((document.getElementById('se-baud') as HTMLSelectElement).value, 10);
+  } else {
+    updated.host = (document.getElementById('se-host') as HTMLInputElement).value.trim();
+    updated.port = parseInt((document.getElementById('se-port') as HTMLInputElement).value, 10) || 22;
+    updated.user = (document.getElementById('se-user') as HTMLInputElement).value.trim();
+    const keyPath = (document.getElementById('se-keypath') as HTMLInputElement).value.trim();
+    updated.keyPath = keyPath || undefined;
+    const checked = document.querySelector('input[name="se-devicekind"]:checked') as HTMLInputElement | null;
+    updated.deviceKind = (checked?.value as 'host' | 'switch' | 'firewall' | undefined) ?? 'host';
+  }
+
+  await App.SaveSession(updated);
+  closeSessionEditor();
+  renderSessionList();
+});
 
 function renderGroupNode(
   group: SessionGroup,
