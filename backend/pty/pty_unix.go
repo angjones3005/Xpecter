@@ -42,6 +42,9 @@ func newPlatformTerminal(onData func([]byte), shell string, dir string) (termina
 	// default, so leaving dir unset here behaves identically to before
 	// this option existed.
 	cmd.Dir = dir
+	// See withColorEnv in pty.go: matches the color-capable terminal
+	// identity SSH sessions already get explicitly.
+	cmd.Env = withColorEnv(os.Environ())
 	f, err := pty.Start(cmd)
 	if err != nil {
 		return nil, err

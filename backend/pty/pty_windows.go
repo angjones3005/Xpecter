@@ -25,6 +25,24 @@ func newPlatformTerminal(onData func([]byte), shell string, dir string) (termina
 		}
 	}
 
+	// The UserExistsError/conpty wrapper doesn't expose a per-process
+	// environment option, so this sets TERM/COLORTERM on Specter's own
+	// process instead, once per call is harmless. ConPTY-spawned
+	// children inherit the parent's environment by default (the same
+	// CreateProcess behavior os/exec relies on when Env is left unset
+	// on Unix, see withColorEnv in pty.go), so this should reach the
+	// child shell the same way. PowerShell/cmd.exe don't gate their own
+	// native coloring on TERM, this mainly matters for tools that do
+	// check it when run inside a local shell tab (WSL bash, git-bash,
+	// etc.). Confirm on a real Windows build before relying on this,
+	// the wrapper's actual behavior here wasn't verifiable offline.
+	if os.Getenv("TERM") == "" {
+		_ = os.Setenv("TERM", "xterm-256color")
+	}
+	if os.Getenv("COLORTERM") == "" {
+		_ = os.Setenv("COLORTERM", "truecolor")
+	}
+
 	var opts []conpty.ConPtyOption
 	if dir != "" {
 		opts = append(opts, conpty.ConPtyWorkDir(dir))
