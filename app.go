@@ -44,7 +44,15 @@ func NewApp(startupDir string) *App {
 	}
 }
 
-func (a *App) startup(ctx context.Context) { a.ctx = ctx }
+func (a *App) startup(ctx context.Context) {
+	a.ctx = ctx
+	// SPE-87: best-effort, fire-and-forget. A slow disk or a failed
+	// write should never delay or block app startup, and there's no
+	// user-visible feedback needed on success, it's a silent safety net.
+	go func() {
+		_ = config.BackupIfDue()
+	}()
+}
 
 func (a *App) shutdown(ctx context.Context) {
 	for _, s := range a.sessions {
@@ -586,6 +594,22 @@ func (a *App) ImportConfigFile() (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// --- Auto-backup (SPE-87) ---
+
+// ListBackups returns available automatic backup filenames, newest
+// first, for a Restore from Backup UI to present.
+func (a *App) ListBackups() ([]string, error) {
+	return config.ListBackups()
+}
+
+// RestoreBackup replaces current Settings/Sessions/Groups/
+// LocalShellProfiles with the given backup (see config.RestoreBackup:
+// this REPLACES outright, it does not merge like ImportConfigFile
+// above).
+func (a *App) RestoreBackup(filename string) error {
+	return config.RestoreBackup(filename)
 }
 
 func (a *App) WriteSSH(id string, data string) error {

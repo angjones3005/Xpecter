@@ -3397,6 +3397,87 @@ document.getElementById('menu-import-config')!.addEventListener('click', async (
   }
 });
 
+// --- Restore from automatic backup (SPE-87) ---
+// filenameToLabel parses the "specter-backup-YYYYMMDD-HHMMSS.json"
+// format written by config.BackupIfDue (Go side) into a readable local
+// date/time for display, purely cosmetic, doesn't affect which file
+// actually gets restored (that's always the exact filename passed to
+// App.RestoreBackup).
+function backupFilenameToLabel(filename: string): string {
+  const match = filename.match(/^specter-backup-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})\.json$/);
+  if (!match) return filename;
+  const [, y, mo, d, h, mi, s] = match;
+  // The Go side writes these in UTC (time.Now().UTC()), constructed
+  // here as a UTC instant too so toLocaleString() converts it to the
+  // viewer's actual local time rather than misreading it as already-local.
+  const date = new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s)));
+  return date.toLocaleString();
+}
+
+async function openBackupRestoreDialog() {
+  const list = document.getElementById('backup-restore-list')!;
+  list.innerHTML = '';
+  let backups: string[] = [];
+  try {
+    backups = await App.ListBackups();
+  } catch {
+    // No backups directory yet (fresh install, never reached the
+    // 24h-since-last-backup mark) isn't an error worth surfacing,
+    // just show the empty state below.
+  }
+  if (backups.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'backup-empty';
+    empty.textContent = 'No automatic backups yet. Specter creates one at most once a day.';
+    list.appendChild(empty);
+  } else {
+    for (const filename of backups) {
+      const row = document.createElement('div');
+      row.className = 'backup-row';
+      row.textContent = backupFilenameToLabel(filename);
+      row.addEventListener('click', async () => {
+        // Restoring REPLACES current Settings/Sessions/Groups/Local
+        // shell profiles outright (config.RestoreBackup), unlike
+        // Import Configuration's merge, so this confirm is
+        // deliberately more blunt about what's about to happen.
+        if (!confirm(`Restore this backup?\n\n${backupFilenameToLabel(filename)}\n\nThis replaces your current saved sessions, folders, local shell profiles, and appearance settings with what's in this backup. This cannot be undone.`)) {
+          return;
+        }
+        try {
+          await App.RestoreBackup(filename);
+          await Promise.all([
+            loadSettingsAndApply(),
+            renderSessionList(),
+            renderLocalShellProfilesMenu(),
+          ]);
+          closeBackupRestoreDialog();
+          alert('Backup restored.');
+        } catch (err) {
+          alert(`Restore failed: ${err}`);
+        }
+      });
+      list.appendChild(row);
+    }
+  }
+  document.getElementById('backup-restore-overlay')!.classList.add('open');
+}
+function closeBackupRestoreDialog() {
+  document.getElementById('backup-restore-overlay')!.classList.remove('open');
+}
+document.getElementById('menu-restore-backup')!.addEventListener('click', () => {
+  closeAllMenus();
+  openBackupRestoreDialog();
+});
+document.getElementById('backup-restore-close')!.addEventListener('click', closeBackupRestoreDialog);
+document.getElementById('backup-restore-overlay')!.addEventListener('click', (e) => {
+  if (e.target === document.getElementById('backup-restore-overlay')) closeBackupRestoreDialog();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.getElementById('backup-restore-overlay')!.classList.contains('open')) {
+    closeBackupRestoreDialog();
+  }
+});
+
 // Tools menu: platform-aware, hide Command Prompt/PowerShell on non-Windows
 App.GetPlatform().then((platform) => {
   if (platform !== 'windows') {

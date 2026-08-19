@@ -74,6 +74,10 @@ export function ImportConfigFile() {
   return window['go']['main']['App']['ImportConfigFile']();
 }
 
+export function ListBackups() {
+  return window['go']['main']['App']['ListBackups']();
+}
+
 export function ListGroups() {
   return window['go']['main']['App']['ListGroups']();
 }
@@ -112,6 +116,10 @@ export function ResizeLocalTerminal(arg1, arg2, arg3) {
 
 export function ResizeSSH(arg1, arg2, arg3) {
   return window['go']['main']['App']['ResizeSSH'](arg1, arg2, arg3);
+}
+
+export function RestoreBackup(arg1) {
+  return window['go']['main']['App']['RestoreBackup'](arg1);
 }
 
 export function SaveGroup(arg1) {

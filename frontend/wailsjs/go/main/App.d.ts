@@ -39,6 +39,8 @@ export function GetVersion():Promise<string>;
 
 export function ImportConfigFile():Promise<string>;
 
+export function ListBackups():Promise<Array<string>>;
+
 export function ListGroups():Promise<Array<config.SessionGroup>>;
 
 export function ListLocalShellProfiles():Promise<Array<config.LocalShellProfile>>;
@@ -58,6 +60,8 @@ export function ReadRemoteFile(arg1:string,arg2:string):Promise<string>;
 export function ResizeLocalTerminal(arg1:string,arg2:number,arg3:number):Promise<void>;
 
 export function ResizeSSH(arg1:string,arg2:number,arg3:number):Promise<void>;
+
+export function RestoreBackup(arg1:string):Promise<void>;
 
 export function SaveGroup(arg1:config.SessionGroup):Promise<void>;
 

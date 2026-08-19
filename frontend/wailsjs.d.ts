@@ -131,6 +131,8 @@ export interface AppBindings {
   GetStartupDir(): Promise<string>;
   ExportConfigFile(): Promise<string>;
   ImportConfigFile(): Promise<string>;
+  ListBackups(): Promise<string[]>;
+  RestoreBackup(filename: string): Promise<void>;
   ConnectSerial(portName: string, baud: number): Promise<string>;
   WriteSerial(id: string, data: string): Promise<void>;
   CloseSerial(id: string): Promise<void>;

@@ -199,6 +199,15 @@
     #shortcuts-dialog .shortcut-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 13px; }
     #shortcuts-dialog .shortcut-keys { font-family: Menlo, Consolas, monospace; font-size: 12px; color: var(--text-dim); background: var(--bg-input); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
     #shortcuts-dialog .shortcut-note { padding: 8px 16px 14px; font-size: 11px; color: var(--text-dim); border-top: 1px solid var(--border); }
+    #backup-restore-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 2000; }
+    #backup-restore-overlay.open { display: flex; }
+    #backup-restore-dialog { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; width: 340px; max-height: 70vh; overflow-y: auto; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+    #backup-restore-dialog .picker-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px; }
+    #backup-restore-dialog .picker-header .close { cursor: pointer; opacity: 0.6; }
+    #backup-restore-dialog .picker-header .close:hover { opacity: 1; }
+    #backup-restore-dialog .backup-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 16px; font-size: 13px; cursor: pointer; }
+    #backup-restore-dialog .backup-row:hover { background: var(--hover); }
+    #backup-restore-dialog .backup-empty { padding: 16px; font-size: 12px; color: var(--text-dim); }
     #session-editor .picker-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px; }
     #session-editor .picker-header .close { cursor: pointer; opacity: 0.6; }
     #session-editor .picker-header .close:hover { opacity: 1; }
@@ -341,6 +350,7 @@
         <div class="separator"></div>
         <div class="item" id="menu-export-config">Export Configuration…</div>
         <div class="item" id="menu-import-config">Import Configuration…</div>
+        <div class="item" id="menu-restore-backup">Restore from Backup…</div>
         <div class="separator"></div>
         <div class="item" id="menu-check-updates" style="cursor:pointer;">Check for Updates&#8230; <span id="menu-version" style="opacity:0.5;font-size:11px;"></span></div>
       </div>
@@ -544,6 +554,15 @@
       </div>
       <div id="shortcuts-content"></div>
       <div class="shortcut-note">Not yet rebindable, this is a reference only.</div>
+    </div>
+  </div>
+  <div id="backup-restore-overlay">
+    <div id="backup-restore-dialog">
+      <div class="picker-header">
+        <strong>Restore from backup</strong>
+        <span class="close" id="backup-restore-close">✕</span>
+      </div>
+      <div id="backup-restore-list"></div>
     </div>
   </div>
   <div id="statusbar">Specter</div>
