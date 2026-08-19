@@ -3260,6 +3260,106 @@ document.getElementById('menu-toggle-fullscreen')!.addEventListener('click', () 
   closeAllMenus();
   toggleFullscreen();
 });
+
+// SPE-91: viewable keyboard shortcuts reference. Built from a single
+// source list here rather than duplicated across the View menu's
+// inline hints, this list is the intentionally complete one (zoom,
+// disconnect, paste, close pane, pane navigation, the disconnected-
+// panel-only keys), several of which aren't shown anywhere else in the
+// UI. Deliberately does NOT bind a new key (like a bare "?") to open
+// this itself: Specter's whole surface is terminal input, and a bare
+// single-key binding would swallow a character real shells/programs
+// need to receive, the same reasoning already documented for why
+// Ctrl+B isn't used bare for the sidebar toggle below. Menu-only is
+// the safe choice here.
+// Cmd label on macOS, Ctrl everywhere else, matching the actual
+// runtime check (e.ctrlKey || e.metaKey) that treats them
+// interchangeably throughout this file.
+const SHORTCUT_MOD = navigator.platform.toLowerCase().includes('mac') ? 'Cmd' : 'Ctrl';
+const SHORTCUT_GROUPS: { title: string; items: [string, string][] }[] = [
+  {
+    title: 'Session',
+    items: [
+      [`${SHORTCUT_MOD}+Shift+X`, 'Disconnect active session'],
+      [`${SHORTCUT_MOD}+Shift+V`, 'Paste'],
+    ],
+  },
+  {
+    title: 'View',
+    items: [
+      [`${SHORTCUT_MOD}+Shift+B`, 'Toggle sidebar'],
+      [`${SHORTCUT_MOD}+= / ${SHORTCUT_MOD}+Plus`, 'Zoom in'],
+      [`${SHORTCUT_MOD}+-`, 'Zoom out'],
+      [`${SHORTCUT_MOD}+0`, 'Reset zoom'],
+      ['F11', 'Toggle fullscreen'],
+    ],
+  },
+  {
+    title: 'Panes',
+    items: [
+      [`${SHORTCUT_MOD}+Shift+D`, 'Split vertical / 4-pane grid'],
+      [`${SHORTCUT_MOD}+Shift+Enter`, 'Split horizontal / 4-pane grid'],
+      [`${SHORTCUT_MOD}+Shift+W`, 'Close active pane'],
+      ['Alt+Arrow keys', 'Move focus between panes'],
+    ],
+  },
+  {
+    title: 'Disconnected session panel',
+    items: [
+      ['R', 'Reconnect'],
+      ['S', 'Save session output'],
+      ['Enter', 'Close pane'],
+    ],
+  },
+];
+
+function renderShortcutsDialog() {
+  const content = document.getElementById('shortcuts-content')!;
+  content.innerHTML = '';
+  for (const group of SHORTCUT_GROUPS) {
+    const groupEl = document.createElement('div');
+    groupEl.className = 'shortcut-group';
+    const titleEl = document.createElement('div');
+    titleEl.className = 'shortcut-group-title';
+    titleEl.textContent = group.title;
+    groupEl.appendChild(titleEl);
+    for (const [keys, label] of group.items) {
+      const row = document.createElement('div');
+      row.className = 'shortcut-row';
+      const labelEl = document.createElement('span');
+      labelEl.textContent = label;
+      const keysEl = document.createElement('span');
+      keysEl.className = 'shortcut-keys';
+      keysEl.textContent = keys;
+      row.appendChild(labelEl);
+      row.appendChild(keysEl);
+      groupEl.appendChild(row);
+    }
+    content.appendChild(groupEl);
+  }
+}
+
+function openShortcutsDialog() {
+  renderShortcutsDialog();
+  document.getElementById('shortcuts-overlay')!.classList.add('open');
+}
+function closeShortcutsDialog() {
+  document.getElementById('shortcuts-overlay')!.classList.remove('open');
+}
+document.getElementById('menu-keyboard-shortcuts')!.addEventListener('click', () => {
+  closeAllMenus();
+  openShortcutsDialog();
+});
+document.getElementById('shortcuts-close')!.addEventListener('click', closeShortcutsDialog);
+document.getElementById('shortcuts-overlay')!.addEventListener('click', (e) => {
+  if (e.target === document.getElementById('shortcuts-overlay')) closeShortcutsDialog();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.getElementById('shortcuts-overlay')!.classList.contains('open')) {
+    closeShortcutsDialog();
+  }
+});
+
 document.getElementById('sidebar-collapse-btn')!.addEventListener('click', toggleSidebar);
 document.getElementById('sidebar-expand-btn')!.addEventListener('click', toggleSidebar);
 

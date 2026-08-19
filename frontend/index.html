@@ -188,6 +188,17 @@
     #session-editor-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 2000; }
     #session-editor-overlay.open { display: flex; }
     #session-editor { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; width: 340px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+    #shortcuts-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 2000; }
+    #shortcuts-overlay.open { display: flex; }
+    #shortcuts-dialog { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; width: 420px; max-height: 80vh; overflow-y: auto; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+    #shortcuts-dialog .picker-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px; }
+    #shortcuts-dialog .picker-header .close { cursor: pointer; opacity: 0.6; }
+    #shortcuts-dialog .picker-header .close:hover { opacity: 1; }
+    #shortcuts-dialog .shortcut-group { padding: 8px 16px; }
+    #shortcuts-dialog .shortcut-group-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); padding: 8px 0 4px; }
+    #shortcuts-dialog .shortcut-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 13px; }
+    #shortcuts-dialog .shortcut-keys { font-family: Menlo, Consolas, monospace; font-size: 12px; color: var(--text-dim); background: var(--bg-input); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
+    #shortcuts-dialog .shortcut-note { padding: 8px 16px 14px; font-size: 11px; color: var(--text-dim); border-top: 1px solid var(--border); }
     #session-editor .picker-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px; }
     #session-editor .picker-header .close { cursor: pointer; opacity: 0.6; }
     #session-editor .picker-header .close:hover { opacity: 1; }
@@ -270,6 +281,8 @@
         <div class="item" id="menu-layout-2h">Split Horizontal (2) <span style="opacity:0.5;font-size:11px;">Ctrl+Shift+Enter</span></div>
         <div class="item" id="menu-layout-4">4-Pane Grid</div>
         <div class="item" id="menu-toggle-fullscreen">Fullscreen <span style="opacity:0.5;font-size:11px;">F11</span></div>
+        <div class="separator"></div>
+        <div class="item" id="menu-keyboard-shortcuts">Keyboard Shortcuts…</div>
       </div>
     </div>
     <div class="menu-item" data-menu="tools">Tools
@@ -518,6 +531,16 @@
         <button id="se-cancel" type="button" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);">Cancel</button>
         <button id="se-save" type="button">Save</button>
       </div>
+    </div>
+  </div>
+  <div id="shortcuts-overlay">
+    <div id="shortcuts-dialog">
+      <div class="picker-header">
+        <strong>Keyboard shortcuts</strong>
+        <span class="close" id="shortcuts-close">✕</span>
+      </div>
+      <div id="shortcuts-content"></div>
+      <div class="shortcut-note">Not yet rebindable, this is a reference only.</div>
     </div>
   </div>
   <div id="statusbar">Specter</div>
