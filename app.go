@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +13,7 @@ import (
 	"strings"
 
 	"specter/backend/config"
+	"specter/backend/idgen"
 	"specter/backend/pty"
 	"specter/backend/serialclient"
 	"specter/backend/sftpclient"
@@ -67,7 +66,7 @@ type SessionClosedEvent struct {
 // Output streams to the frontend via the "local:data:<id>" event, matching
 // the "ssh:data:<id>" pattern already used for SSH sessions.
 func (a *App) StartLocalTerminal(shell string, dir string) (string, error) {
-	id := newID()
+	id := idgen.New()
 	lt, err := pty.New(func(data []byte) {
 		runtime.EventsEmit(a.ctx, "local:data:"+id, string(data))
 	}, shell, dir)
@@ -109,7 +108,7 @@ func (a *App) CloseLocalTerminal(id string) error {
 // control) and returns a session ID, following the same one-per-tab
 // pattern as StartLocalTerminal.
 func (a *App) ConnectSerial(portName string, baud int) (string, error) {
-	id := newID()
+	id := idgen.New()
 	sc, err := serialclient.Open(portName, baud, func(data []byte) {
 		runtime.EventsEmit(a.ctx, "serial:data:"+id, string(data))
 	}, func(reason serialclient.CloseReason) {
@@ -412,26 +411,17 @@ func (a *App) ListSessions() ([]config.SessionProfile, error) {
 	return config.LoadSessions()
 }
 
+func sessionID(s config.SessionProfile) string { return s.ID }
+
 func (a *App) SaveSession(profile config.SessionProfile) error {
 	sessions, err := config.LoadSessions()
 	if err != nil {
 		return err
 	}
 	if profile.ID == "" {
-		profile.ID = newID()
+		profile.ID = idgen.New()
 	}
-	replaced := false
-	for i, s := range sessions {
-		if s.ID == profile.ID {
-			sessions[i] = profile
-			replaced = true
-			break
-		}
-	}
-	if !replaced {
-		sessions = append(sessions, profile)
-	}
-	return config.SaveSessions(sessions)
+	return config.SaveSessions(config.UpsertByID(sessions, profile, sessionID))
 }
 
 func (a *App) DeleteSession(id string) error {
@@ -439,13 +429,7 @@ func (a *App) DeleteSession(id string) error {
 	if err != nil {
 		return err
 	}
-	kept := sessions[:0]
-	for _, s := range sessions {
-		if s.ID != id {
-			kept = append(kept, s)
-		}
-	}
-	return config.SaveSessions(kept)
+	return config.SaveSessions(config.RemoveByID(sessions, id, sessionID))
 }
 
 // --- Local shell profiles (SPE-102) ---
@@ -454,26 +438,17 @@ func (a *App) ListLocalShellProfiles() ([]config.LocalShellProfile, error) {
 	return config.LoadLocalShellProfiles()
 }
 
+func localShellProfileID(p config.LocalShellProfile) string { return p.ID }
+
 func (a *App) SaveLocalShellProfile(profile config.LocalShellProfile) error {
 	profiles, err := config.LoadLocalShellProfiles()
 	if err != nil {
 		return err
 	}
 	if profile.ID == "" {
-		profile.ID = newID()
+		profile.ID = idgen.New()
 	}
-	replaced := false
-	for i, p := range profiles {
-		if p.ID == profile.ID {
-			profiles[i] = profile
-			replaced = true
-			break
-		}
-	}
-	if !replaced {
-		profiles = append(profiles, profile)
-	}
-	return config.SaveLocalShellProfiles(profiles)
+	return config.SaveLocalShellProfiles(config.UpsertByID(profiles, profile, localShellProfileID))
 }
 
 func (a *App) DeleteLocalShellProfile(id string) error {
@@ -481,13 +456,7 @@ func (a *App) DeleteLocalShellProfile(id string) error {
 	if err != nil {
 		return err
 	}
-	kept := profiles[:0]
-	for _, p := range profiles {
-		if p.ID != id {
-			kept = append(kept, p)
-		}
-	}
-	return config.SaveLocalShellProfiles(kept)
+	return config.SaveLocalShellProfiles(config.RemoveByID(profiles, id, localShellProfileID))
 }
 
 // --- Session groups (folders) ---
@@ -496,6 +465,8 @@ func (a *App) ListGroups() ([]config.SessionGroup, error) {
 	return config.LoadGroups()
 }
 
+func groupID(g config.SessionGroup) string { return g.ID }
+
 // SaveGroup creates a new group, or updates one with a matching ID.
 func (a *App) SaveGroup(group config.SessionGroup) error {
 	groups, err := config.LoadGroups()
@@ -503,20 +474,9 @@ func (a *App) SaveGroup(group config.SessionGroup) error {
 		return err
 	}
 	if group.ID == "" {
-		group.ID = newID()
+		group.ID = idgen.New()
 	}
-	replaced := false
-	for i, g := range groups {
-		if g.ID == group.ID {
-			groups[i] = group
-			replaced = true
-			break
-		}
-	}
-	if !replaced {
-		groups = append(groups, group)
-	}
-	return config.SaveGroups(groups)
+	return config.SaveGroups(config.UpsertByID(groups, group, groupID))
 }
 
 // DeleteGroup removes a group and ungroups any sessions inside it
@@ -526,13 +486,7 @@ func (a *App) DeleteGroup(id string) error {
 	if err != nil {
 		return err
 	}
-	kept := groups[:0]
-	for _, g := range groups {
-		if g.ID != id {
-			kept = append(kept, g)
-		}
-	}
-	if err := config.SaveGroups(kept); err != nil {
+	if err := config.SaveGroups(config.RemoveByID(groups, id, groupID)); err != nil {
 		return err
 	}
 
@@ -551,12 +505,6 @@ func (a *App) DeleteGroup(id string) error {
 		return config.SaveSessions(sessions)
 	}
 	return nil
-}
-
-func newID() string {
-	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
 }
 
 func (a *App) WriteSSH(id string, data string) error {

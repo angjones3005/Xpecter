@@ -1,8 +1,6 @@
 package config
 
 import (
-	"encoding/json"
-	"os"
 	"path/filepath"
 )
 
@@ -41,18 +39,7 @@ func LoadLocalShellProfiles() ([]LocalShellProfile, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return []LocalShellProfile{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var profiles []LocalShellProfile
-	if err := json.Unmarshal(data, &profiles); err != nil {
-		return nil, err
-	}
-	return profiles, nil
+	return loadJSON(path, []LocalShellProfile{})
 }
 
 func SaveLocalShellProfiles(profiles []LocalShellProfile) error {
@@ -60,9 +47,5 @@ func SaveLocalShellProfiles(profiles []LocalShellProfile) error {
 	if err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(profiles, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o600)
+	return saveJSON(path, profiles)
 }

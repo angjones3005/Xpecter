@@ -4,8 +4,6 @@
 package sshclient
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +17,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
+
+	"specter/backend/idgen"
 )
 
 var ErrPassphraseRequired = errors.New("private key is encrypted, passphrase required")
@@ -367,7 +367,7 @@ func Dial(cfg Config) (*Session, error) {
 		}
 	}
 
-	sess := &Session{id: newID(), client: client, usedLegacyCompat: usedLegacyCompat}
+	sess := &Session{id: idgen.New(), client: client, usedLegacyCompat: usedLegacyCompat}
 	if !cfg.DisableKeepalive {
 		go sess.keepaliveLoop()
 	}
@@ -482,10 +482,4 @@ func (s *Session) Close() error {
 		_ = s.sess.Close()
 	}
 	return s.client.Close()
-}
-
-func newID() string {
-	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
 }

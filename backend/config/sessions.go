@@ -9,7 +9,6 @@
 package config
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 )
@@ -76,18 +75,7 @@ func LoadSessions() ([]SessionProfile, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return []SessionProfile{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var sessions []SessionProfile
-	if err := json.Unmarshal(data, &sessions); err != nil {
-		return nil, err
-	}
-	return sessions, nil
+	return loadJSON(path, []SessionProfile{})
 }
 
 func SaveSessions(sessions []SessionProfile) error {
@@ -95,11 +83,7 @@ func SaveSessions(sessions []SessionProfile) error {
 	if err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(sessions, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o600)
+	return saveJSON(path, sessions)
 }
 
 func LoadGroups() ([]SessionGroup, error) {
@@ -107,18 +91,7 @@ func LoadGroups() ([]SessionGroup, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return []SessionGroup{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var groups []SessionGroup
-	if err := json.Unmarshal(data, &groups); err != nil {
-		return nil, err
-	}
-	return groups, nil
+	return loadJSON(path, []SessionGroup{})
 }
 
 func SaveGroups(groups []SessionGroup) error {
@@ -126,9 +99,5 @@ func SaveGroups(groups []SessionGroup) error {
 	if err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(groups, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o600)
+	return saveJSON(path, groups)
 }
