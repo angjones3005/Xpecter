@@ -31,6 +31,8 @@ export function GetPlatform():Promise<string>;
 
 export function GetSettings():Promise<config.Settings>;
 
+export function GetStartupDir():Promise<string>;
+
 export function GetVersion():Promise<string>;
 
 export function ListGroups():Promise<Array<config.SessionGroup>>;

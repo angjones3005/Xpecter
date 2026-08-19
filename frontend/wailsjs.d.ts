@@ -128,6 +128,7 @@ export interface AppBindings {
   GetClipboardText(): Promise<string>;
   GetOSUsername(): Promise<string>;
   GetPlatform(): Promise<string>;
+  GetStartupDir(): Promise<string>;
   ConnectSerial(portName: string, baud: number): Promise<string>;
   WriteSerial(id: string, data: string): Promise<void>;
   CloseSerial(id: string): Promise<void>;

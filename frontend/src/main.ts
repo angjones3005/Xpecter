@@ -2688,7 +2688,8 @@ authRadios.forEach((radio) => {
   });
 });
 
-// --- Init: start with one pending tab ---
+// --- Init: start with one pending tab, or a local shell rooted at the
+// launch directory (SPE-86: Windows Explorer's "Open in Specter") ---
 document.getElementById('app')!.classList.add('editor-collapsed');
 document.getElementById('editor-expand-btn')!.style.display = 'flex';
 let remoteFilesCollapsed = false;
@@ -2701,6 +2702,17 @@ document.getElementById('remote-files-label')!.textContent = '\u25be Remote file
 
 const initialTab = createPendingTab();
 switchToTab(initialTab.id);
+// GetStartupDir() resolves near-instantly (it's a field read, no real
+// I/O), but is still async over the Wails bridge, so the empty pending
+// tab above renders first either way and this just fills it in a beat
+// later. Folder name alone as the tab label (not the full path), same
+// brevity as every other tab label in this app.
+App.GetStartupDir().then((dir) => {
+  if (dir) {
+    const label = dir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || dir;
+    startLocalShellInActiveTab('', label, dir);
+  }
+});
 document.getElementById('session-search')!.addEventListener('input', (e) => {
   sessionSearchQuery = (e.target as HTMLInputElement).value;
   renderSessionList();

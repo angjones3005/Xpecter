@@ -58,6 +58,10 @@ export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
 }
 
+export function GetStartupDir() {
+  return window['go']['main']['App']['GetStartupDir']();
+}
+
 export function GetVersion() {
   return window['go']['main']['App']['GetVersion']();
 }

@@ -27,13 +27,19 @@ type App struct {
 	sessions map[string]*sshclient.Session
 	locals   map[string]*pty.LocalTerminal
 	serials  map[string]*serialclient.Session
+	// startupDir (SPE-86): a directory passed on the command line at
+	// launch, from Windows Explorer's "Open in Specter" context menu.
+	// Read once by the frontend via GetStartupDir() during its own
+	// startup sequence, empty when Specter was launched normally.
+	startupDir string
 }
 
-func NewApp() *App {
+func NewApp(startupDir string) *App {
 	return &App{
-		sessions: make(map[string]*sshclient.Session),
-		locals:   make(map[string]*pty.LocalTerminal),
-		serials:  make(map[string]*serialclient.Session),
+		sessions:   make(map[string]*sshclient.Session),
+		locals:     make(map[string]*pty.LocalTerminal),
+		serials:    make(map[string]*serialclient.Session),
+		startupDir: startupDir,
 	}
 }
 
@@ -276,6 +282,16 @@ func (a *App) TrustHostDespiteChange(host string) error {
 // frontend Tools menu to show Command Prompt/PowerShell only on Windows.
 func (a *App) GetPlatform() string {
 	return runtime.Environment(a.ctx).Platform
+}
+
+// GetStartupDir returns the directory Specter was launched with (SPE-86,
+// Windows Explorer's "Open in Specter" context menu), or "" for a normal
+// launch. The frontend calls this once during its own startup sequence
+// and opens a local shell tab rooted there when non-empty. Consumed
+// exactly once per launch; the value doesn't change during the session,
+// so there's no corresponding "clear" call needed.
+func (a *App) GetStartupDir() string {
+	return a.startupDir
 }
 
 // GetClipboardText reads the OS clipboard via Wails' native runtime,

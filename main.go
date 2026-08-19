@@ -2,6 +2,7 @@ package main
 
 import (
 	"embed"
+	"os"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -11,8 +12,25 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+// startupDirFromArgs looks for a directory path among the launch
+// arguments (SPE-86): Windows Explorer's "Open in Specter" context
+// menu invokes the exe as `specter.exe "C:\the\clicked\folder"`, one
+// quoted path argument, no flags. Checked against the real filesystem
+// (os.Stat + IsDir) rather than assumed, so a future flag/argument
+// added for something else doesn't get misread as a directory to open.
+// Returns "" if no argument is a real, existing directory.
+func startupDirFromArgs(args []string) string {
+	for _, arg := range args {
+		info, err := os.Stat(arg)
+		if err == nil && info.IsDir() {
+			return arg
+		}
+	}
+	return ""
+}
+
 func main() {
-	app := NewApp()
+	app := NewApp(startupDirFromArgs(os.Args[1:]))
 
 	err := wails.Run(&options.App{
 		Title:  "Specter",
