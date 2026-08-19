@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -521,6 +522,70 @@ func (a *App) DeleteGroup(id string) error {
 		return config.SaveSessions(sessions)
 	}
 	return nil
+}
+
+// --- Config import/export (SPE-93) ---
+
+// ExportConfigFile prompts for a destination and writes the current
+// Settings, Sessions, Groups, and LocalShellProfiles to it as a single
+// portable JSON file (see config.ExportBundle for exactly what's
+// included, notably no passwords or known_hosts). Returns "" (no
+// error) if the user cancels the dialog.
+func (a *App) ExportConfigFile() (string, error) {
+	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "Export Specter Configuration",
+		DefaultFilename: "specter-config.json",
+	})
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", nil
+	}
+	bundle, err := config.ExportBundle()
+	if err != nil {
+		return "", err
+	}
+	data, err := json.MarshalIndent(bundle, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// ImportConfigFile prompts for a previously exported file and applies
+// it (see config.ImportBundle for merge semantics: Settings is
+// replaced outright, Sessions/Groups/LocalShellProfiles are merged in
+// alongside whatever's already here). Returns "" (no error) if the
+// user cancels the dialog.
+func (a *App) ImportConfigFile() (string, error) {
+	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Import Specter Configuration",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "Specter Config (*.json)", Pattern: "*.json"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var bundle config.ConfigBundle
+	if err := json.Unmarshal(data, &bundle); err != nil {
+		return "", fmt.Errorf("not a valid Specter config file: %w", err)
+	}
+	if err := config.ImportBundle(bundle); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func (a *App) WriteSSH(id string, data string) error {

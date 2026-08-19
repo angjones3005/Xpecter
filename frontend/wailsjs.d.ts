@@ -129,6 +129,8 @@ export interface AppBindings {
   GetOSUsername(): Promise<string>;
   GetPlatform(): Promise<string>;
   GetStartupDir(): Promise<string>;
+  ExportConfigFile(): Promise<string>;
+  ImportConfigFile(): Promise<string>;
   ConnectSerial(portName: string, baud: number): Promise<string>;
   WriteSerial(id: string, data: string): Promise<void>;
   CloseSerial(id: string): Promise<void>;

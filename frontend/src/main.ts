@@ -3363,6 +3363,40 @@ document.addEventListener('keydown', (e) => {
 document.getElementById('sidebar-collapse-btn')!.addEventListener('click', toggleSidebar);
 document.getElementById('sidebar-expand-btn')!.addEventListener('click', toggleSidebar);
 
+// --- Config import/export (SPE-93) ---
+document.getElementById('menu-export-config')!.addEventListener('click', async () => {
+  closeAllMenus();
+  try {
+    const path = await App.ExportConfigFile();
+    if (path) alert(`Exported configuration to:\n${path}`);
+  } catch (err) {
+    alert(`Export failed: ${err}`);
+  }
+});
+document.getElementById('menu-import-config')!.addEventListener('click', async () => {
+  closeAllMenus();
+  // Settings (theme/font/wallpaper/etc.) gets replaced outright by an
+  // import, unlike sessions/groups/local shell profiles which merge in
+  // alongside what's already here (see config.ImportBundle), so this
+  // is the one part of an import that can actually change something
+  // the person didn't expect, worth confirming before it happens.
+  if (!confirm('Import configuration? Saved sessions, folders, and local shell profiles will be merged in alongside your existing ones. Appearance settings (theme, font, wallpaper) will be replaced with the imported values.')) {
+    return;
+  }
+  try {
+    const path = await App.ImportConfigFile();
+    if (!path) return;
+    await Promise.all([
+      loadSettingsAndApply(),
+      renderSessionList(),
+      renderLocalShellProfilesMenu(),
+    ]);
+    alert(`Imported configuration from:\n${path}`);
+  } catch (err) {
+    alert(`Import failed: ${err}`);
+  }
+});
+
 // Tools menu: platform-aware, hide Command Prompt/PowerShell on non-Windows
 App.GetPlatform().then((platform) => {
   if (platform !== 'windows') {

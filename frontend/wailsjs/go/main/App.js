@@ -42,6 +42,10 @@ export function DownloadAndInstallUpdate(arg1) {
   return window['go']['main']['App']['DownloadAndInstallUpdate'](arg1);
 }
 
+export function ExportConfigFile() {
+  return window['go']['main']['App']['ExportConfigFile']();
+}
+
 export function GetClipboardText() {
   return window['go']['main']['App']['GetClipboardText']();
 }
@@ -64,6 +68,10 @@ export function GetStartupDir() {
 
 export function GetVersion() {
   return window['go']['main']['App']['GetVersion']();
+}
+
+export function ImportConfigFile() {
+  return window['go']['main']['App']['ImportConfigFile']();
 }
 
 export function ListGroups() {

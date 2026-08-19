@@ -23,6 +23,8 @@ export function DeleteSession(arg1:string):Promise<void>;
 
 export function DownloadAndInstallUpdate(arg1:string):Promise<void>;
 
+export function ExportConfigFile():Promise<string>;
+
 export function GetClipboardText():Promise<string>;
 
 export function GetOSUsername():Promise<string>;
@@ -34,6 +36,8 @@ export function GetSettings():Promise<config.Settings>;
 export function GetStartupDir():Promise<string>;
 
 export function GetVersion():Promise<string>;
+
+export function ImportConfigFile():Promise<string>;
 
 export function ListGroups():Promise<Array<config.SessionGroup>>;
 
