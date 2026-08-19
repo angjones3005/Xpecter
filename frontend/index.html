@@ -59,10 +59,8 @@
     #titlebar-controls button#win-close:hover { background: #e5484d; color: #ffffff; }
     #app {
       flex: 1; min-height: 0; display: grid;
-      /* SPE-96: --sw/--ew/--rsw/--rew as variables (rather than
-         hardcoding pixel values in every collapse-state combination
-         below) means the right-side variant only needs to reorder the
-         template, not re-derive collapse logic for a second time.
+      /* --sw/--ew/--rsw/--rew as variables (rather than hardcoding
+         pixel values in every collapse-state combination below).
          Resize-handle tracks (--rsw/--rew) collapse to 0px alongside
          their pane, not fixed at 5px always, matching the original
          explicit combined rule this replaces (0px 0px 1fr 0px 0px when
@@ -73,36 +71,26 @@
       --rsw: 5px;
       --rew: 5px;
       grid-template-columns: var(--sw) var(--rsw) 1fr var(--rew) var(--ew);
+      grid-template-rows: 1fr;
     }
     #statusbar { flex: 0 0 auto; height: 22px; background: var(--bg-alt); border-top: 1px solid var(--border); display: flex; align-items: center; padding: 0 10px; font-size: 11px; color: var(--text-dim); }
     #app.sidebar-collapsed { --sw: 0px; --rsw: 0px; }
     #app.sidebar-collapsed #sidebar, #app.sidebar-collapsed #resize-sidebar { display: none; }
     .resize-handle { cursor: col-resize; background: transparent; }
-    #resize-sidebar { grid-column: 2; }
-    #resize-editor { grid-column: 4; }
+    #resize-sidebar { grid-column: 2; grid-row: 1; }
+    #resize-editor { grid-column: 4; grid-row: 1; }
     .resize-handle:hover, .resize-handle.dragging { background: var(--accent); }
-    #sidebar { border-right: 1px solid var(--border); overflow-y: auto; padding: 8px; font-size: 13px; grid-column: 1; }
+    #sidebar { border-right: 1px solid var(--border); overflow-y: auto; padding: 8px; font-size: 13px; grid-column: 1; grid-row: 1; }
     #sidebar .entry { padding: 4px 6px; cursor: pointer; border-radius: 4px; }
     #sidebar .entry:hover { background: var(--hover); }
     .session-entry { padding: 4px 6px; cursor: pointer; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
     .session-entry:hover { background: var(--hover); }
     .session-entry .delete-btn { opacity: 0.5; font-size: 11px; }
     .session-entry .delete-btn:hover { opacity: 1; color: var(--danger); }
-    #terminal-pane { border-right: 1px solid var(--border); min-width: 0; display: flex; flex-direction: column; overflow: hidden; grid-column: 3; }
-    #editor-pane { min-width: 0; display: flex; flex-direction: column; overflow: hidden; grid-column: 5; }
+    #terminal-pane { border-right: 1px solid var(--border); min-width: 0; display: flex; flex-direction: column; overflow: hidden; grid-column: 3; grid-row: 1; }
+    #editor-pane { min-width: 0; display: flex; flex-direction: column; overflow: hidden; grid-column: 5; grid-row: 1; }
     #app.editor-collapsed { --ew: 0px; --rew: 0px; }
     #app.editor-collapsed #editor-pane, #app.editor-collapsed #resize-editor { display: none; }
-    /* SPE-96: sidebar on the right instead of the left, a pure
-       left-right mirror of the default order (editor and sidebar swap
-       ends, terminal-pane stays in the middle either way). Explicit
-       grid-column on every item, same discipline as the earlier fix for
-       the collapse-related layout bug, not implicit auto-placement. */
-    #app.sidebar-right { grid-template-columns: var(--ew) var(--rew) 1fr var(--rsw) var(--sw); }
-    #app.sidebar-right #editor-pane { grid-column: 1; }
-    #app.sidebar-right #resize-editor { grid-column: 2; }
-    #app.sidebar-right #resize-sidebar { grid-column: 4; }
-    #app.sidebar-right #sidebar { grid-column: 5; border-right: none; border-left: 1px solid var(--border); }
-    #app.sidebar-right #terminal-pane { border-right: none; border-left: 1px solid var(--border); }
     #terminal { flex: 1; min-height: 0; padding: 4px; box-sizing: border-box; }
     /* SPE-92: split-pane terminal layouts. A 1-cell grid (the default,
        tab.layout === 'single') looks identical to a plain block
@@ -296,7 +284,6 @@
     <div class="menu-item" data-menu="settings">Settings
       <div class="menu-dropdown" id="menu-settings">
         <div class="item"><label>Theme <select id="theme-select"><option value="dark">Dark</option><option value="light">Light</option></select></label></div>
-        <div class="item"><label>Sidebar position <select id="sidebar-position-select"><option value="left">Left</option><option value="right">Right</option></select></label></div>
         <div class="item"><label>Terminal colors
           <select id="colorscheme-select">
             <option value="dark">Dark (default)</option>

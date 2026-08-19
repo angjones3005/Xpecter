@@ -2714,39 +2714,6 @@ themeSelect.addEventListener('change', () => {
   applyTheme(themeSelect.value as ThemeName);
 });
 
-// SPE-96: applied synchronously from localStorage on startup (like
-// theme above), rather than waiting on the async GetSettings() round
-// trip, no reason a same-machine layout preference needs an IPC call.
-function currentSidebarPosition(): 'left' | 'right' {
-  return localStorage.getItem('specter-sidebar-position') === 'right' ? 'right' : 'left';
-}
-// Deliberately minimal, safe to call synchronously at startup: just the
-// CSS class + localStorage, nothing that touches currentColumnTemplate
-// (a let declared much later in this file). Confirmed the hard way that
-// referencing a let before its declaration line has run throws a
-// temporal-dead-zone ReferenceError that silently halts ALL script
-// execution after it, every button below this point stopped working
-// entirely, not just this feature.
-function applySidebarPosition(pos: 'left' | 'right') {
-  document.getElementById('app')!.classList.toggle('sidebar-right', pos === 'right');
-  localStorage.setItem('specter-sidebar-position', pos);
-}
-const sidebarPositionSelect = document.getElementById('sidebar-position-select') as HTMLSelectElement;
-sidebarPositionSelect.value = currentSidebarPosition();
-applySidebarPosition(currentSidebarPosition());
-sidebarPositionSelect.addEventListener('change', () => {
-  // The currentColumnTemplate reset (safe here: this only runs on user
-  // interaction, long after the whole script, including that later let
-  // declaration, has finished loading) stays deferred to this handler,
-  // not the startup call above, same pattern toggleSidebar/
-  // toggleEditorPane already use for the identical reason.
-  const app = document.getElementById('app')!;
-  app.style.gridTemplateColumns = '';
-  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
-  applySidebarPosition(sidebarPositionSelect.value as 'left' | 'right');
-  refitActiveTerminal();
-});
-
 // SPE-98: one-click toggle in the title bar, alongside applyTheme,
 // keeping the Settings dropdown in sync so neither path shows a stale
 // value if the other one was used most recently.
