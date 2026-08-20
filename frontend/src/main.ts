@@ -172,6 +172,20 @@ function refreshAllTerminalThemes() {
   }
 }
 
+function createWebglAddon(term: Terminal): WebglAddon | null {
+  try {
+    const webglAddon = new WebglAddon();
+    webglAddon.onContextLoss(() => {
+      webglAddon.dispose();
+    });
+    term.loadAddon(webglAddon);
+    return webglAddon;
+  } catch (error) {
+    console.warn('WebGL terminal renderer unavailable; using the default renderer.', error);
+    return null;
+  }
+}
+
 // SPE-77: zoom drives the same persisted appSettings.fontSize shown in
 // Settings, not a separate temporary zoom layer, confirmed choice.
 // Applies to every live tab (font size is global, not per-tab, same
@@ -267,7 +281,15 @@ function applyWallpaperToSession(session: Session) {
 
 function applyWallpaperVisual() {
   for (const tab of tabs.values()) {
-    for (const s of allSessions(tab)) applyWallpaperToSession(s);
+    for (const s of allSessions(tab)) {
+      if (appSettings.wallpaperDataUrl && s.webglAddon) {
+        s.webglAddon.dispose();
+        s.webglAddon = null;
+      } else if (!appSettings.wallpaperDataUrl && s.term && !s.webglAddon) {
+        s.webglAddon = createWebglAddon(s.term);
+      }
+      applyWallpaperToSession(s);
+    }
   }
   document.getElementById('wallpaper-opacity-row')!.style.display = appSettings.wallpaperPath ? 'flex' : 'none';
   document.getElementById('wallpaper-clear-row')!.style.display = appSettings.wallpaperPath ? 'flex' : 'none';
@@ -413,6 +435,7 @@ interface Session {
   status: TabStatus;
   term: Terminal | null;
   fitAddon: FitAddon | null;
+  webglAddon: WebglAddon | null;
   container: HTMLDivElement | null;
   // SPE-59: true while showing the "session stopped" panel after an
   // unexpected disconnect. Gates keyboard input away from the dead PTY
@@ -472,6 +495,7 @@ function createPendingTab(): Tab {
     status: 'disconnected',
     term: null,
     fitAddon: null,
+    webglAddon: null,
     container: null,
     stopped: false,
     overlay: null,
@@ -690,6 +714,7 @@ function createEmptyPane(tab: Tab): Pane {
     status: 'disconnected',
     term: null,
     fitAddon: null,
+    webglAddon: null,
     container: null,
     stopped: false,
     overlay: null,
@@ -986,6 +1011,7 @@ function createTerminalForSession(session: Session, tab: Tab) {
   const container = termHost;
 
   const term = new Terminal({
+    allowTransparency: true,
     fontFamily: fontStack(appSettings.fontFamily || FONT_OPTIONS[0].value),
     fontSize: appSettings.fontSize || FONT_SIZE_DEFAULT,
     theme: activeXtermTheme(),
@@ -993,15 +1019,7 @@ function createTerminalForSession(session: Session, tab: Tab) {
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
   term.open(container);
-  try {
-    const webglAddon = new WebglAddon();
-    webglAddon.onContextLoss(() => {
-      webglAddon.dispose();
-    });
-    term.loadAddon(webglAddon);
-  } catch (error) {
-    console.warn('WebGL terminal renderer unavailable; using the default renderer.', error);
-  }
+  const webglAddon = wallpaperActive() ? null : createWebglAddon(term);
   fitAddon.fit();
 
   // OSC 52: let remote programs (xclip, pbcopy, tmux, vim, etc.) sync
@@ -1130,6 +1148,7 @@ function createTerminalForSession(session: Session, tab: Tab) {
 
   session.term = term;
   session.fitAddon = fitAddon;
+  session.webglAddon = webglAddon;
   session.container = wrapper;
   applyWallpaperToSession(session);
   setupCustomScrollbar(session);
