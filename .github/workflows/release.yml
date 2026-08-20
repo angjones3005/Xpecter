@@ -52,7 +52,9 @@ jobs:
               exit 0
             fi
             echo "go install failed (attempt $attempt/3), retrying..."
-            sleep 5
+            if [ "$attempt" -lt 3 ]; then
+              sleep 5
+            fi
           done
           echo "go install failed after 3 attempts"
           exit 1
