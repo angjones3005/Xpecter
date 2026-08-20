@@ -51,6 +51,8 @@ export function ListSerialPorts():Promise<Array<string>>;
 
 export function ListSessions():Promise<Array<config.SessionProfile>>;
 
+export function OpenRemoteFile(arg1:string,arg2:string):Promise<void>;
+
 export function ReadImageFile(arg1:string):Promise<string>;
 
 export function ReadLocalFile(arg1:string):Promise<string>;

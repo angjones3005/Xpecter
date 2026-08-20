@@ -6,6 +6,7 @@ package sftpclient
 import (
 	"bytes"
 	"io"
+	"os"
 	"path"
 
 	"github.com/pkg/sftp"
@@ -65,6 +66,33 @@ func ReadFile(client *ssh.Client, filePath string) (string, error) {
 		return "", err
 	}
 	return buf.String(), nil
+}
+
+// DownloadFile copies a remote file to a caller-owned local path without
+// interpreting its contents as text. This is used for handing files to the
+// operating system's default application.
+func DownloadFile(client *ssh.Client, remotePath string, localPath string) error {
+	c, err := sftp.NewClient(client)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = c.Close() }()
+
+	src, err := c.Open(remotePath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = src.Close() }()
+
+	dst, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		_ = dst.Close()
+		return err
+	}
+	return dst.Close()
 }
 
 func WriteFile(client *ssh.Client, filePath string, content string) error {

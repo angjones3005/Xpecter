@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"specter/backend/config"
 	"specter/backend/idgen"
@@ -46,12 +47,31 @@ func NewApp(startupDir string) *App {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	cleanupStaleRemoteFiles()
 	// SPE-87: best-effort, fire-and-forget. A slow disk or a failed
 	// write should never delay or block app startup, and there's no
 	// user-visible feedback needed on success, it's a silent safety net.
 	go func() {
 		_ = config.BackupIfDue()
 	}()
+}
+
+func cleanupStaleRemoteFiles() {
+	entries, err := os.ReadDir(os.TempDir())
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-24 * time.Hour)
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "specter-remote-file-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(os.TempDir(), entry.Name()))
+	}
 }
 
 func (a *App) shutdown(ctx context.Context) {
@@ -668,6 +688,40 @@ func (a *App) ReadRemoteFile(id string, path string) (string, error) {
 		return "", fmt.Errorf("no such session: %s", id)
 	}
 	return sftpclient.ReadFile(sess.SSHClient(), path)
+}
+
+// OpenRemoteFile downloads a remote file to a private temporary directory
+// and opens it with the operating system's default application. The temp
+// copy remains available after Specter returns so the external application
+// can finish opening it.
+func (a *App) OpenRemoteFile(id string, remotePath string) error {
+	sess, ok := a.sessions[id]
+	if !ok {
+		return fmt.Errorf("no such session: %s", id)
+	}
+
+	tmpDir, err := os.MkdirTemp("", "specter-remote-file-*")
+	if err != nil {
+		return err
+	}
+	localPath := remoteTempFilePath(tmpDir, remotePath)
+	if err := sftpclient.DownloadFile(sess.SSHClient(), remotePath, localPath); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return err
+	}
+	if err := openExternalPath(localPath); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return err
+	}
+	return nil
+}
+
+func remoteTempFilePath(tmpDir, remotePath string) string {
+	name := filepath.Base(filepath.FromSlash(remotePath))
+	if name == "." || name == string(filepath.Separator) || name == "" {
+		name = "remote-file"
+	}
+	return filepath.Join(tmpDir, name)
 }
 
 func (a *App) WriteRemoteFile(id string, path string, content string) error {

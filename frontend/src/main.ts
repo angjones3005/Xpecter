@@ -160,16 +160,14 @@ function wallpaperActive(): boolean {
   return !!appSettings.wallpaperPath;
 }
 
-// The palette actually applied to xterm: the chosen preset, with its
-// background swapped for transparent whenever a wallpaper is active, so
-// xterm's own canvas rendering (which paints an opaque per-cell
-// background from this value) doesn't paint over the wallpaper image
-// sitting on the viewport underneath it. Text keeps the palette's
-// normal foreground/ANSI colors.
+// Wallpaper mode uses xterm's canvas renderer, whose transparent theme can
+// reveal the CSS image. WebGL owns an opaque canvas clear on WebView2, so it
+// remains reserved for sessions without wallpaper rather than fighting the
+// browser compositor.
 function activeXtermTheme(): Record<string, string> {
   const base = TERMINAL_COLOR_SCHEMES[currentColorScheme()];
   if (!wallpaperActive()) return base;
-  return { ...base, background: 'transparent' };
+  return { ...base, background: 'rgba(0, 0, 0, 0)' };
 }
 
 function refreshAllTerminalThemes() {
@@ -180,11 +178,12 @@ function refreshAllTerminalThemes() {
   }
 }
 
-function createWebglAddon(term: Terminal): WebglAddon | null {
+function createWebglAddon(term: Terminal, onContextLoss?: () => void): WebglAddon | null {
   try {
     const webglAddon = new WebglAddon();
     webglAddon.onContextLoss(() => {
       webglAddon.dispose();
+      onContextLoss?.();
     });
     term.loadAddon(webglAddon);
     return webglAddon;
@@ -219,9 +218,8 @@ function applyFontSize(size: number) {
   // SPE-78: editor shares the same font size setting as the terminal,
   // confirmed choice, not an independent editor-specific size.
   editor.updateOptions({ fontSize: clamped });
-  const slider = document.getElementById('zoom-slider') as HTMLInputElement;
-  slider.value = String(clamped);
-  document.getElementById('zoom-readout')!.textContent = `${clamped}px`;
+  const fontSizeSelect = document.getElementById('font-size-select') as HTMLSelectElement;
+  fontSizeSelect.value = String(clamped);
   App.SaveSettings(appSettings);
 }
 
@@ -250,22 +248,11 @@ function applyFont(fontId: string) {
   refitActiveTerminal();
 }
 
-// Renders the wallpaper as each terminal's own .xterm-viewport
-// background-image (a dark tint layered via linear-gradient in the same
-// background-image stack, alongside the actual photo) rather than a
-// separate absolutely-positioned div with a transparent viewport
-// underneath. The old approach required making .xterm-viewport's own
-// background-color fully transparent, which turned out to break its
-// native scrollbar entirely (mouse wheel AND direct thumb-drag both
-// stopped working, confirmed via testing on real hardware): a real
-// WebKit-family rendering quirk with transparent scrollable containers,
-// unrelated to the wallpaper image itself. This sidesteps it completely:
-// background-image always paints above background-color in CSS, so
-// xterm's own background-color never needs to be touched at all. As a
-// side effect, this also eliminates the earlier "wallpaper bleeds
-// through the landing screen" bug, there's no longer a floating div
-// that could leak, only per-tab viewports that only exist once a real
-// terminal is actually created.
+// Renders the wallpaper on each terminal's fixed host rather than the
+// scrollable .xterm-viewport. The viewport's scroll height changes when
+// the font size changes, which makes background-size: cover recompute its
+// scale and center position. The host stays fixed while terminal content
+// resizes, so the image remains visually anchored.
 function wallpaperBackgroundImage(): string {
   if (!appSettings.wallpaperDataUrl) return '';
   const opacity = appSettings.wallpaperOpacity ?? 0.15;
@@ -275,27 +262,54 @@ function wallpaperBackgroundImage(): string {
 
 function applyWallpaperToSession(session: Session) {
   if (!session.term?.element) return;
+  const termHost = session.term.element.parentElement as HTMLElement | null;
   const viewport = session.term.element.querySelector('.xterm-viewport') as HTMLElement | null;
-  if (!viewport) return;
+  const screen = session.term.element.querySelector('.xterm-screen') as HTMLElement | null;
+  if (!termHost || !viewport) return;
   const bg = wallpaperBackgroundImage();
   if (bg) {
-    viewport.style.backgroundImage = bg;
-    viewport.style.backgroundSize = 'cover';
-    viewport.style.backgroundPosition = 'center';
+    termHost.style.backgroundImage = bg;
+    termHost.style.backgroundSize = '100% 100%';
+    termHost.style.backgroundPosition = '0 0';
+    viewport.style.backgroundImage = '';
   } else {
+    termHost.style.backgroundImage = '';
     viewport.style.backgroundImage = '';
   }
+  viewport.style.backgroundColor = 'transparent';
+  if (screen) screen.style.backgroundColor = 'transparent';
+  session.term.element.style.backgroundColor = 'transparent';
+}
+
+function applyRendererMode(session: Session) {
+  if (!session.term) return;
+  const shouldUseWebgl = !wallpaperActive();
+  if (shouldUseWebgl && !session.webglAddon) {
+    session.webglAddon = createSessionWebglAddon(session);
+  } else if (!shouldUseWebgl && session.webglAddon) {
+    session.webglAddon.dispose();
+    session.webglAddon = null;
+  }
+}
+
+function createSessionWebglAddon(session: Session): WebglAddon | null {
+  if (!session.term) return null;
+  return createWebglAddon(session.term, () => {
+    session.webglAddon = null;
+    if (!wallpaperActive()) {
+      window.setTimeout(() => {
+        if (!wallpaperActive() && session.term && !session.webglAddon) {
+          session.webglAddon = createSessionWebglAddon(session);
+        }
+      }, 250);
+    }
+  });
 }
 
 function applyWallpaperVisual() {
   for (const tab of tabs.values()) {
     for (const s of allSessions(tab)) {
-      if (appSettings.wallpaperDataUrl && s.webglAddon) {
-        s.webglAddon.dispose();
-        s.webglAddon = null;
-      } else if (!appSettings.wallpaperDataUrl && s.term && !s.webglAddon) {
-        s.webglAddon = createWebglAddon(s.term);
-      }
+      applyRendererMode(s);
       applyWallpaperToSession(s);
     }
   }
@@ -341,10 +355,9 @@ async function loadSettingsAndApply() {
   const keepaliveToggle = document.getElementById('ssh-keepalive-toggle') as HTMLInputElement;
   keepaliveToggle.checked = !appSettings.sshKeepaliveDisabled;
 
-  const slider = document.getElementById('zoom-slider') as HTMLInputElement;
   const initialSize = appSettings.fontSize || FONT_SIZE_DEFAULT;
-  slider.value = String(initialSize);
-  document.getElementById('zoom-readout')!.textContent = `${initialSize}px`;
+  const fontSizeSelect = document.getElementById('font-size-select') as HTMLSelectElement;
+  fontSizeSelect.value = String(initialSize);
 
   // In case a tab was created before this async load resolved (race:
   // GetSettings is an IPC round-trip), reapply font to whatever's live.
@@ -444,6 +457,7 @@ interface Session {
   term: Terminal | null;
   fitAddon: FitAddon | null;
   webglAddon: WebglAddon | null;
+  disposeScrollbar: (() => void) | null;
   container: HTMLDivElement | null;
   // SPE-59: true while showing the "session stopped" panel after an
   // unexpected disconnect. Gates keyboard input away from the dead PTY
@@ -504,6 +518,7 @@ function createPendingTab(): Tab {
     term: null,
     fitAddon: null,
     webglAddon: null,
+    disposeScrollbar: null,
     container: null,
     stopped: false,
     overlay: null,
@@ -643,6 +658,10 @@ async function closeSessionBackend(s: Session) {
     await App.CloseSerial(s.backendId);
     runtime.EventsOff('serial:data:' + s.backendId, 'serial:closed:' + s.backendId);
   }
+  s.disposeScrollbar?.();
+  s.disposeScrollbar = null;
+  s.webglAddon?.dispose();
+  s.webglAddon = null;
   s.overlay?.remove();
   s.term?.dispose();
   s.container?.remove();
@@ -723,6 +742,7 @@ function createEmptyPane(tab: Tab): Pane {
     term: null,
     fitAddon: null,
     webglAddon: null,
+    disposeScrollbar: null,
     container: null,
     stopped: false,
     overlay: null,
@@ -965,6 +985,12 @@ function setupCustomScrollbar(session: Session) {
   });
 
   update();
+  session.disposeScrollbar = () => {
+    document.removeEventListener('mousemove', onMouseMove);
+    document.removeEventListener('mouseup', onMouseUp);
+    viewport?.removeEventListener('scroll', update);
+    track.remove();
+  };
 }
 
 // SPE-80: warn before sending clipboard content containing multiple
@@ -1027,7 +1053,7 @@ function createTerminalForSession(session: Session, tab: Tab) {
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
   term.open(container);
-  const webglAddon = wallpaperActive() ? null : createWebglAddon(term);
+  const webglAddon = wallpaperActive() ? null : createSessionWebglAddon(session);
   fitAddon.fit();
 
   // OSC 52: let remote programs (xclip, pbcopy, tmux, vim, etc.) sync
@@ -1157,6 +1183,7 @@ function createTerminalForSession(session: Session, tab: Tab) {
   session.term = term;
   session.fitAddon = fitAddon;
   session.webglAddon = webglAddon;
+  session.disposeScrollbar = null;
   session.container = wrapper;
   applyWallpaperToSession(session);
   setupCustomScrollbar(session);
@@ -1401,7 +1428,29 @@ async function refreshFileList(path = '.', sessionId?: string) {
     const div = document.createElement('div');
     div.className = 'entry';
     div.textContent = (e.isDir ? '\ud83d\udcc1 ' : '\ud83d\udcc4 ') + e.name;
-    div.onclick = () => (e.isDir ? refreshFileList(e.path, id) : openRemoteFile(id, e.path));
+    if (e.isDir) {
+      div.onclick = () => refreshFileList(e.path, id);
+    } else {
+      div.title = 'Open in Specter; Shift-click to open with the system app';
+      div.onauxclick = (event) => {
+        if (event.button === 1) {
+          void App.OpenRemoteFile(id, e.path).catch((err) => {
+            flashEditorStatus(`External open failed: ${err}`, true);
+          });
+        }
+      };
+      div.onclick = (event) => {
+        if (event instanceof MouseEvent && event.shiftKey) {
+          void App.OpenRemoteFile(id, e.path).catch((err) => {
+            flashEditorStatus(`External open failed: ${err}`, true);
+          });
+          return;
+        }
+        void openRemoteFile(id, e.path).catch((err) => {
+          flashEditorStatus(`Open failed: ${err}`, true);
+        });
+      };
+    }
     list.appendChild(div);
   }
 }
@@ -2696,12 +2745,9 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-document.getElementById('zoom-slider')!.addEventListener('input', (e) => {
-  applyFontSize(Number((e.target as HTMLInputElement).value));
+document.getElementById('font-size-select')!.addEventListener('change', (e) => {
+  applyFontSize(Number((e.target as HTMLSelectElement).value));
 });
-document.getElementById('zoom-in-btn')!.addEventListener('click', () => zoomBy(1));
-document.getElementById('zoom-out-btn')!.addEventListener('click', () => zoomBy(-1));
-document.getElementById('zoom-reset-btn')!.addEventListener('click', () => applyFontSize(FONT_SIZE_DEFAULT));
 
 document.addEventListener('keyup', checkCapsLock);
 

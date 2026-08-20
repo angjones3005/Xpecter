@@ -98,6 +98,10 @@ export function ListSessions() {
   return window['go']['main']['App']['ListSessions']();
 }
 
+export function OpenRemoteFile(arg1, arg2) {
+  return window['go']['main']['App']['OpenRemoteFile'](arg1, arg2);
+}
+
 export function ReadImageFile(arg1) {
   return window['go']['main']['App']['ReadImageFile'](arg1);
 }

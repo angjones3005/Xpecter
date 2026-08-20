@@ -153,6 +153,7 @@ export interface AppBindings {
   CloseSSH(id: string): Promise<void>;
   ListRemoteDir(id: string, path: string): Promise<RemoteFile[]>;
   ReadRemoteFile(id: string, path: string): Promise<string>;
+  OpenRemoteFile(id: string, path: string): Promise<void>;
   WriteRemoteFile(id: string, path: string, content: string): Promise<void>;
   UploadRemoteFile(id: string, path: string, base64Content: string): Promise<void>;
 }

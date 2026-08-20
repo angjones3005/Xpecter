@@ -103,7 +103,9 @@
     .pane-header-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .pane-header-close { opacity: 0.5; cursor: pointer; padding: 0 2px; }
     .pane-header-close:hover { opacity: 1; color: var(--danger); }
-    .pane-term-host { flex: 1; min-height: 0; }
+    .pane-term-host { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+    .term-wallpaper-layer { display: none; }
+    .term-instance .xterm, .term-instance .xterm-viewport, .term-instance .xterm-screen, .term-instance canvas { background: transparent !important; background-color: transparent !important; }
     .pane-landing { flex: 1; display: flex; align-items: center; justify-content: center; }
     .pane-landing-btn { padding: 8px 18px; font-size: 13px; }
     #editor { flex: 1; min-height: 0; }
@@ -334,6 +336,35 @@
             <option value="ubuntumono">Ubuntu Mono</option>
           </select>
         </label></div>
+        <div class="item"><label>Font size
+          <select id="font-size-select">
+            <option value="8">8px</option>
+            <option value="9">9px</option>
+            <option value="10">10px</option>
+            <option value="11">11px</option>
+            <option value="12">12px</option>
+            <option value="13">13px</option>
+            <option value="14">14px</option>
+            <option value="15">15px</option>
+            <option value="16">16px</option>
+            <option value="17">17px</option>
+            <option value="18">18px</option>
+            <option value="19">19px</option>
+            <option value="20">20px</option>
+            <option value="21">21px</option>
+            <option value="22">22px</option>
+            <option value="23">23px</option>
+            <option value="24">24px</option>
+            <option value="25">25px</option>
+            <option value="26">26px</option>
+            <option value="27">27px</option>
+            <option value="28">28px</option>
+            <option value="29">29px</option>
+            <option value="30">30px</option>
+            <option value="31">31px</option>
+            <option value="32">32px</option>
+          </select>
+        </label></div>
         <div class="separator"></div>
         <div class="item"><label>Wallpaper <button id="wallpaper-browse" type="button">Browse...</button></label></div>
         <div class="item" id="wallpaper-opacity-row" style="display:none;">
@@ -399,13 +430,6 @@
         <button id="new-session-btn" style="padding:8px 18px;font-size:13px;">+ New Session</button>
       </div>
       <div id="terminal" style="position:relative;"></div>
-      <div id="zoom-bar" style="display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:3px 12px;background:var(--bg-input);border-top:1px solid var(--border);font-size:11px;color:var(--text-dim);flex:0 0 auto;">
-        <span id="zoom-out-btn" title="Zoom out (Ctrl -)" style="cursor:pointer;user-select:none;padding:0 4px;">&#128269;&#8722;</span>
-        <input type="range" id="zoom-slider" min="8" max="32" step="1" value="13" style="width:120px;height:14px;" />
-        <span id="zoom-in-btn" title="Zoom in (Ctrl +)" style="cursor:pointer;user-select:none;padding:0 4px;">&#128269;&#43;</span>
-        <span id="zoom-readout" style="min-width:32px;">13px</span>
-        <span id="zoom-reset-btn" title="Reset (Ctrl 0)" style="cursor:pointer;user-select:none;opacity:0.7;margin-left:4px;">Reset</span>
-      </div>
     </div>
     <div class="resize-handle" id="resize-editor"></div>
     <div id="editor-pane">
