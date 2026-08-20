@@ -1217,8 +1217,9 @@ const editor = monaco.editor.create(document.getElementById('editor')!, {
 function toggleEditorPane() {
   const app = document.getElementById('app')!;
   app.style.gridTemplateColumns = '';
-  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
   const collapsed = app.classList.toggle('editor-collapsed');
+  app.style.setProperty('--ew', collapsed ? '0px' : (editorWidth ? `${editorWidth}px` : '1fr'));
+  app.style.setProperty('--rew', collapsed ? '0px' : '5px');
   document.getElementById('editor-expand-btn')!.style.display = collapsed ? 'flex' : 'none';
   refitActiveTerminal();
 }
@@ -1258,7 +1259,10 @@ function finishOpeningFile(path: string, content: string) {
   // file's actually open), opening one needs to explicitly restore it,
   // otherwise the content loads into Monaco invisibly behind a hidden
   // pane.
-  document.getElementById('app')!.classList.remove('editor-collapsed');
+  const app = document.getElementById('app')!;
+  app.classList.remove('editor-collapsed');
+  app.style.setProperty('--ew', editorWidth ? `${editorWidth}px` : '1fr');
+  app.style.setProperty('--rew', '5px');
   document.getElementById('editor-expand-btn')!.style.display = 'none';
   refitActiveTerminal();
   const ext = path.split('.').pop() ?? '';
@@ -3278,9 +3282,11 @@ document.getElementById('menu-new-folder')!.addEventListener('click', () => {
 
 // View menu
 function toggleSidebar() {
-  document.getElementById('app')!.style.gridTemplateColumns = '';
-  currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
-  const collapsed = document.getElementById('app')!.classList.toggle('sidebar-collapsed');
+  const app = document.getElementById('app')!;
+  app.style.gridTemplateColumns = '';
+  const collapsed = app.classList.toggle('sidebar-collapsed');
+  app.style.setProperty('--sw', collapsed ? '0px' : (sidebarWidth ? `${sidebarWidth}px` : '220px'));
+  app.style.setProperty('--rsw', collapsed ? '0px' : '5px');
   document.getElementById('sidebar-expand-btn')!.style.display = collapsed ? 'flex' : 'none';
   refitActiveTerminal();
 }
@@ -3569,7 +3575,10 @@ document.getElementById('menu-tool-powershell')!.addEventListener('click', () =>
 });
 document.getElementById('menu-tool-text-editor')!.addEventListener('click', () => {
   closeAllMenus();
-  document.getElementById('app')!.classList.remove('editor-collapsed');
+  const app = document.getElementById('app')!;
+  app.classList.remove('editor-collapsed');
+  app.style.setProperty('--ew', editorWidth ? `${editorWidth}px` : '1fr');
+  app.style.setProperty('--rew', '5px');
   document.getElementById('editor-expand-btn')!.style.display = 'none';
   openFilePath = null;
   openFileSessionId = null;
@@ -3578,7 +3587,10 @@ document.getElementById('menu-tool-text-editor')!.addEventListener('click', () =
   monaco.editor.setModelLanguage(editor.getModel()!, 'plaintext');
 });
 
-renderSessionList();let currentColumnTemplate = ['220px', '5px', '1fr', '5px', '1fr'];
+renderSessionList();
+
+let sidebarWidth: number | null = null;
+let editorWidth: number | null = null;
 
 function setupPaneResize(handleId: string, columnIndex: number, minWidth: number) {
   const handle = document.getElementById(handleId)!;
@@ -3586,19 +3598,17 @@ function setupPaneResize(handleId: string, columnIndex: number, minWidth: number
     e.preventDefault();
     const app = document.getElementById('app')!;
     const startX = e.clientX;
-    // Only read the starting width of the column actually being dragged.
-    // Reading/pinning ALL columns here would destroy the editor column's
-    // 1fr flexibility on the very first drag, causing it to stop
-    // absorbing remaining space and instead shift/shrink unexpectedly
-    // whenever the OTHER handle was dragged afterward.
-    const startWidth = parseFloat(getComputedStyle(app).gridTemplateColumns.split(' ')[columnIndex]);
+    const variableName = columnIndex === 0 ? '--sw' : '--ew';
+    const widthDirection = columnIndex === 0 ? 1 : -1;
+    const startWidth = parseFloat(getComputedStyle(app).getPropertyValue(variableName));
     handle.classList.add('dragging');
 
     const onMouseMove = (moveEvent: MouseEvent) => {
       const delta = moveEvent.clientX - startX;
-      const newWidth = Math.max(minWidth, startWidth + delta);
-      currentColumnTemplate[columnIndex] = `${newWidth}px`;
-      app.style.gridTemplateColumns = currentColumnTemplate.join(' ');
+      const newWidth = Math.max(minWidth, startWidth + widthDirection * delta);
+      app.style.setProperty(variableName, `${newWidth}px`);
+      if (columnIndex === 0) sidebarWidth = newWidth;
+      else editorWidth = newWidth;
       refitActiveTerminal();
     };
     const onMouseUp = () => {
@@ -3612,7 +3622,7 @@ function setupPaneResize(handleId: string, columnIndex: number, minWidth: number
 }
 
 setupPaneResize('resize-sidebar', 0, 150);
-setupPaneResize('resize-editor', 2, 200);
+setupPaneResize('resize-editor', 4, 200);
 
 renderSessionList();renderSessionList();
 renderLocalShellProfileList();
