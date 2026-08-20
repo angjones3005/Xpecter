@@ -362,6 +362,7 @@ function refitActiveTerminal() {
     for (const s of allSessions(tab)) {
       if (!s.fitAddon || !s.term) continue;
       s.fitAddon.fit();
+      s.term.refresh(0, s.term.rows - 1);
       if (s.mode === 'local' && s.backendId) App.ResizeLocalTerminal(s.backendId, s.term.cols, s.term.rows);
       if (s.mode === 'ssh' && s.backendId) App.ResizeSSH(s.backendId, s.term.cols, s.term.rows);
     }
@@ -991,6 +992,7 @@ function createTerminalForSession(session: Session, tab: Tab) {
   });
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
+  term.open(container);
   try {
     const webglAddon = new WebglAddon();
     webglAddon.onContextLoss(() => {
@@ -1000,7 +1002,6 @@ function createTerminalForSession(session: Session, tab: Tab) {
   } catch (error) {
     console.warn('WebGL terminal renderer unavailable; using the default renderer.', error);
   }
-  term.open(container);
   fitAddon.fit();
 
   // OSC 52: let remote programs (xclip, pbcopy, tmux, vim, etc.) sync
