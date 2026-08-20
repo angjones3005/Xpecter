@@ -159,8 +159,7 @@ func (a *App) DownloadAndInstallUpdate(assetURL string) error {
 
 	switch runtime.GOOS {
 	case "windows":
-		cmd := exec.Command(destPath)
-		if err := cmd.Start(); err != nil {
+		if err := launchInstaller(destPath); err != nil {
 			return err
 		}
 		// Give the installer a moment to actually launch and show its
