@@ -376,6 +376,16 @@ function currentTheme(): ThemeName {
 const App = window.go.main.App;
 const runtime = window.runtime;
 
+// Fetched once and reused everywhere a platform check is needed
+// (Tools menu, Clear Screen), rather than a fresh IPC round trip per
+// use. Declared this early (right after the App binding) specifically
+// so it's safe to reference from handlers defined earlier in this file
+// too, a `let`/`const` referenced before its own declaration line has
+// run throws a temporal-dead-zone error that silently halts all script
+// execution after it, confirmed the hard way with a past bug in this
+// same file (see the SPE-96 sidebar-position removal history).
+const platformPromise = App.GetPlatform();
+
 // --- Tab model ---
 // Each tab owns its own xterm.js Terminal + backend session (SSH session ID
 // or local terminal ID). 'pending' tabs show the connect form instead of a
@@ -3106,10 +3116,32 @@ document.getElementById('menu-disconnect-tab')!.addEventListener('click', () => 
   const tab = activeTabId ? tabs.get(activeTabId) : null;
   if (tab) disconnectSession(focusedSession(tab));
 });
-document.getElementById('menu-clear-screen')!.addEventListener('click', () => {
+document.getElementById('menu-clear-screen')!.addEventListener('click', async () => {
   closeAllMenus();
   const tab = activeTabId ? tabs.get(activeTabId) : null;
-  if (tab) focusedSession(tab).term?.clear();
+  if (!tab) return;
+  const session = focusedSession(tab);
+  // Bug: term.clear() only wipes xterm.js's own rendered buffer, it
+  // never reaches the shell or, on Windows, ConPTY. ConPTY maintains
+  // its own screen-buffer state (that's its whole job, translating the
+  // legacy Win32 console API to VT), so a later resize makes it
+  // recompute and redraw its visible viewport from that untouched
+  // buffer, silently "un-clearing" the screen. Confirmed reproducible:
+  // Clear Screen, then resize the window, and the old content is back.
+  // The real fix, for local shells, is running the shell's own native
+  // clear command, the same thing every other terminal app's "Clear
+  // Screen" does under the hood, not a client-only buffer wipe. This
+  // also keeps the shell's own idea of its scrollback consistent with
+  // what's on screen, not just a fix for the resize case.
+  // SSH and serial sessions aren't confirmed to have this bug (SSH
+  // doesn't go through ConPTY at all, and there's no report of it on
+  // serial), so they're left on the previous behavior for now.
+  if (session.mode === 'local' && session.backendId) {
+    const platform = await platformPromise;
+    App.WriteLocalTerminal(session.backendId, platform === 'windows' ? 'cls\r' : 'clear\r');
+  } else {
+    session.term?.clear();
+  }
 });
 
 // Sessions menu
@@ -3479,7 +3511,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 // Tools menu: platform-aware, hide Command Prompt/PowerShell on non-Windows
-App.GetPlatform().then((platform) => {
+platformPromise.then((platform) => {
   if (platform !== 'windows') {
     document.getElementById('menu-tool-cmd')!.classList.add('disabled');
     document.getElementById('menu-tool-powershell')!.classList.add('disabled');
