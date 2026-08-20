@@ -52,7 +52,7 @@ const XTERM_THEMES: Record<ThemeName, Record<string, string>> = {
 // dark/light UI chrome toggle above. A full 16-color ANSI palette each,
 // same shape as XTERM_THEMES. 'dark'/'light' here alias the existing UI
 // themes so picking neither preserves old behavior exactly.
-type ColorScheme = ThemeName | 'dracula' | 'nord' | 'solarized-dark' | 'solarized-light' | 'gruvbox-dark' | 'one-dark';
+type ColorScheme = ThemeName | 'dracula' | 'nord' | 'solarized-dark' | 'solarized-light' | 'gruvbox-dark' | 'one-dark' | 'tokyo-night';
 
 const TERMINAL_COLOR_SCHEMES: Record<ColorScheme, Record<string, string>> = {
   ...XTERM_THEMES,
@@ -103,6 +103,14 @@ const TERMINAL_COLOR_SCHEMES: Record<ColorScheme, Record<string, string>> = {
     brightBlack: '#5c6370', brightRed: '#e06c75', brightGreen: '#98c379',
     brightYellow: '#e5c07b', brightBlue: '#61afef', brightMagenta: '#c678dd',
     brightCyan: '#56b6c2', brightWhite: '#ffffff',
+  },
+  'tokyo-night': {
+    background: '#16161e', foreground: '#c0caf5', cursor: '#c0caf5',
+    black: '#15161e', red: '#f7768e', green: '#41a6b5', yellow: '#e0af68',
+    blue: '#7aa2f7', magenta: '#bb9af7', cyan: '#7dcfff', white: '#a9b1d6',
+    brightBlack: '#414868', brightRed: '#ff899d', brightGreen: '#73daca',
+    brightYellow: '#ff9e64', brightBlue: '#8db0ff', brightMagenta: '#c7a9ff',
+    brightCyan: '#a4daff', brightWhite: '#c0caf5',
   },
 };
 
