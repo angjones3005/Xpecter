@@ -18,6 +18,7 @@
     "@fontsource/ubuntu-mono": "^5.3.0",
     "@fontsource/victor-mono": "^5.3.0",
     "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-webgl": "^0.18.0",
     "@xterm/xterm": "^5.5.0",
     "monaco-editor": "^0.50.0"
   },

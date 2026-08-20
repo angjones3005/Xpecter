@@ -1,5 +1,6 @@
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { WebglAddon } from '@xterm/addon-webgl';
 import * as monaco from 'monaco-editor';
 import '@xterm/xterm/css/xterm.css';
 // SPE-61: bundle real font files for the 3 open-source coding fonts so
@@ -990,6 +991,15 @@ function createTerminalForSession(session: Session, tab: Tab) {
   });
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
+  try {
+    const webglAddon = new WebglAddon();
+    webglAddon.onContextLoss(() => {
+      webglAddon.dispose();
+    });
+    term.loadAddon(webglAddon);
+  } catch (error) {
+    console.warn('WebGL terminal renderer unavailable; using the default renderer.', error);
+  }
   term.open(container);
   fitAddon.fit();
 
