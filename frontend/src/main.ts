@@ -3547,6 +3547,10 @@ document.getElementById('picker-serial')!.addEventListener('click', () => {
   document.getElementById('picker-grid')!.style.display = 'none';
   document.getElementById('picker-serial-fields')!.style.display = 'flex';
 });
+document.getElementById('picker-telnet')!.addEventListener('click', () => {
+  closeSessionPicker();
+  newTelnetSession();
+});
 document.getElementById('serial-connect')!.addEventListener('click', async () => {
   const portName = (document.getElementById('serial-port') as HTMLInputElement).value;
   const baud = parseInt((document.getElementById('serial-baud') as HTMLSelectElement).value, 10);
