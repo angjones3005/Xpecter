@@ -522,6 +522,7 @@ interface Tab extends Session {
   // identical to a plain block container, so this exists even for
   // 'single' tabs, one uniform code path rather than two.
   paneGrid: HTMLDivElement | null;
+  isHome: boolean;
 }
 
 const tabs = new Map<string, Tab>();
@@ -555,8 +556,16 @@ function createPendingTab(): Tab {
     extraPanes: [],
     focusedPaneIndex: 0,
     paneGrid: null,
+    isHome: false,
   };
   tabs.set(tab.id, tab);
+  return tab;
+}
+
+function createHomeTab(): Tab {
+  const tab = createPendingTab();
+  tab.isHome = true;
+  tab.label = 'Home';
   return tab;
 }
 
@@ -605,14 +614,16 @@ function renderTabBar() {
     el.appendChild(dot);
 
     const label = document.createElement('span');
-    label.textContent = (tab.mode === 'local' ? '💻 ' : tab.mode === 'ssh' ? '🌐 ' : tab.mode === 'serial' ? '🔌 ' : '') + tab.label;
+      label.textContent = tab.isHome ? '⌂ Home' : (tab.mode === 'local' ? '💻 ' : tab.mode === 'ssh' ? '🌐 ' : tab.mode === 'serial' ? '🔌 ' : '') + tab.label;
     el.appendChild(label);
 
-    const close = document.createElement('span');
-    close.className = 'tab-close';
-    close.textContent = '✕';
-    close.onclick = (e) => { e.stopPropagation(); closeTab(tab.id); };
-    el.appendChild(close);
+      if (!tab.isHome) {
+        const close = document.createElement('span');
+        close.className = 'tab-close';
+        close.textContent = '✕';
+        close.onclick = (e) => { e.stopPropagation(); closeTab(tab.id); };
+        el.appendChild(close);
+      }
 
     bar.appendChild(el);
   }
@@ -652,7 +663,7 @@ function switchToTab(id: string) {
   document.querySelectorAll('.tab-pane-grid').forEach((el) => {
     (el as HTMLElement).style.display = 'none';
   });
-  document.getElementById('tab-landing')!.style.display = tab.mode === 'pending' ? 'flex' : 'none';
+  document.getElementById('tab-landing')!.style.display = tab.isHome || tab.mode === 'pending' ? 'flex' : 'none';
 
   if (tab.paneGrid) {
     tab.paneGrid.style.display = 'grid';
@@ -697,6 +708,7 @@ async function closeSessionBackend(s: Session) {
 async function closeTab(id: string) {
   const tab = tabs.get(id);
   if (!tab) return;
+  if (tab.isHome) return;
 
   // SPE-81: only prompt if something in this tab is genuinely live, not
   // the disconnect panel's own "exit tab" action, and not a
@@ -717,12 +729,8 @@ async function closeTab(id: string) {
     if (remaining.length > 0) {
       switchToTab(remaining[remaining.length - 1]);
     } else {
-      if (appSettings.keepOpenOnLastTab) {
-        const fresh = createPendingTab();
-        switchToTab(fresh.id);
-      } else {
-        runtime.Quit();
-      }
+      const home = createHomeTab();
+      switchToTab(home.id);
     }
   } else {
     renderTabBar();
@@ -2957,7 +2965,7 @@ document.getElementById('remote-files-header')!.addEventListener('click', () => 
 });
 document.getElementById('remote-files-label')!.textContent = '\u25be Remote files';
 
-const initialTab = createPendingTab();
+const initialTab = createHomeTab();
 switchToTab(initialTab.id);
 // GetStartupDir() resolves near-instantly (it's a field read, no real
 // I/O), but is still async over the Wails bridge, so the empty pending
@@ -2967,6 +2975,8 @@ switchToTab(initialTab.id);
 App.GetStartupDir().then((dir) => {
   if (dir) {
     const label = dir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || dir;
+    const tab = createPendingTab();
+    switchToTab(tab.id);
     startLocalShellInActiveTab('', label, dir);
   }
 });
@@ -3520,7 +3530,7 @@ function ensurePendingTab() {
   // pending (opened from a tab's own landing view); otherwise it
   // creates a fresh pending tab first (opened from the Sessions menu).
   const current = activeTabId ? tabs.get(activeTabId) : null;
-  if (current && current.mode === 'pending') return current;
+  if (current && current.mode === 'pending' && !current.isHome) return current;
   const tab = createPendingTab();
   switchToTab(tab.id);
   return tab;
