@@ -16,6 +16,17 @@ This codebook documents frontend validation behavior for this repo when code is 
   - `EPERM: operation not permitted, mkdir 't:\\specter\\frontend'`
 - Basic Node filesystem writes can still succeed on `T:` (mkdir/rmdir test passes).
 - Frontend lint/type/build checks pass when the same folder is copied to a local Windows path (`C:\Temp\...`) and run there.
+- The same failure hits any tool that creates a parent directory before it
+  writes, not just npm. That includes editor/agent file-write tooling
+  targeting anything under `T:\specter\frontend`, and `wails build` binding
+  generation (`Error: mkdir T:\specter\frontend\wailsjs\go\main: Access is
+  denied`). That binding failure is non-fatal and the build still completes,
+  because nothing imports the generated bindings.
+- Plain shell writes to those same paths succeed (`cp`, `>`, `>>`, heredocs).
+  The constraint is specifically `mkdir` against an already-existing
+  directory, so shell redirection is the reliable way to edit a file in
+  place on `T:` when the local-copy workflow below is more than the change
+  is worth.
 
 ## Root Cause (Operational)
 
