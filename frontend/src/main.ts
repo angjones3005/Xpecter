@@ -499,6 +499,11 @@ interface Session {
   // Output can split ANSI sequences or highlightable tokens across backend
   // events. Keep only that incomplete tail until the next chunk arrives.
   highlightCarry: string;
+  // SPE-100: the saved SessionProfile this terminal was launched from,
+  // null for ad-hoc connects that were never saved. Lets the sidebar
+  // show which saved sessions are live right now and jump to the tab
+  // already running one instead of opening a duplicate.
+  sessionProfileId: string | null;
 }
 
 // A split pane alongside a tab's primary session. Same shape as
@@ -552,6 +557,7 @@ function createPendingTab(): Tab {
     reconnect: null,
     ownerTabId: id,
     highlightCarry: '',
+    sessionProfileId: null,
     layout: 'single',
     extraPanes: [],
     focusedPaneIndex: 0,
@@ -666,6 +672,8 @@ function renderTabBar() {
   };
   bar.appendChild(addBtn);
 
+  syncSidebarLiveState();
+
   // SPE-92: reactive re-render of the active tab's pane headers
   // (label/status/focus), same "just re-render on every call" pattern
   // as the tab-row loop above.
@@ -681,6 +689,21 @@ function renderTabBar() {
       wrapper.classList.toggle('focused', active.layout !== 'single' && i === active.focusedPaneIndex);
     });
   }
+}
+
+// SPE-100: the sidebar's live dots and Running group have to track
+// every connect and disconnect. renderTabBar already runs on all of
+// those, but it also runs on tab switches, drags and pane focus
+// changes, and renderSessionList costs two backend calls. So compare
+// the set of live profile ids first and only re-render when it actually
+// changed.
+let lastLiveSignature = '';
+
+function syncSidebarLiveState() {
+  const signature = Array.from(liveSessionsByProfile().keys()).sort().join(',');
+  if (signature === lastLiveSignature) return;
+  lastLiveSignature = signature;
+  renderSessionList();
 }
 
 function reorderTabs(draggedId: string, targetId: string) {
@@ -836,6 +859,7 @@ function createEmptyPane(tab: Tab): Pane {
     reconnect: null,
     ownerTabId: tab.id,
     highlightCarry: '',
+    sessionProfileId: null,
   };
 }
 
@@ -1506,7 +1530,7 @@ async function refreshFileList(path = '.', sessionId?: string) {
   list.innerHTML = '';
   if (path !== '.') {
     const up = document.createElement('div');
-    up.className = 'entry';
+    up.className = 'side-row';
     up.textContent = '\ud83d\udcc1 ..';
     up.style.opacity = '0.8';
     up.onclick = () => refreshFileList(parentPath(path), id);
@@ -1514,7 +1538,7 @@ async function refreshFileList(path = '.', sessionId?: string) {
   }
   for (const e of entries) {
     const div = document.createElement('div');
-    div.className = 'entry';
+    div.className = 'side-row';
     div.textContent = (e.isDir ? '\ud83d\udcc1 ' : '\ud83d\udcc4 ') + e.name;
     if (e.isDir) {
       div.onclick = () => refreshFileList(e.path, id);
@@ -1547,7 +1571,7 @@ async function uploadFilesToCurrentDir(files: FileList) {
   if (!currentRemoteSessionId) return;
   const list = document.getElementById('file-list')!;
   const status = document.createElement('div');
-  status.className = 'entry';
+  status.className = 'side-empty';
   status.style.opacity = '0.7';
   status.style.fontStyle = 'italic';
   list.appendChild(status);
@@ -1651,6 +1675,30 @@ function targetEmptyFocusedPane(): Pane | null {
   return focused as Pane;
 }
 
+// SPE-100: stamps the profile onto whichever Session is about to take
+// the connection, the split pane if one was targeted, otherwise the
+// active tab's own primary session. Called before connecting so the
+// sidebar's live dot is correct from the first render onward.
+function markSessionProfile(paneTarget: Pane | null, profileId: string) {
+  const target = paneTarget ?? (activeTabId ? tabs.get(activeTabId) : null);
+  if (target) target.sessionProfileId = profileId;
+}
+
+// Every live (connected, not stopped) Session launched from a saved
+// profile, keyed by that profile's id. Rebuilt per render rather than
+// cached, same 'just re-render on every call' pattern the tab bar uses.
+function liveSessionsByProfile(): Map<string, Session> {
+  const live = new Map<string, Session>();
+  for (const tab of tabs.values()) {
+    for (const session of allSessions(tab)) {
+      if (!session.sessionProfileId) continue;
+      if (session.status !== 'connected' || session.stopped) continue;
+      if (!live.has(session.sessionProfileId)) live.set(session.sessionProfileId, session);
+    }
+  }
+  return live;
+}
+
 async function useSession(s: SessionProfile) {
   if (s.type === 'serial') {
     await useSerialSession(s);
@@ -1670,6 +1718,7 @@ async function useSSHSession(s: SessionProfile) {
     pendingPaneTarget = null;
     ensurePendingTab();
   }
+  markSessionProfile(paneTarget, s.id);
 
   (document.getElementById('host') as HTMLInputElement).value = s.host ?? '';
 
@@ -1769,40 +1818,58 @@ async function useSerialSession(s: SessionProfile) {
     pendingPaneTarget = null;
     ensurePendingTab();
   }
+  markSessionProfile(paneTarget, s.id);
   skipSerialSavePrompt = true;
   await connectSerialInActiveTab(s.serialPort ?? '', s.baud ?? 9600);
 }
 
-function renderSessionRow(s: SessionProfile): HTMLElement {
+// SPE-100: whole row is the click target. The old row bound click to
+// its label <span> only, so most of the row was dead space, and it kept
+// a delete X visible at half opacity on every row forever. Actions now
+// appear on hover; delete still confirms via the context menu too.
+function renderSessionRow(s: SessionProfile, depth: number, live: Map<string, Session>): HTMLElement {
   const row = document.createElement('div');
-  row.className = 'session-entry';
-  row.style.paddingLeft = '18px';
+  row.className = 'side-row';
+  row.style.paddingLeft = `${6 + depth * 11}px`;
   row.draggable = true;
+  row.dataset.sessionId = s.id;
+  row.tabIndex = -1;
   row.addEventListener('dragstart', (e) => {
     e.dataTransfer?.setData('text/specter-session-id', s.id);
   });
 
-  const label = document.createElement('span');
-  const icon = s.type === 'serial' ? '\ud83d\udd0c '
-    : s.deviceKind === 'switch' ? '\ud83d\udd00 '
-    : s.deviceKind === 'firewall' ? '\ud83d\udee1\ufe0f '
-    : '\ud83d\udda5\ufe0f ';
-  label.textContent = icon + s.name;
-  label.onclick = () => useSession(s);
-  label.style.flex = '1';
+  const running = live.get(s.id) ?? null;
+  const dot = document.createElement('span');
+  dot.className = 'side-dot' + (running ? ' live' : '');
+  row.appendChild(dot);
+
+  const name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = s.name;
+  row.appendChild(name);
+
+  const host = document.createElement('span');
+  host.className = 'host';
+  host.textContent = sidebarSessionHost(s);
+  row.appendChild(host);
+
+  row.title = running
+    ? `${s.name} — ${sidebarSessionHost(s)} (running, click to switch to its tab)`
+    : `${s.name} — ${sidebarSessionHost(s)}`;
 
   const del = document.createElement('span');
-  del.textContent = '\u2715';
-  del.className = 'delete-btn';
+  del.className = 'act';
+  del.textContent = '✕';
+  del.title = 'Delete session';
   del.onclick = async (e) => {
     e.stopPropagation();
+    if (!confirm(`Delete saved session "${s.name}"?`)) return;
     await App.DeleteSession(s.id);
     renderSessionList();
   };
-
-  row.appendChild(label);
   row.appendChild(del);
 
+  row.onclick = () => activateSessionRow(s);
   row.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     showSessionContextMenu(e.clientX, e.clientY, s);
@@ -1811,6 +1878,34 @@ function renderSessionRow(s: SessionProfile): HTMLElement {
   return row;
 }
 
+function sidebarSessionHost(s: SessionProfile): string {
+  if (s.type === 'serial') return s.serialPort ? `${s.serialPort}@${s.baud ?? 9600}` : 'serial';
+  if (!s.host) return '';
+  const port = s.port && s.port !== 22 ? `:${s.port}` : '';
+  return (s.user ? `${s.user}@` : '') + s.host + port;
+}
+
+// The habit this is built around: with a dozen tabs open you click a
+// saved session to GET to it, not to open a second copy of it. So a
+// session that's already running switches to its tab, and opening an
+// additional connection to the same host stays available on the context
+// menu. Deliberately different from the old behaviour, which always
+// dialled a fresh connection.
+function activateSessionRow(s: SessionProfile) {
+  const running = liveSessionsByProfile().get(s.id);
+  if (running) {
+    switchToTab(running.ownerTabId);
+    const owner = tabs.get(running.ownerTabId);
+    if (owner) {
+      const index = paneIndexOf(owner, running);
+      if (index >= 0) owner.focusedPaneIndex = index;
+      renderTabBar();
+      running.term?.focus();
+    }
+    return;
+  }
+  useSession(s);
+}
 function attachMenuAutoClose(menu: HTMLElement) {
   const closeMenu = (ev: MouseEvent) => {
     if (!menu.contains(ev.target as Node)) {
@@ -1830,6 +1925,19 @@ function showSessionContextMenu(x: number, y: number, s: SessionProfile) {
   const menu = document.createElement('div');
   menu.id = 'session-context-menu';
   menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;background:var(--bg-alt);border:1px solid var(--border);border-radius:4px;padding:4px 0;z-index:2000;min-width:120px;font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,0.4);`;
+
+  // SPE-100: clicking the row itself switches to a running session
+  // rather than dialling a second one, so the 'I really do want another
+  // connection to this host' case lives here.
+  const openItem = document.createElement('div');
+  openItem.textContent = 'Open another session';
+  openItem.style.cssText = 'padding:6px 12px;cursor:pointer;';
+  openItem.onmouseenter = () => { openItem.style.background = 'var(--hover)'; };
+  openItem.onmouseleave = () => { openItem.style.background = ''; };
+  openItem.onclick = () => {
+    menu.remove();
+    useSession(s);
+  };
 
   const editItem = document.createElement('div');
   editItem.textContent = 'Edit session';
@@ -1852,6 +1960,7 @@ function showSessionContextMenu(x: number, y: number, s: SessionProfile) {
     renderSessionList();
   };
 
+  menu.appendChild(openItem);
   menu.appendChild(editItem);
   menu.appendChild(deleteItem);
   document.body.appendChild(menu);
@@ -1976,38 +2085,62 @@ function renderGroupNode(
   groups: SessionGroup[],
   sessions: SessionProfile[],
   container: HTMLElement,
+  depth: number,
+  live: Map<string, Session>,
 ) {
   const isCollapsed = collapsedGroups.has(group.id);
+  const childGroups = groups.filter((g) => g.parentId === group.id);
+  const childSessions = sessions.filter((s) => s.groupId === group.id);
+
   const header = document.createElement('div');
-  header.className = 'entry';
-  header.style.fontWeight = 'bold';
-  header.style.userSelect = 'none';
-  header.textContent = (isCollapsed ? '\u25b8 ' : '\u25be ') + '\ud83d\udcc1 ' + group.name;
+  header.className = 'side-group';
+  header.style.paddingLeft = `${6 + depth * 11}px`;
+
+  const chev = document.createElement('span');
+  chev.className = 'chev';
+  chev.textContent = isCollapsed ? '▸' : '▾';
+  const icon = document.createElement('span');
+  icon.textContent = '📁';
+  const name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = group.name;
+  const count = document.createElement('span');
+  count.className = 'count';
+  const liveHere = childSessions.filter((cs) => live.has(cs.id)).length;
+  count.textContent = liveHere > 0 ? `${liveHere}/${childSessions.length}` : String(childSessions.length);
+  count.title = liveHere > 0 ? `${liveHere} running of ${childSessions.length}` : `${childSessions.length} session(s)`;
+
+  header.appendChild(chev);
+  header.appendChild(icon);
+  header.appendChild(name);
+  header.appendChild(count);
+
   header.addEventListener('click', () => {
-    if (collapsedGroups.has(group.id)) {
-      collapsedGroups.delete(group.id);
-    } else {
-      collapsedGroups.add(group.id);
-    }
+    if (collapsedGroups.has(group.id)) collapsedGroups.delete(group.id);
+    else collapsedGroups.add(group.id);
+    saveCollapsedGroups();
     renderSessionList();
   });
   header.addEventListener('dragover', (e) => {
     e.preventDefault();
-    header.style.background = 'var(--hover)';
+    header.classList.add('drop-target');
   });
   header.addEventListener('dragleave', () => {
-    header.style.background = '';
+    header.classList.remove('drop-target');
   });
   header.addEventListener('drop', async (e) => {
     e.preventDefault();
-    header.style.background = '';
+    header.classList.remove('drop-target');
     const sessionId = e.dataTransfer?.getData('text/specter-session-id');
     if (!sessionId) return;
-    const sessions = await App.ListSessions();
-    const s = sessions.find((x) => x.id === sessionId);
-    if (!s) return;
-    await App.SaveSession({ ...s, groupId: group.id });
-    collapsedGroups.add(group.id);
+    const all = await App.ListSessions();
+    const moved = all.find((x) => x.id === sessionId);
+    if (!moved) return;
+    await App.SaveSession({ ...moved, groupId: group.id });
+    // Drop used to collapse the folder you just dropped into, hiding the
+    // thing you were manipulating. Expand instead, so the move is visible.
+    collapsedGroups.delete(group.id);
+    saveCollapsedGroups();
     renderSessionList();
   });
   header.addEventListener('contextmenu', (e) => {
@@ -2016,17 +2149,15 @@ function renderGroupNode(
     showGroupContextMenu(e.clientX, e.clientY, group);
   });
   container.appendChild(header);
+
   if (isCollapsed) return;
-  const childGroups = groups.filter((g) => g.parentId === group.id);
-  const childSessions = sessions.filter((s) => s.groupId === group.id);
   for (const cg of childGroups) {
-    renderGroupNode(cg, groups, sessions, container);
+    renderGroupNode(cg, groups, sessions, container, depth + 1, live);
   }
-  for (const s of childSessions) {
-    container.appendChild(renderSessionRow(s));
+  for (const cs of childSessions) {
+    container.appendChild(renderSessionRow(cs, depth + 1, live));
   }
 }
-
 function showGroupContextMenu(x: number, y: number, group: SessionGroup) {
   const existing = document.getElementById('session-context-menu');
   if (existing) existing.remove();
@@ -2074,9 +2205,24 @@ function showGroupContextMenu(x: number, y: number, group: SessionGroup) {
 }
 
 let sessionSearchQuery = '';
-const collapsedGroups = new Set<string>();
-let foldersInitialized = false;
-let recentCollapsed = true;
+// SPE-100: folders now default to EXPANDED and remember what you
+// collapsed. They used to be force-collapsed on every launch, which
+// meant the panel opened showing folder names and nothing else.
+const collapsedGroups = new Set<string>(loadCollapsedGroups());
+let runningCollapsed = localStorage.getItem('specter-running-collapsed') === 'on';
+
+function loadCollapsedGroups(): string[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('specter-collapsed-groups') || '[]');
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveCollapsedGroups() {
+  localStorage.setItem('specter-collapsed-groups', JSON.stringify(Array.from(collapsedGroups)));
+}
 // SPE-64: defaults OFF. OSC 52 lets whatever's running on the remote
 // end write directly to the local OS clipboard with zero confirmation,
 // including from a host you haven't decided to trust yet, the exact
@@ -2386,74 +2532,82 @@ async function createNewFolder() {
 
 async function renderSessionList() {
   const [sessions, groups] = await Promise.all([App.ListSessions(), App.ListGroups()]);
-  if (!foldersInitialized) {
-    for (const g of groups) collapsedGroups.add(g.id);
-    foldersInitialized = true;
-  }
   const list = document.getElementById('session-list')!;
   list.innerHTML = '';
 
-  const query = sessionSearchQuery;
+  const live = liveSessionsByProfile();
+  const query = sessionSearchQuery.trim();
   const visibleSessions = sessions.filter((s) => sessionMatchesQuery(s, query));
 
-  if (!query) {
-    const recent = sessions
-      .filter((s) => s.lastUsed)
-      .sort((a, b) => (b.lastUsed! > a.lastUsed! ? 1 : -1))
-      .slice(0, 5);
-    if (recent.length > 0) {
-      const header = document.createElement('div');
-      header.className = 'entry';
-      header.style.fontWeight = 'bold';
-      header.style.userSelect = 'none';
-      header.style.display = 'flex';
-      header.style.alignItems = 'center';
-      header.style.gap = '4px';
-      const arrow = document.createElement('span');
-      arrow.textContent = recentCollapsed ? '\u25b8' : '\u25be';
-      // Original document+clock icon (SPE-61-adjacent polish), not a
-      // copy of any existing stock icon, replaces the stopwatch emoji
-      // that was here before with something that reads more clearly as
-      // "recently used" at this size.
-      const icon = document.createElement('span');
-      icon.style.cssText = 'display:inline-flex;width:14px;height:14px;flex:0 0 auto;';
-      icon.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14"><path d="M14 3H6a1.5 1.5 0 0 0-1.5 1.5v15A1.5 1.5 0 0 0 6 21h12a1.5 1.5 0 0 0 1.5-1.5V8.5L14 3Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M14 3v4.5a1 1 0 0 0 1 1h4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><line x1="8" y1="16.5" x2="13.5" y2="16.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><line x1="8" y1="19" x2="12" y2="19" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="8" cy="9.5" r="5.5" fill="var(--bg)" stroke="currentColor" stroke-width="1.6"/><path d="M8 6.3V9.5l2.3 1.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-      const label = document.createElement('span');
-      label.textContent = 'Recent';
-      header.appendChild(arrow);
-      header.appendChild(icon);
-      header.appendChild(label);
-      header.addEventListener('click', () => {
-        recentCollapsed = !recentCollapsed;
-        renderSessionList();
-      });
-      list.appendChild(header);
-      if (!recentCollapsed) {
-        for (const s of recent) {
-          list.appendChild(renderSessionRow(s));
-        }
-      }
+  const countEl = document.getElementById('sessions-count')!;
+  const liveCount = sessions.filter((s) => live.has(s.id)).length;
+  countEl.textContent = liveCount > 0 ? `${liveCount}/${sessions.length}` : String(sessions.length);
+  countEl.title = liveCount > 0 ? `${liveCount} running of ${sessions.length} saved` : `${sessions.length} saved session(s)`;
+
+  // While filtering, the folder tree is noise: show a flat ranked list of
+  // what matched and nothing else.
+  if (query) {
+    if (visibleSessions.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'side-empty';
+      empty.textContent = 'No sessions match.';
+      list.appendChild(empty);
+    } else {
+      for (const s of visibleSessions) list.appendChild(renderSessionRow(s, 0, live));
+    }
+    renderLocalShellProfileList();
+    if (homeIsActive()) renderHomeView().catch(() => {});
+    return;
+  }
+
+  if (sessions.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'side-empty';
+    empty.textContent = 'No saved sessions yet.';
+    list.appendChild(empty);
+  }
+
+  // Running sessions first, so the panel answers "what am I in right
+  // now" before it answers "what could I open". Skipped entirely when
+  // nothing is live, rather than showing an empty header.
+  const running = sessions.filter((s) => live.has(s.id));
+  if (running.length > 0) {
+    const head = document.createElement('div');
+    head.className = 'side-group';
+    const chev = document.createElement('span');
+    chev.className = 'chev';
+    chev.textContent = runningCollapsed ? '▸' : '▾';
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = 'Running';
+    const count = document.createElement('span');
+    count.className = 'count';
+    count.textContent = String(running.length);
+    head.appendChild(chev);
+    head.appendChild(name);
+    head.appendChild(count);
+    head.onclick = () => {
+      runningCollapsed = !runningCollapsed;
+      localStorage.setItem('specter-running-collapsed', runningCollapsed ? 'on' : 'off');
+      renderSessionList();
+    };
+    list.appendChild(head);
+    if (!runningCollapsed) {
+      for (const s of running) list.appendChild(renderSessionRow(s, 1, live));
     }
   }
 
   const topGroups = groups.filter((g) => !g.parentId);
   for (const g of topGroups) {
-    renderGroupNode(g, groups, visibleSessions, list);
+    renderGroupNode(g, groups, visibleSessions, list, 0, live);
   }
 
-  const ungrouped = visibleSessions.filter((s) => !s.groupId);
+  const ungrouped = visibleSessions.filter((s) => !s.groupId || !groups.some((g) => g.id === s.groupId));
   for (const s of ungrouped) {
-    list.appendChild(renderSessionRow(s));
+    list.appendChild(renderSessionRow(s, 0, live));
   }
 
-  if (!query) {
-    const addFolder = document.createElement('div');
-    addFolder.className = 'entry';
-    addFolder.style.cssText = 'opacity:0.6;cursor:pointer;font-size:12px;';
-    addFolder.textContent = '+ New folder';
-    addFolder.onclick = createNewFolder;
-    list.appendChild(addFolder);
-  }
+  renderLocalShellProfileList();
 
   // Home shows the same session data from a different angle, so keep it
   // in step with every mutation that already funnels through here
@@ -2461,6 +2615,32 @@ async function renderSessionList() {
   if (homeIsActive()) renderHomeView().catch(() => {});
 }
 
+// SPE-100: keyboard navigation over whatever the sidebar is currently
+// showing, sessions and shell profiles alike, driven from the filter
+// field. Same idiom as Home's quick connect so the two don't need
+// separate muscle memory.
+let sidebarSelected = -1;
+
+function sidebarRows(): HTMLElement[] {
+  return Array.from(document.querySelectorAll('#sidebar .side-row')) as HTMLElement[];
+}
+
+function highlightSidebarSelection() {
+  const rows = sidebarRows();
+  rows.forEach((row, i) => row.classList.toggle('selected', i === sidebarSelected));
+  if (sidebarSelected >= 0 && rows[sidebarSelected]) {
+    rows[sidebarSelected].scrollIntoView({ block: 'nearest' });
+  }
+}
+
+function moveSidebarSelection(delta: number) {
+  const rows = sidebarRows();
+  if (rows.length === 0) { sidebarSelected = -1; return; }
+  sidebarSelected = sidebarSelected < 0
+    ? (delta > 0 ? 0 : rows.length - 1)
+    : (sidebarSelected + delta + rows.length) % rows.length;
+  highlightSidebarSelection();
+}
 // --- Home view (SPE-99) ---
 //
 // The permanent Home tab gets its own surface instead of sharing
@@ -3505,13 +3685,63 @@ authRadios.forEach((radio) => {
 // launch directory (SPE-86: Windows Explorer's "Open in Specter") ---
 document.getElementById('app')!.classList.add('editor-collapsed');
 document.getElementById('editor-expand-btn')!.style.display = 'flex';
-let remoteFilesCollapsed = false;
-document.getElementById('remote-files-header')!.addEventListener('click', () => {
-  remoteFilesCollapsed = !remoteFilesCollapsed;
-  document.getElementById('file-list')!.style.display = remoteFilesCollapsed ? 'none' : 'block';
-  document.getElementById('remote-files-label')!.textContent = (remoteFilesCollapsed ? '\u25b8 ' : '\u25be ') + 'Remote files';
+// SPE-100: all three sidebar sections collapse the same way and
+// remember their state, replacing the one-off Remote-files toggle that
+// hand-edited its own label text.
+type SidebarSection = 'sessions' | 'shells' | 'files';
+
+function loadCollapsedSections(): Set<SidebarSection> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('specter-sidebar-sections') || '[]');
+    return new Set(Array.isArray(parsed) ? parsed : []);
+  } catch {
+    return new Set();
+  }
+}
+
+const collapsedSections = loadCollapsedSections();
+
+function applySidebarSections() {
+  document.querySelectorAll('#sidebar .side-section').forEach((el) => {
+    const section = (el as HTMLElement).dataset.section as SidebarSection | undefined;
+    if (!section) return;
+    const isCollapsed = collapsedSections.has(section);
+    el.classList.toggle('collapsed', isCollapsed);
+    const chev = el.querySelector('.side-head .chev');
+    if (chev) chev.textContent = isCollapsed ? '▸' : '▾';
+  });
+}
+
+document.querySelectorAll('#sidebar .side-head').forEach((head) => {
+  head.addEventListener('click', () => {
+    const section = (head.parentElement as HTMLElement | null)?.dataset.section as SidebarSection | undefined;
+    if (!section) return;
+    if (collapsedSections.has(section)) collapsedSections.delete(section);
+    else collapsedSections.add(section);
+    localStorage.setItem('specter-sidebar-sections', JSON.stringify(Array.from(collapsedSections)));
+    applySidebarSections();
+  });
 });
-document.getElementById('remote-files-label')!.textContent = '\u25be Remote files';
+
+// Header buttons sit inside the header, which toggles the section, so
+// each has to stop its click from reaching it.
+function wireSidebarHeaderAction(id: string, run: () => void) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    run();
+  });
+}
+
+wireSidebarHeaderAction('sidebar-new-session', () => {
+  ensurePendingTab();
+  openSessionPicker();
+});
+wireSidebarHeaderAction('sidebar-new-folder', () => { createNewFolder(); });
+wireSidebarHeaderAction('sidebar-collapse-btn', toggleSidebar);
+
+applySidebarSections();
 
 const initialTab = createHomeTab();
 switchToTab(initialTab.id);
@@ -3528,9 +3758,37 @@ App.GetStartupDir().then((dir) => {
     startLocalShellInActiveTab('', label, dir);
   }
 });
+// SPE-100: the old handler re-fetched every session AND every group
+// from the backend on each keystroke. Debounced, and it now drives the
+// shell list too, since one field filters the whole panel.
+let sidebarSearchTimer: ReturnType<typeof setTimeout> | null = null;
+
 document.getElementById('session-search')!.addEventListener('input', (e) => {
   sessionSearchQuery = (e.target as HTMLInputElement).value;
-  renderSessionList();
+  sidebarSelected = -1;
+  if (sidebarSearchTimer) clearTimeout(sidebarSearchTimer);
+  sidebarSearchTimer = setTimeout(() => {
+    sidebarSearchTimer = null;
+    renderSessionList();
+  }, 120);
+});
+
+document.getElementById('session-search')!.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    moveSidebarSelection(e.key === 'ArrowDown' ? 1 : -1);
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    const rows = sidebarRows();
+    const row = sidebarSelected >= 0 ? rows[sidebarSelected] : rows[0];
+    row?.click();
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    (e.target as HTMLInputElement).value = '';
+    sessionSearchQuery = '';
+    sidebarSelected = -1;
+    renderSessionList();
+  }
 });
 
 
@@ -3796,43 +4054,70 @@ async function renderLocalShellProfileList() {
   const profiles = await App.ListLocalShellProfiles();
   const list = document.getElementById('local-shell-profile-list')!;
   list.innerHTML = '';
-  for (const p of profiles) {
-    const row = document.createElement('div');
-    row.className = 'session-entry';
-    row.style.paddingLeft = '18px';
 
-    const label = document.createElement('span');
-    label.textContent = localShellProfileIcon(p.icon) + ' ' + p.name;
-    label.style.flex = '1';
-    label.onclick = () => launchLocalShellProfile(p);
-    row.appendChild(label);
+  // The filter field covers the whole panel, not just the Sessions
+  // section, so a search that matches nothing here empties this list too
+  // rather than leaving stale rows sitting under a filtered tree.
+  const query = sessionSearchQuery.trim().toLowerCase();
+  const visible = query
+    ? profiles.filter((p) => p.name.toLowerCase().includes(query) || (p.command ?? '').toLowerCase().includes(query))
+    : profiles;
+
+  const countEl = document.getElementById('shells-count')!;
+  countEl.textContent = String(profiles.length);
+
+  if (visible.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'side-empty';
+    empty.textContent = query ? 'No shells match.' : 'No shell profiles yet.';
+    list.appendChild(empty);
+    return;
+  }
+
+  for (const profile of visible) {
+    const row = document.createElement('div');
+    row.className = 'side-row';
+    row.tabIndex = -1;
+    row.title = profile.command ? `${profile.name} — ${profile.command}` : profile.name;
+
+    const icon = document.createElement('span');
+    icon.className = 'side-dot';
+    icon.style.cssText = 'box-shadow:none;background:transparent;width:auto;height:auto;font-size:10px;line-height:1;';
+    icon.textContent = localShellProfileIcon(profile.icon);
+    row.appendChild(icon);
+
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = profile.name;
+    row.appendChild(name);
 
     const edit = document.createElement('span');
-    edit.textContent = '\u270e';
-    edit.className = 'delete-btn';
+    edit.className = 'act neutral';
+    edit.textContent = '✎';
     edit.title = 'Edit';
     edit.onclick = (e) => {
       e.stopPropagation();
-      openLocalShellProfileEditor(p);
+      openLocalShellProfileEditor(profile);
     };
     row.appendChild(edit);
 
     const del = document.createElement('span');
-    del.textContent = '\u2715';
-    del.className = 'delete-btn';
+    del.className = 'act';
+    del.textContent = '✕';
     del.title = 'Delete';
     del.onclick = async (e) => {
       e.stopPropagation();
-      await App.DeleteLocalShellProfile(p.id);
+      if (!confirm(`Delete shell profile "${profile.name}"?`)) return;
+      await App.DeleteLocalShellProfile(profile.id);
       renderLocalShellProfileList();
       renderLocalShellProfilesMenu();
     };
     row.appendChild(del);
 
+    row.onclick = () => launchLocalShellProfile(profile);
     list.appendChild(row);
   }
 }
-
 async function renderLocalShellProfilesMenu() {
   const profiles = await App.ListLocalShellProfiles();
   const container = document.getElementById('menu-local-shell-profiles')!;
@@ -3901,7 +4186,10 @@ function openLocalShellProfileEditor(profile?: LocalShellProfile) {
   (document.getElementById('lsp-editor-close') as HTMLSpanElement).onclick = close;
 }
 
-document.getElementById('lsp-add-btn')!.addEventListener('click', () => openLocalShellProfileEditor());
+document.getElementById('lsp-add-btn')!.addEventListener('click', (e) => {
+  e.stopPropagation();
+  openLocalShellProfileEditor();
+});
 document.getElementById('lsp-editor-overlay')!.addEventListener('click', (e) => {
   if (e.target === document.getElementById('lsp-editor-overlay')) {
     document.getElementById('lsp-editor-overlay')!.classList.remove('open');
@@ -4324,7 +4612,6 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-document.getElementById('sidebar-collapse-btn')!.addEventListener('click', toggleSidebar);
 document.getElementById('sidebar-expand-btn')!.addEventListener('click', toggleSidebar);
 
 // --- Config import/export (SPE-93) ---
