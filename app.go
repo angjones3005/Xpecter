@@ -211,6 +211,7 @@ type ConnectRequest struct {
 	Passphrase    string `json:"passphrase,omitempty"`
 	UseAgent      bool   `json:"useAgent,omitempty"`
 	InternalAgent bool   `json:"internalAgent,omitempty"`
+	X11           bool   `json:"x11,omitempty"`
 	// IgnoreKeyPermWarning: user already saw and accepted the SPE-65
 	// KeyPermissionWarning once for this attempt, skip the check.
 	IgnoreKeyPermWarning bool `json:"ignoreKeyPermWarning,omitempty"`
@@ -251,6 +252,7 @@ func (a *App) Connect(req ConnectRequest) (ConnectResult, error) {
 		Password: req.Password, KeyPath: req.KeyPath, Passphrase: req.Passphrase,
 		UseAgent:             req.UseAgent,
 		InternalAgent:        req.InternalAgent,
+		X11:                  req.X11,
 		IgnoreKeyPermWarning: req.IgnoreKeyPermWarning,
 		DisableKeepalive:     settings.SSHKeepaliveDisabled,
 	})
@@ -299,6 +301,13 @@ func (a *App) Connect(req ConnectRequest) (ConnectResult, error) {
 	})
 	if err != nil {
 		return ConnectResult{}, err
+	}
+	if req.X11 {
+		if err := sess.EnableX11(); err != nil {
+			delete(a.sessions, id)
+			_ = sess.Close()
+			return ConnectResult{}, err
+		}
 	}
 
 	return ConnectResult{SessionID: id, LegacyCompat: sess.UsedLegacyCompat(), ConnectDurationMs: time.Since(startedAt).Milliseconds()}, nil

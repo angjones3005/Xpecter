@@ -1626,10 +1626,11 @@ async function useSSHSession(s: SessionProfile) {
     (document.getElementById('keyPath') as HTMLInputElement).value = s.keyPath ?? '';
     (document.getElementById('use-ssh-agent') as HTMLInputElement).checked = !!s.useAgent;
     (document.getElementById('use-internal-agent') as HTMLInputElement).checked = !!s.internalAgent;
+    (document.getElementById('x11-toggle') as HTMLInputElement).checked = !!s.x11;
 
     (document.getElementById('passphrase') as HTMLInputElement).value = '';
 
-    await connectActiveTab({ host: s.host ?? '', port: s.port ?? 22, user: s.user ?? '', keyPath: s.keyPath, useAgent: s.useAgent, internalAgent: s.internalAgent });
+    await connectActiveTab({ host: s.host ?? '', port: s.port ?? 22, user: s.user ?? '', keyPath: s.keyPath, useAgent: s.useAgent, internalAgent: s.internalAgent, x11: s.x11 });
 
     const connected = paneTarget ?? tabs.get(activeTabId!);
 
@@ -2592,7 +2593,7 @@ async function connectActiveTab(req: ConnectRequest) {
     if (!skipSavePrompt) {
       const name = `${req.user}@${req.host}`;
       if (confirm(`Save this session as "${name}"?`)) {
-        await App.SaveSession({ id: '', name, host: req.host, port: req.port, user: req.user, keyPath: req.keyPath, useAgent: req.useAgent, internalAgent: req.internalAgent, deviceKind: currentDeviceKind() });
+        await App.SaveSession({ id: '', name, host: req.host, port: req.port, user: req.user, keyPath: req.keyPath, useAgent: req.useAgent, internalAgent: req.internalAgent, x11: req.x11, deviceKind: currentDeviceKind() });
         renderSessionList();
       }
     }
@@ -2611,7 +2612,8 @@ document.getElementById('connect')!.addEventListener('click', async () => {
     const passphrase = (document.getElementById('passphrase') as HTMLInputElement).value;
     const useAgent = (document.getElementById('use-ssh-agent') as HTMLInputElement).checked;
     const internalAgent = (document.getElementById('use-internal-agent') as HTMLInputElement).checked;
-    req = { host, port: 22, user, keyPath, passphrase, useAgent, internalAgent };
+    const x11 = (document.getElementById('x11-toggle') as HTMLInputElement).checked;
+    req = { host, port: 22, user, keyPath, passphrase, useAgent, internalAgent, x11 };
   } else {
     const password = (document.getElementById('password') as HTMLInputElement).value;
     req = { host, port: 22, user, password };

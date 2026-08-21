@@ -23,6 +23,7 @@ type SessionProfile struct {
 	KeyPath       string   `json:"keyPath,omitempty"`
 	UseAgent      bool     `json:"useAgent,omitempty"`
 	InternalAgent bool     `json:"internalAgent,omitempty"`
+	X11           bool     `json:"x11,omitempty"`
 	SerialPort    string   `json:"serialPort,omitempty"`
 	Baud          int      `json:"baud,omitempty"`
 	GroupID       string   `json:"groupId,omitempty"`

@@ -10,6 +10,7 @@ export interface ConnectRequest {
   passphrase?: string;
   useAgent?: boolean;
   internalAgent?: boolean;
+  x11?: boolean;
   // SPE-65: user already acknowledged the key-permission warning once
   // for this attempt.
   ignoreKeyPermWarning?: boolean;
@@ -44,6 +45,7 @@ export interface SessionProfile {
   keyPath?: string;
   useAgent?: boolean;
   internalAgent?: boolean;
+  x11?: boolean;
   serialPort?: string;
   baud?: number;
   groupId?: string;

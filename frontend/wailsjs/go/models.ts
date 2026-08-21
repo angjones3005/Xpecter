@@ -48,6 +48,7 @@ export namespace config {
 	    keyPath?: string;
 	    useAgent?: boolean;
 	    internalAgent?: boolean;
+	    x11?: boolean;
 	    serialPort?: string;
 	    baud?: number;
 	    groupId?: string;
@@ -70,6 +71,8 @@ export namespace config {
 	        this.keyPath = source["keyPath"];
 	        this.useAgent = source["useAgent"];
 	        this.internalAgent = source["internalAgent"];
+	        this.x11 = source["x11"];
+	        this.x11 = source["x11"];
 	        this.serialPort = source["serialPort"];
 	        this.baud = source["baud"];
 	        this.groupId = source["groupId"];
@@ -118,6 +121,7 @@ export namespace main {
 	    passphrase?: string;
 	    useAgent?: boolean;
 	    internalAgent?: boolean;
+	    x11?: boolean;
 	    ignoreKeyPermWarning?: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -134,6 +138,7 @@ export namespace main {
 	        this.passphrase = source["passphrase"];
 	        this.useAgent = source["useAgent"];
 	        this.internalAgent = source["internalAgent"];
+	        this.x11 = source["x11"];
 	        this.ignoreKeyPermWarning = source["ignoreKeyPermWarning"];
 	    }
 	}

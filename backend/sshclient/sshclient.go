@@ -33,6 +33,7 @@ type Config struct {
 	Passphrase    string
 	UseAgent      bool
 	InternalAgent bool
+	X11           bool
 	// IgnoreKeyPermWarning skips the KeyPermissionWarning check below,
 	// set only after the user has explicitly acknowledged it once
 	// (SPE-65). Specter didn't create the user's key file, so this is a
