@@ -46,6 +46,8 @@ export namespace config {
 	    port?: number;
 	    user?: string;
 	    keyPath?: string;
+	    useAgent?: boolean;
+	    internalAgent?: boolean;
 	    serialPort?: string;
 	    baud?: number;
 	    groupId?: string;
@@ -66,6 +68,8 @@ export namespace config {
 	        this.port = source["port"];
 	        this.user = source["user"];
 	        this.keyPath = source["keyPath"];
+	        this.useAgent = source["useAgent"];
+	        this.internalAgent = source["internalAgent"];
 	        this.serialPort = source["serialPort"];
 	        this.baud = source["baud"];
 	        this.groupId = source["groupId"];
@@ -82,6 +86,7 @@ export namespace config {
 	    fontSize?: number;
 		keepOpenOnLastTab?: boolean;
 	    sshKeepaliveDisabled?: boolean;
+	    sessionLogDirectory?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -94,7 +99,9 @@ export namespace config {
 	        this.colorScheme = source["colorScheme"];
 	        this.fontFamily = source["fontFamily"];
 	        this.fontSize = source["fontSize"];
+	        this.keepOpenOnLastTab = source["keepOpenOnLastTab"];
 	        this.sshKeepaliveDisabled = source["sshKeepaliveDisabled"];
+	        this.sessionLogDirectory = source["sessionLogDirectory"];
 	    }
 	}
 
@@ -109,6 +116,8 @@ export namespace main {
 	    password?: string;
 	    keyPath?: string;
 	    passphrase?: string;
+	    useAgent?: boolean;
+	    internalAgent?: boolean;
 	    ignoreKeyPermWarning?: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -123,6 +132,8 @@ export namespace main {
 	        this.password = source["password"];
 	        this.keyPath = source["keyPath"];
 	        this.passphrase = source["passphrase"];
+	        this.useAgent = source["useAgent"];
+	        this.internalAgent = source["internalAgent"];
 	        this.ignoreKeyPermWarning = source["ignoreKeyPermWarning"];
 	    }
 	}

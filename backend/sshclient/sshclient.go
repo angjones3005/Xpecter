@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
 
 	"specter/backend/idgen"
@@ -24,12 +25,14 @@ import (
 var ErrPassphraseRequired = errors.New("private key is encrypted, passphrase required")
 
 type Config struct {
-	Host       string
-	Port       int
-	User       string
-	Password   string
-	KeyPath    string
-	Passphrase string
+	Host          string
+	Port          int
+	User          string
+	Password      string
+	KeyPath       string
+	Passphrase    string
+	UseAgent      bool
+	InternalAgent bool
 	// IgnoreKeyPermWarning skips the KeyPermissionWarning check below,
 	// set only after the user has explicitly acknowledged it once
 	// (SPE-65). Specter didn't create the user's key file, so this is a
@@ -44,11 +47,12 @@ type Config struct {
 }
 
 type Session struct {
-	id      string
-	client  *ssh.Client
-	sess    *ssh.Session
-	stdin   io.WriteCloser
-	closing atomic.Bool
+	id        string
+	client    *ssh.Client
+	sess      *ssh.Session
+	stdin     io.WriteCloser
+	agentConn net.Conn
+	closing   atomic.Bool
 	// usedLegacyCompat records whether this session had to fall back to
 	// the widened SPE-99 algorithm set to connect, exposed via
 	// UsedLegacyCompat() below.
@@ -118,8 +122,10 @@ func (e *KeyPermissionWarning) Error() string {
 // failed Connect attempt and the frontend's trust decision, so we don't
 // need to round-trip raw key bytes through the JS bridge.
 var (
-	pendingKeysMu sync.Mutex
-	pendingKeys   = map[string]pendingKey{}
+	pendingKeysMu        sync.Mutex
+	pendingKeys          = map[string]pendingKey{}
+	internalAgentMu      sync.Mutex
+	internalAgentSigners = map[string]ssh.Signer{}
 )
 
 // pendingKeyTTL bounds how long an abandoned trust prompt's key stays in
@@ -275,6 +281,9 @@ func Dial(cfg Config) (*Session, error) {
 	}
 
 	var authMethods []ssh.AuthMethod
+	if cfg.InternalAgent && cfg.KeyPath == "" {
+		return nil, fmt.Errorf("Specter internal SSH agent requires a private key path")
+	}
 	if cfg.KeyPath != "" {
 		if !cfg.IgnoreKeyPermWarning {
 			if info, err := os.Stat(cfg.KeyPath); err == nil {
@@ -286,23 +295,36 @@ func Dial(cfg Config) (*Session, error) {
 			// surface the real error (missing file, no permission to
 			// even stat it, etc.) with better context than this check would.
 		}
-		key, err := os.ReadFile(cfg.KeyPath)
-		if err != nil {
-			return nil, fmt.Errorf("reading key: %w", err)
+		var signer ssh.Signer
+		if cfg.InternalAgent {
+			internalAgentMu.Lock()
+			signer = internalAgentSigners[cfg.KeyPath]
+			internalAgentMu.Unlock()
 		}
-		signer, err := ssh.ParsePrivateKey(key)
-		if err != nil {
-			var passErr *ssh.PassphraseMissingError
-			if errors.As(err, &passErr) {
-				if cfg.Passphrase == "" {
-					return nil, ErrPassphraseRequired
+		if signer == nil {
+			key, err := os.ReadFile(cfg.KeyPath)
+			if err != nil {
+				return nil, fmt.Errorf("reading key: %w", err)
+			}
+			signer, err = ssh.ParsePrivateKey(key)
+			if err != nil {
+				var passErr *ssh.PassphraseMissingError
+				if errors.As(err, &passErr) {
+					if cfg.Passphrase == "" {
+						return nil, ErrPassphraseRequired
+					}
+					signer, err = ssh.ParsePrivateKeyWithPassphrase(key, []byte(cfg.Passphrase))
+					if err != nil {
+						return nil, fmt.Errorf("parsing key with passphrase: %w", err)
+					}
+				} else {
+					return nil, fmt.Errorf("parsing key: %w", err)
 				}
-				signer, err = ssh.ParsePrivateKeyWithPassphrase(key, []byte(cfg.Passphrase))
-				if err != nil {
-					return nil, fmt.Errorf("parsing key with passphrase: %w", err)
-				}
-			} else {
-				return nil, fmt.Errorf("parsing key: %w", err)
+			}
+			if cfg.InternalAgent {
+				internalAgentMu.Lock()
+				internalAgentSigners[cfg.KeyPath] = signer
+				internalAgentMu.Unlock()
 			}
 		}
 		authMethods = append(authMethods, ssh.PublicKeys(signer))
@@ -310,9 +332,22 @@ func Dial(cfg Config) (*Session, error) {
 	if cfg.Password != "" {
 		authMethods = append(authMethods, ssh.Password(cfg.Password))
 	}
+	var agentConn net.Conn
+	if cfg.UseAgent {
+		var err error
+		agentConn, err = dialSSHAgent()
+		if err != nil {
+			return nil, err
+		}
+		agentClient := agent.NewClient(agentConn)
+		authMethods = append(authMethods, ssh.PublicKeysCallback(agentClient.Signers))
+	}
 
 	hkCallback, err := hostKeyCallback()
 	if err != nil {
+		if agentConn != nil {
+			_ = agentConn.Close()
+		}
 		return nil, fmt.Errorf("setting up host key verification: %w", err)
 	}
 
@@ -363,11 +398,14 @@ func Dial(cfg Config) (*Session, error) {
 			}
 		}
 		if err != nil {
+			if agentConn != nil {
+				_ = agentConn.Close()
+			}
 			return nil, err
 		}
 	}
 
-	sess := &Session{id: idgen.New(), client: client, usedLegacyCompat: usedLegacyCompat}
+	sess := &Session{id: idgen.New(), client: client, agentConn: agentConn, usedLegacyCompat: usedLegacyCompat}
 	if !cfg.DisableKeepalive {
 		go sess.keepaliveLoop()
 	}
@@ -480,6 +518,9 @@ func (s *Session) Close() error {
 	s.closing.Store(true)
 	if s.sess != nil {
 		_ = s.sess.Close()
+	}
+	if s.agentConn != nil {
+		_ = s.agentConn.Close()
 	}
 	return s.client.Close()
 }

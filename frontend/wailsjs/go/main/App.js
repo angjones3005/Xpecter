@@ -110,6 +110,10 @@ export function ReadLocalFile(arg1) {
   return window['go']['main']['App']['ReadLocalFile'](arg1);
 }
 
+export function AppendSessionLog(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['AppendSessionLog'](arg1, arg2, arg3, arg4);
+}
+
 export function ReadRemoteFile(arg1, arg2) {
   return window['go']['main']['App']['ReadRemoteFile'](arg1, arg2);
 }

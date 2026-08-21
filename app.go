@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"specter/backend/config"
@@ -34,6 +35,7 @@ type App struct {
 	// Read once by the frontend via GetStartupDir() during its own
 	// startup sequence, empty when Specter was launched normally.
 	startupDir string
+	logMu      sync.Mutex
 }
 
 func NewApp(startupDir string) *App {
@@ -188,12 +190,14 @@ func (a *App) ListSerialPorts() ([]string, error) {
 // --- SSH sessions ---
 
 type ConnectRequest struct {
-	Host       string `json:"host"`
-	Port       int    `json:"port"`
-	User       string `json:"user"`
-	Password   string `json:"password,omitempty"`
-	KeyPath    string `json:"keyPath,omitempty"`
-	Passphrase string `json:"passphrase,omitempty"`
+	Host          string `json:"host"`
+	Port          int    `json:"port"`
+	User          string `json:"user"`
+	Password      string `json:"password,omitempty"`
+	KeyPath       string `json:"keyPath,omitempty"`
+	Passphrase    string `json:"passphrase,omitempty"`
+	UseAgent      bool   `json:"useAgent,omitempty"`
+	InternalAgent bool   `json:"internalAgent,omitempty"`
 	// IgnoreKeyPermWarning: user already saw and accepted the SPE-65
 	// KeyPermissionWarning once for this attempt, skip the check.
 	IgnoreKeyPermWarning bool `json:"ignoreKeyPermWarning,omitempty"`
@@ -230,6 +234,8 @@ func (a *App) Connect(req ConnectRequest) (ConnectResult, error) {
 	sess, err := sshclient.Dial(sshclient.Config{
 		Host: req.Host, Port: req.Port, User: req.User,
 		Password: req.Password, KeyPath: req.KeyPath, Passphrase: req.Passphrase,
+		UseAgent:             req.UseAgent,
+		InternalAgent:        req.InternalAgent,
 		IgnoreKeyPermWarning: req.IgnoreKeyPermWarning,
 		DisableKeepalive:     settings.SSHKeepaliveDisabled,
 	})
@@ -401,6 +407,44 @@ func (a *App) ReadLocalFile(path string) (string, error) {
 
 func (a *App) WriteLocalFile(path string, content string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+// AppendSessionLog appends raw terminal output to one file per session.
+// The directory is user-selected and the filename is sanitized so labels
+// cannot escape it. A per-App mutex keeps concurrent output chunks ordered.
+func (a *App) AppendSessionLog(directory, sessionID, label, content string) error {
+	if directory == "" || content == "" {
+		return nil
+	}
+	name := sanitizeLogName(label)
+	if name == "" {
+		name = "session"
+	}
+	path := filepath.Join(directory, name+"-"+sessionID+".log")
+	a.logMu.Lock()
+	defer a.logMu.Unlock()
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString(content)
+	return err
+}
+
+func sanitizeLogName(label string) string {
+	var b strings.Builder
+	for _, r := range label {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return strings.Trim(b.String(), "._")
 }
 
 // ReadImageFile reads an arbitrary local image path and returns it as a

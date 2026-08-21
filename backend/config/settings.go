@@ -44,6 +44,10 @@ type Settings struct {
 
 	// KeepOpenOnLastTab keeps the app running when the final tab closes.
 	KeepOpenOnLastTab bool `json:"keepOpenOnLastTab,omitempty"`
+
+	// SessionLogDirectory enables continuous per-session terminal logging
+	// when set. Empty keeps logging disabled.
+	SessionLogDirectory string `json:"sessionLogDirectory,omitempty"`
 }
 
 func settingsPath() (string, error) {

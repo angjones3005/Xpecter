@@ -3,6 +3,7 @@ module specter
 go 1.25.0
 
 require (
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/UserExistsError/conpty v0.1.4
 	github.com/creack/pty v1.1.21
 	github.com/pkg/sftp v1.13.6

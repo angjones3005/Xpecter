@@ -392,6 +392,8 @@
         <div class="item"><label><input type="checkbox" id="warn-multiline-paste-toggle" checked /> Warn before pasting multiple lines</label></div>
         <div class="item"><label><input type="checkbox" id="ssh-keepalive-toggle" checked /> SSH keepalive (prevent idle disconnects)</label></div>
         <div class="item"><label><input type="checkbox" id="keep-open-last-tab-toggle" /> Keep app open when last tab closes</label></div>
+        <div class="item"><label>Session log directory <button id="session-log-browse" type="button">Choose...</button></label></div>
+        <div class="item" id="session-log-clear-row" style="display:none;"><span id="session-log-clear" style="cursor:pointer;color:var(--danger);">Disable session logging</span></div>
         <div class="item"><label><input type="checkbox" id="show-tab-numbers-toggle" /> Show tab numbers</label></div>
         <div class="item"><label><input type="checkbox" id="highlight-toggle" checked /> Highlight status keywords</label></div>
         <div class="separator"></div>
@@ -507,6 +509,8 @@
         <div id="caps-lock-warning" style="display:none;color:var(--warning);font-size:11px;">⚠ Caps Lock is on</div>
         </span>
         <span id="auth-key-fields" style="display:none;flex-direction:column;gap:8px;">
+          <label><input id="use-ssh-agent" type="checkbox" /> Use SSH agent (OpenSSH / Pageant)</label>
+          <label><input id="use-internal-agent" type="checkbox" /> Use Specter memory agent</label>
           <input id="keyPath" placeholder="key path" readonly style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
           <button id="browse-key">Browse…</button>
           <input id="passphrase" placeholder="passphrase (if any)" type="password" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
@@ -577,6 +581,8 @@
             <button id="se-browse-key" type="button">Browse…</button>
             <button id="se-clear-key" type="button">Clear</button>
           </div>
+          <label><input id="se-use-ssh-agent" type="checkbox" /> Use SSH agent (OpenSSH / Pageant)</label>
+          <label><input id="se-use-internal-agent" type="checkbox" /> Use Specter memory agent</label>
           <select id="se-devicekind-select" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;">
             <option value="host">VM / Host</option>
             <option value="switch">Network switch</option>

@@ -8,6 +8,8 @@ export interface ConnectRequest {
   password?: string;
   keyPath?: string;
   passphrase?: string;
+  useAgent?: boolean;
+  internalAgent?: boolean;
   // SPE-65: user already acknowledged the key-permission warning once
   // for this attempt.
   ignoreKeyPermWarning?: boolean;
@@ -39,6 +41,8 @@ export interface SessionProfile {
   port?: number;
   user?: string;
   keyPath?: string;
+  useAgent?: boolean;
+  internalAgent?: boolean;
   serialPort?: string;
   baud?: number;
   groupId?: string;
@@ -93,6 +97,7 @@ export interface Settings {
   // SPE-79. Inverted polarity matches the Go struct: false/absent means
   // keepalive is ON (the default), only true actually disables it.
   sshKeepaliveDisabled?: boolean;
+  sessionLogDirectory?: string;
   keepOpenOnLastTab?: boolean;
 }
 // Check-for-updates: a GitHub releases API check on launch. Includes an
@@ -121,6 +126,7 @@ export interface AppBindings {
   SelectDirectory(): Promise<string>;
   ReadLocalFile(path: string): Promise<string>;
   WriteLocalFile(path: string, content: string): Promise<void>;
+  AppendSessionLog(directory: string, sessionId: string, label: string, content: string): Promise<void>;
   GetSettings(): Promise<Settings>;
   SaveSettings(settings: Settings): Promise<void>;
   GetVersion(): Promise<string>;

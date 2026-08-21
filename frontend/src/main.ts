@@ -354,6 +354,7 @@ async function loadSettingsAndApply() {
 
   const keepaliveToggle = document.getElementById('ssh-keepalive-toggle') as HTMLInputElement;
   keepaliveToggle.checked = !appSettings.sshKeepaliveDisabled;
+  document.getElementById('session-log-clear-row')!.style.display = appSettings.sessionLogDirectory ? 'block' : 'none';
 
   const keepOpenToggle = document.getElementById('keep-open-last-tab-toggle') as HTMLInputElement;
   keepOpenToggle.checked = !!appSettings.keepOpenOnLastTab;
@@ -1594,15 +1595,17 @@ async function useSSHSession(s: SessionProfile) {
 
 
 
-  if (s.keyPath) {
+  if (s.keyPath || s.useAgent || s.internalAgent) {
 
     setAuthMode('key');
 
-    (document.getElementById('keyPath') as HTMLInputElement).value = s.keyPath;
+    (document.getElementById('keyPath') as HTMLInputElement).value = s.keyPath ?? '';
+    (document.getElementById('use-ssh-agent') as HTMLInputElement).checked = !!s.useAgent;
+    (document.getElementById('use-internal-agent') as HTMLInputElement).checked = !!s.internalAgent;
 
     (document.getElementById('passphrase') as HTMLInputElement).value = '';
 
-    await connectActiveTab({ host: s.host ?? '', port: s.port ?? 22, user: s.user ?? '', keyPath: s.keyPath });
+    await connectActiveTab({ host: s.host ?? '', port: s.port ?? 22, user: s.user ?? '', keyPath: s.keyPath, useAgent: s.useAgent, internalAgent: s.internalAgent });
 
     const connected = paneTarget ?? tabs.get(activeTabId!);
 
@@ -1617,6 +1620,9 @@ async function useSSHSession(s: SessionProfile) {
   } else {
 
     setAuthMode('password');
+
+    (document.getElementById('use-ssh-agent') as HTMLInputElement).checked = false;
+    (document.getElementById('use-internal-agent') as HTMLInputElement).checked = false;
 
     const cacheKey = passwordCacheKey(s.host ?? '', s.port ?? 22, s.user ?? '');
 
@@ -1801,6 +1807,8 @@ async function openSessionEditor(s: SessionProfile) {
     (document.getElementById('se-port') as HTMLInputElement).value = String(s.port ?? 22);
     (document.getElementById('se-user') as HTMLInputElement).value = s.user ?? '';
     (document.getElementById('se-keypath') as HTMLInputElement).value = s.keyPath ?? '';
+    (document.getElementById('se-use-ssh-agent') as HTMLInputElement).checked = !!s.useAgent;
+    (document.getElementById('se-use-internal-agent') as HTMLInputElement).checked = !!s.internalAgent;
 
     const deviceKindSelect = document.getElementById('se-devicekind-select') as HTMLSelectElement;
     const current = s.deviceKind === 'switch' || s.deviceKind === 'firewall' ? s.deviceKind : 'host';
@@ -1858,6 +1866,8 @@ document.getElementById('se-save')!.addEventListener('click', async () => {
     updated.user = (document.getElementById('se-user') as HTMLInputElement).value.trim();
     const keyPath = (document.getElementById('se-keypath') as HTMLInputElement).value.trim();
     updated.keyPath = keyPath || undefined;
+    updated.useAgent = (document.getElementById('se-use-ssh-agent') as HTMLInputElement).checked;
+    updated.internalAgent = (document.getElementById('se-use-internal-agent') as HTMLInputElement).checked;
     updated.deviceKind = (document.getElementById('se-devicekind-select') as HTMLSelectElement).value as 'host' | 'switch' | 'firewall';
   }
 
@@ -2021,6 +2031,11 @@ function applyOutputHighlighting(text: string): string {
 
 function writeToTerminal(session: Session, data: string) {
   session.term!.write(applyOutputHighlighting(data));
+  if (appSettings.sessionLogDirectory && session.backendId) {
+    App.AppendSessionLog(appSettings.sessionLogDirectory, session.backendId, session.label, data).catch((err) => {
+      console.error('Session log append failed', err);
+    });
+  }
 }
 
 // --- Disconnected-session panel (SPE-59) ---
@@ -2507,7 +2522,7 @@ async function connectActiveTab(req: ConnectRequest) {
     if (!skipSavePrompt) {
       const name = `${req.user}@${req.host}`;
       if (confirm(`Save this session as "${name}"?`)) {
-        await App.SaveSession({ id: '', name, host: req.host, port: req.port, user: req.user, keyPath: req.keyPath, deviceKind: currentDeviceKind() });
+        await App.SaveSession({ id: '', name, host: req.host, port: req.port, user: req.user, keyPath: req.keyPath, useAgent: req.useAgent, internalAgent: req.internalAgent, deviceKind: currentDeviceKind() });
         renderSessionList();
       }
     }
@@ -2524,7 +2539,9 @@ document.getElementById('connect')!.addEventListener('click', async () => {
   if (authMode === 'key') {
     const keyPath = (document.getElementById('keyPath') as HTMLInputElement).value;
     const passphrase = (document.getElementById('passphrase') as HTMLInputElement).value;
-    req = { host, port: 22, user, keyPath, passphrase };
+    const useAgent = (document.getElementById('use-ssh-agent') as HTMLInputElement).checked;
+    const internalAgent = (document.getElementById('use-internal-agent') as HTMLInputElement).checked;
+    req = { host, port: 22, user, keyPath, passphrase, useAgent, internalAgent };
   } else {
     const password = (document.getElementById('password') as HTMLInputElement).value;
     req = { host, port: 22, user, password };
@@ -2965,6 +2982,20 @@ const keepOpenToggle = document.getElementById('keep-open-last-tab-toggle') as H
 keepOpenToggle.addEventListener('change', () => {
   appSettings.keepOpenOnLastTab = keepOpenToggle.checked;
   App.SaveSettings(appSettings);
+});
+
+document.getElementById('session-log-browse')!.addEventListener('click', async () => {
+  const directory = await App.SelectDirectory();
+  if (!directory) return;
+  appSettings.sessionLogDirectory = directory;
+  await App.SaveSettings(appSettings);
+  document.getElementById('session-log-clear-row')!.style.display = 'block';
+});
+
+document.getElementById('session-log-clear')!.addEventListener('click', async () => {
+  appSettings.sessionLogDirectory = '';
+  await App.SaveSettings(appSettings);
+  document.getElementById('session-log-clear-row')!.style.display = 'none';
 });
 
 document.getElementById('menu-reset-settings')!.addEventListener('click', async () => {
