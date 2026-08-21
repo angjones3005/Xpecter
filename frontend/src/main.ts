@@ -3149,10 +3149,14 @@ document.getElementById('home-quick-connect')!.addEventListener('keydown', (e) =
   }
 });
 
-document.getElementById('home-new-session-btn')!.addEventListener('click', () => {
-  ensurePendingTab();
-  openSessionPicker();
-});
+// Two entry points on Home: the header button, always visible, and the
+// one in the empty state for a first run with nothing saved yet.
+for (const id of ['home-new-session-btn', 'home-new-session-top']) {
+  document.getElementById(id)!.addEventListener('click', () => {
+    ensurePendingTab();
+    openSessionPicker();
+  });
+}
 
 // --- Host key trust modal ---
 
@@ -4510,6 +4514,55 @@ function resetPickerView() {
   document.getElementById('picker-serial-fields')!.style.display = 'none';
   pendingQuickPort = null;
 }
+// SPE-103: the picker is four choices, which is exactly the case where
+// reaching for the mouse is the slow way round. 1-4 pick directly,
+// arrows walk the grid, Escape backs out. Bound on the overlay so it
+// only applies while the picker is actually open, and skipped once a
+// protocol has been chosen and its fields are showing, where digits
+// belong to whatever field has focus.
+const PICKER_ITEM_IDS = ['picker-ssh', 'picker-shell', 'picker-serial', 'picker-telnet'];
+
+function pickerGridVisible(): boolean {
+  const overlay = document.getElementById('session-picker-overlay')!;
+  const grid = document.getElementById('picker-grid')!;
+  return overlay.classList.contains('open') && grid.style.display !== 'none';
+}
+
+document.getElementById('session-picker-overlay')!.addEventListener('keydown', (e) => {
+  const overlay = document.getElementById('session-picker-overlay')!;
+  if (!overlay.classList.contains('open')) return;
+
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    closeSessionPicker();
+    return;
+  }
+  if (!pickerGridVisible()) return;
+
+  const items = PICKER_ITEM_IDS.map((id) => document.getElementById(id)!);
+  const choice = Number(e.key);
+  if (Number.isInteger(choice) && choice >= 1 && choice <= items.length) {
+    e.preventDefault();
+    items[choice - 1].click();
+    return;
+  }
+  if (e.key === 'Enter' || e.key === ' ') {
+    const focused = items.indexOf(document.activeElement as HTMLElement);
+    if (focused < 0) return;
+    e.preventDefault();
+    items[focused].click();
+    return;
+  }
+  const step = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1
+    : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1
+    : 0;
+  if (step === 0) return;
+  e.preventDefault();
+  const current = items.indexOf(document.activeElement as HTMLElement);
+  const next = current < 0 ? (step > 0 ? 0 : items.length - 1) : (current + step + items.length) % items.length;
+  items[next].focus();
+});
+
 function openSessionPicker() {
   // SPE-92: an ordinary New Session, targets the active tab's own
   // primary session, never a leftover split-pane target from earlier.
@@ -4526,6 +4579,7 @@ function openSessionPicker() {
     }).catch(() => {});
   }
   document.getElementById('session-picker-overlay')!.classList.add('open');
+  document.getElementById('picker-ssh')!.focus();
 }
 
 // SPE-92: opens the same New Session picker, but targets a specific
