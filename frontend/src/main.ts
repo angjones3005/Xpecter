@@ -632,9 +632,15 @@ function renderTabBar() {
       el.appendChild(num);
     }
 
-    const dot = document.createElement('span');
-    dot.className = 'status-dot ' + tab.status;
-    el.appendChild(dot);
+    // SPE-99: Home has no connection to report, and a red
+    // 'disconnected' dot on it reads as something being wrong with the
+    // one tab that is always fine. Same isHome exemption the close
+    // button below already uses.
+    if (!tab.isHome) {
+      const dot = document.createElement('span');
+      dot.className = 'status-dot ' + tab.status;
+      el.appendChild(dot);
+    }
 
     const label = document.createElement('span');
       label.textContent = tab.isHome ? '⌂ Home' : (tab.mode === 'local' ? '💻 ' : tab.mode === 'ssh' ? '🌐 ' : tab.mode === 'serial' ? '🔌 ' : '') + tab.label;
@@ -697,7 +703,15 @@ function switchToTab(id: string) {
   document.querySelectorAll('.tab-pane-grid').forEach((el) => {
     (el as HTMLElement).style.display = 'none';
   });
-  document.getElementById('tab-landing')!.style.display = tab.isHome || tab.mode === 'pending' ? 'flex' : 'none';
+  // SPE-99: Home renders its own surface now. #tab-landing stays the
+  // small "No session yet" placeholder for ordinary un-connected tabs,
+  // which is the only state that copy was ever true for.
+  document.getElementById('tab-landing')!.style.display = !tab.isHome && tab.mode === 'pending' ? 'flex' : 'none';
+  document.getElementById('home-view')!.style.display = tab.isHome ? 'flex' : 'none';
+  // Set before the fit() calls below, which force a synchronous layout
+  // read and so need #terminal's final display already applied.
+  document.getElementById('terminal-pane')!.classList.toggle('home-active', tab.isHome);
+  if (tab.isHome) renderHomeView().catch(() => {});
 
   if (tab.paneGrid) {
     tab.paneGrid.style.display = 'grid';
@@ -1600,6 +1614,14 @@ let skipSavePrompt = false;
 let skipSerialSavePrompt = false;
 let pendingSessionName: string | null = null;
 
+// SPE-99: the picker has no port field and every ad-hoc connect through
+// it has always been hardcoded to 22. Home's quick connect accepts
+// host:port, so it parks the non-default port here for the picker's
+// Connect handler to pick up. Cleared by resetPickerView, which runs on
+// every picker open and close, so it can't leak into a later connect
+// the same way pendingPaneTarget once could.
+let pendingQuickPort: number | null = null;
+
 // In-memory only, never persisted to disk, cleared on app restart.
 
 // Distinct from the deliberate "never save passwords to disk" design
@@ -2432,7 +2454,461 @@ async function renderSessionList() {
     addFolder.onclick = createNewFolder;
     list.appendChild(addFolder);
   }
+
+  // Home shows the same session data from a different angle, so keep it
+  // in step with every mutation that already funnels through here
+  // (save, delete, new folder, rename).
+  if (homeIsActive()) renderHomeView().catch(() => {});
 }
+
+// --- Home view (SPE-99) ---
+//
+// The permanent Home tab gets its own surface instead of sharing
+// #tab-landing with ordinary un-connected tabs. Almost nothing here is
+// new capability: ListSessions, sessionMatchesQuery, useSession and
+// launchLocalShellProfile all already existed. What was missing was a
+// place to put them. Recents were computed but rendered collapsed by
+// default inside a sidebar that can be hidden outright, and "quick
+// connect" filtered a list rather than connecting to anything, while
+// the whole terminal pane sat empty behind two centered widgets.
+
+const HOME_RECENT_LIMIT = 8;
+const HOME_QC_LIMIT = 8;
+
+// Last-loaded session set, so quick-connect filtering is instant
+// keystroke-to-keystroke instead of a Wails round trip per character.
+// Refreshed by renderHomeView, which runs on every switch to Home and
+// on every session mutation.
+let homeSessions: SessionProfile[] = [];
+let homeQuickQuery = '';
+let homeQcActions: (() => void)[] = [];
+let homeQcSelected = -1;
+
+function homeIsActive(): boolean {
+  const tab = activeTabId ? tabs.get(activeTabId) : null;
+  return !!tab && tab.isHome;
+}
+
+function homeSessionIcon(s: SessionProfile): string {
+  if (s.type === 'serial') return '🔌';
+  if (s.deviceKind === 'switch') return '🔀';
+  if (s.deviceKind === 'firewall') return '🛡️';
+  return '🖥️';
+}
+
+function homeSessionSubtitle(s: SessionProfile): string {
+  if (s.type === 'serial') {
+    return s.serialPort ? `${s.serialPort} @ ${s.baud ?? 9600}` : 'Serial';
+  }
+  if (!s.host) return 'SSH';
+  const port = s.port && s.port !== 22 ? `:${s.port}` : '';
+  return (s.user ? `${s.user}@` : '') + s.host + port;
+}
+
+function homeRelativeTime(iso?: string): string {
+  if (!iso) return '';
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return '';
+  const seconds = Math.round((Date.now() - then) / 1000);
+  if (seconds < 0) return 'just now';
+  if (seconds < 60) return 'just now';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  const weeks = Math.round(days / 7);
+  if (weeks < 5) return `${weeks}w ago`;
+  return new Date(then).toLocaleDateString();
+}
+
+type QuickTarget = { user: string; host: string; port: number };
+
+// Parses [user@]host[:port]. The bracketed [::1]:22 form is handled
+// explicitly so an IPv6 literal's own colons aren't mistaken for a port
+// separator. Returns null for anything that isn't plausibly a host, in
+// which case the typed text stays a pure search term.
+function parseQuickTarget(text: string): QuickTarget | null {
+  const trimmed = text.trim();
+  if (!trimmed || /\s/.test(trimmed)) return null;
+
+  let user = '';
+  let rest = trimmed;
+  const at = trimmed.lastIndexOf('@');
+  if (at >= 0) {
+    user = trimmed.slice(0, at);
+    rest = trimmed.slice(at + 1);
+    if (!user || !/^[A-Za-z0-9._-]+$/.test(user)) return null;
+  }
+  if (!rest) return null;
+
+  if (rest.startsWith('[')) {
+    const close = rest.indexOf(']');
+    if (close < 1) return null;
+    const host = rest.slice(1, close);
+    if (!/^[0-9A-Fa-f:.]+$/.test(host)) return null;
+    const tail = rest.slice(close + 1);
+    if (!tail) return { user, host, port: 22 };
+    if (!tail.startsWith(':')) return null;
+    const port = Number(tail.slice(1));
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+    return { user, host, port };
+  }
+
+  let host = rest;
+  let port = 22;
+  const colon = rest.lastIndexOf(':');
+  if (colon > 0) {
+    const parsed = Number(rest.slice(colon + 1));
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) return null;
+    port = parsed;
+    host = rest.slice(0, colon);
+  }
+  if (!/^[A-Za-z0-9._-]+$/.test(host)) return null;
+  return { user, host, port };
+}
+
+// An ad-hoc target has no stored credentials, so this stops at the same
+// picker every other unsaved SSH connection goes through rather than
+// inventing a second auth path. Only the host/user/port legwork is done
+// up front.
+function startQuickConnect(target: QuickTarget) {
+  ensurePendingTab();
+  pendingPaneTarget = null;
+  resetPickerView();
+  // resetPickerView clears this, so it has to be set afterwards.
+  pendingQuickPort = target.port === 22 ? null : target.port;
+
+  const hostField = document.getElementById('host') as HTMLInputElement;
+  const userField = document.getElementById('user') as HTMLInputElement;
+  hostField.value = target.host;
+  userField.value = target.user;
+  setDeviceKind('host');
+  setAuthMode('password');
+
+  document.getElementById('picker-grid')!.style.display = 'none';
+  document.getElementById('picker-ssh-fields')!.style.display = 'flex';
+  document.getElementById('session-picker-overlay')!.classList.add('open');
+
+  const passwordField = document.getElementById('password') as HTMLInputElement;
+  passwordField.value = '';
+  passwordField.focus();
+
+  // Same OS-username default as openSessionPicker (SPE-83), for the
+  // plain "host" form where no user was typed.
+  if (!userField.value) {
+    App.GetOSUsername().then((name) => {
+      if (name && !userField.value) userField.value = name;
+    }).catch(() => {});
+  }
+}
+
+function homeCard(s: SessionProfile): HTMLElement {
+  const card = document.createElement('div');
+  card.className = 'home-card';
+  card.tabIndex = 0;
+  card.title = `Connect to ${s.name}`;
+
+  const title = document.createElement('div');
+  title.className = 'home-card-title';
+  const icon = document.createElement('span');
+  icon.textContent = homeSessionIcon(s);
+  const name = document.createElement('span');
+  name.textContent = s.name;
+  name.style.cssText = 'overflow:hidden;text-overflow:ellipsis;';
+  title.appendChild(icon);
+  title.appendChild(name);
+
+  const subtitle = document.createElement('div');
+  subtitle.className = 'home-card-sub';
+  const when = homeRelativeTime(s.lastUsed);
+  subtitle.textContent = when
+    ? `${homeSessionSubtitle(s)} · ${when}`
+    : homeSessionSubtitle(s);
+
+  card.appendChild(title);
+  card.appendChild(subtitle);
+
+  // The whole card is the hit target. The sidebar's own rows bind click
+  // to their label <span> only, which leaves most of the row dead;
+  // that's a bug to fix there, not a pattern to copy here.
+  card.onclick = () => useSession(s);
+  card.onkeydown = (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      useSession(s);
+    }
+  };
+  return card;
+}
+
+function homeSavedRow(s: SessionProfile): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'home-saved-row';
+  row.tabIndex = 0;
+  row.title = `Connect to ${s.name}`;
+
+  const icon = document.createElement('span');
+  icon.textContent = homeSessionIcon(s);
+  const name = document.createElement('span');
+  name.textContent = s.name;
+  name.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+  const subtitle = document.createElement('span');
+  subtitle.className = 'sub';
+  subtitle.textContent = homeSessionSubtitle(s);
+
+  row.appendChild(icon);
+  row.appendChild(name);
+  row.appendChild(subtitle);
+
+  row.onclick = () => useSession(s);
+  row.onkeydown = (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      useSession(s);
+    }
+  };
+  return row;
+}
+
+// Reads the live `shortcuts` map rather than DEFAULT_SHORTCUTS, so a
+// rebound key (they're user-editable as of b73c808) shows its real
+// binding here instead of a stale default.
+function renderHomeHints() {
+  const hints = document.getElementById('home-hints')!;
+  hints.innerHTML = '';
+  const entries: [string, string][] = [
+    ['Enter', 'connect the highlighted result'],
+    [formatShortcut(shortcuts.sidebar), 'toggle the sidebar'],
+    [formatShortcut(shortcuts.splitVertical), 'split vertically'],
+    [formatShortcut(shortcuts.splitHorizontal), 'split horizontally'],
+    [formatShortcut(shortcuts.closePane), 'close the focused pane'],
+  ];
+  for (const [keys, description] of entries) {
+    const item = document.createElement('span');
+    const key = document.createElement('kbd');
+    key.textContent = keys;
+    item.appendChild(key);
+    item.appendChild(document.createTextNode(' ' + description));
+    hints.appendChild(item);
+  }
+}
+
+function highlightHomeQcSelection() {
+  const rows = document.querySelectorAll('#home-qc-results .home-qc-row');
+  rows.forEach((row, i) => row.classList.toggle('selected', i === homeQcSelected));
+}
+
+// Clears the field before acting: connecting switches away from Home,
+// and coming back to a stale query with its results still open reads as
+// the app having lost track of what you did.
+function runHomeQcAction(action: () => void) {
+  const input = document.getElementById('home-quick-connect') as HTMLInputElement;
+  input.value = '';
+  homeQuickQuery = '';
+  homeQcSelected = -1;
+  renderHomeQuickResults();
+  action();
+}
+
+function renderHomeQuickResults() {
+  const box = document.getElementById('home-qc-results')!;
+  box.innerHTML = '';
+  homeQcActions = [];
+
+  const query = homeQuickQuery.trim();
+  if (!query) {
+    box.classList.remove('open');
+    homeQcSelected = -1;
+    return;
+  }
+
+  const matches = homeSessions
+    .filter((s) => sessionMatchesQuery(s, query))
+    .slice(0, HOME_QC_LIMIT);
+
+  for (const s of matches) {
+    const row = document.createElement('div');
+    row.className = 'home-qc-row';
+    const icon = document.createElement('span');
+    icon.textContent = homeSessionIcon(s);
+    const name = document.createElement('span');
+    name.textContent = s.name;
+    const subtitle = document.createElement('span');
+    subtitle.className = 'sub';
+    subtitle.textContent = homeSessionSubtitle(s);
+    row.appendChild(icon);
+    row.appendChild(name);
+    row.appendChild(subtitle);
+    row.onclick = () => runHomeQcAction(() => useSession(s));
+    homeQcActions.push(() => useSession(s));
+    box.appendChild(row);
+  }
+
+  // Offered last, and suppressed when a listed saved session already
+  // points at the same place, so the saved one (which carries its own
+  // credentials and settings) always wins.
+  const target = parseQuickTarget(query);
+  const alreadySaved = target !== null && matches.some((s) =>
+    (s.host ?? '').toLowerCase() === target.host.toLowerCase()
+    && (s.port ?? 22) === target.port
+    && (!target.user || (s.user ?? '').toLowerCase() === target.user.toLowerCase()));
+
+  if (target && !alreadySaved) {
+    const row = document.createElement('div');
+    row.className = 'home-qc-row';
+    const icon = document.createElement('span');
+    icon.textContent = '→';
+    const label = document.createElement('span');
+    const shown = (target.user ? `${target.user}@` : '')
+      + target.host
+      + (target.port === 22 ? '' : `:${target.port}`);
+    label.textContent = `Connect to ${shown}`;
+    const subtitle = document.createElement('span');
+    subtitle.className = 'sub';
+    subtitle.textContent = 'SSH';
+    row.appendChild(icon);
+    row.appendChild(label);
+    row.appendChild(subtitle);
+    row.onclick = () => runHomeQcAction(() => startQuickConnect(target));
+    homeQcActions.push(() => startQuickConnect(target));
+    box.appendChild(row);
+  }
+
+  if (homeQcActions.length === 0) {
+    const note = document.createElement('div');
+    note.className = 'home-qc-note';
+    note.textContent = 'No matching sessions.';
+    box.appendChild(note);
+  }
+
+  box.classList.add('open');
+  if (homeQcSelected >= homeQcActions.length) homeQcSelected = homeQcActions.length - 1;
+  if (homeQcSelected < 0 && homeQcActions.length > 0) homeQcSelected = 0;
+  highlightHomeQcSelection();
+}
+
+async function renderHomeView() {
+  const [sessions, groups, shellProfiles] = await Promise.all([
+    App.ListSessions(),
+    App.ListGroups(),
+    App.ListLocalShellProfiles(),
+  ]);
+  homeSessions = sessions;
+  const groupNames = new Map(groups.map((g) => [g.id, g.name]));
+
+  // Same ordering the sidebar's own Recent block uses, just uncollapsed
+  // and given room to breathe.
+  const recent = sessions
+    .filter((s) => s.lastUsed)
+    .sort((a, b) => (b.lastUsed! > a.lastUsed! ? 1 : -1))
+    .slice(0, HOME_RECENT_LIMIT);
+
+  const hasSessions = sessions.length > 0;
+  document.getElementById('home-empty')!.style.display = hasSessions ? 'none' : 'flex';
+  document.getElementById('home-recent-section')!.style.display = recent.length > 0 ? 'block' : 'none';
+  document.getElementById('home-saved-section')!.style.display = hasSessions ? 'block' : 'none';
+  document.getElementById('home-shells-section')!.style.display = shellProfiles.length > 0 ? 'block' : 'none';
+
+  const recentGrid = document.getElementById('home-recent-grid')!;
+  recentGrid.innerHTML = '';
+  for (const s of recent) recentGrid.appendChild(homeCard(s));
+
+  const savedList = document.getElementById('home-saved-list')!;
+  savedList.innerHTML = '';
+  const byGroup = new Map<string, SessionProfile[]>();
+  for (const s of sessions) {
+    const key = s.groupId && groupNames.has(s.groupId) ? s.groupId : '';
+    const bucket = byGroup.get(key);
+    if (bucket) bucket.push(s);
+    else byGroup.set(key, [s]);
+  }
+  const groupKeys = Array.from(byGroup.keys()).sort((a, b) => {
+    if (a === b) return 0;
+    if (a === '') return 1;
+    if (b === '') return -1;
+    return (groupNames.get(a) ?? '').localeCompare(groupNames.get(b) ?? '');
+  });
+  // A single ungrouped bucket needs no "Ungrouped" header to
+  // distinguish it from anything.
+  const showGroupHeads = !(groupKeys.length === 1 && groupKeys[0] === '');
+  for (const key of groupKeys) {
+    if (showGroupHeads) {
+      const head = document.createElement('div');
+      head.className = 'home-group-head';
+      head.textContent = key ? `📁 ${groupNames.get(key)}` : 'Ungrouped';
+      savedList.appendChild(head);
+    }
+    const inGroup = byGroup.get(key)!.slice().sort((a, b) => a.name.localeCompare(b.name));
+    for (const s of inGroup) savedList.appendChild(homeSavedRow(s));
+  }
+
+  const chips = document.getElementById('home-shell-chips')!;
+  chips.innerHTML = '';
+  for (const p of shellProfiles) {
+    const chip = document.createElement('div');
+    chip.className = 'home-chip';
+    chip.tabIndex = 0;
+    chip.textContent = `${localShellProfileIcon(p.icon)} ${p.name}`;
+    chip.onclick = () => launchLocalShellProfile(p);
+    chip.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        launchLocalShellProfile(p);
+      }
+    };
+    chips.appendChild(chip);
+  }
+
+  // Everything below runs after the awaits above, which matters:
+  // switchToTab reaches this function during module evaluation (the
+  // initial Home tab), and formatShortcut reads SHORTCUT_MOD, a const
+  // declared further down the file. Awaiting first pushes this past the
+  // end of module evaluation, clear of the temporal dead zone.
+  renderHomeHints();
+  renderHomeQuickResults();
+
+  // Only claim focus if nothing else holds it. Home re-renders on every
+  // session mutation, and stealing the caret mid-typing would be worse
+  // than not autofocusing at all.
+  if (homeIsActive()) {
+    const input = document.getElementById('home-quick-connect') as HTMLInputElement;
+    const focused = document.activeElement;
+    if (!focused || focused === document.body) input.focus();
+  }
+}
+
+document.getElementById('home-quick-connect')!.addEventListener('input', (e) => {
+  homeQuickQuery = (e.target as HTMLInputElement).value;
+  homeQcSelected = 0;
+  renderHomeQuickResults();
+});
+
+document.getElementById('home-quick-connect')!.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (homeQcActions.length === 0) return;
+    const step = e.key === 'ArrowDown' ? 1 : homeQcActions.length - 1;
+    homeQcSelected = (Math.max(homeQcSelected, 0) + step) % homeQcActions.length;
+    highlightHomeQcSelection();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    const action = homeQcActions[homeQcSelected];
+    if (action) runHomeQcAction(action);
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    (e.target as HTMLInputElement).value = '';
+    homeQuickQuery = '';
+    homeQcSelected = -1;
+    renderHomeQuickResults();
+  }
+});
+
+document.getElementById('home-new-session-btn')!.addEventListener('click', () => {
+  ensurePendingTab();
+  openSessionPicker();
+});
 
 // --- Host key trust modal ---
 
@@ -2730,6 +3206,9 @@ document.getElementById('connect')!.addEventListener('click', async () => {
   const host = (document.getElementById('host') as HTMLInputElement).value;
   const user = (document.getElementById('user') as HTMLInputElement).value;
   const authMode = (document.querySelector('input[name="authmode"]:checked') as HTMLInputElement).value;
+  // 22 unless Home's quick connect parsed an explicit port out of a
+  // host:port entry (SPE-99).
+  const port = pendingQuickPort ?? 22;
 
   let req: ConnectRequest;
   if (authMode === 'key') {
@@ -2738,10 +3217,10 @@ document.getElementById('connect')!.addEventListener('click', async () => {
     const useAgent = (document.getElementById('use-ssh-agent') as HTMLInputElement).checked;
     const internalAgent = (document.getElementById('use-internal-agent') as HTMLInputElement).checked;
     const x11 = (document.getElementById('x11-toggle') as HTMLInputElement).checked;
-    req = { host, port: 22, user, keyPath, passphrase, useAgent, internalAgent, x11 };
+    req = { host, port, user, keyPath, passphrase, useAgent, internalAgent, x11 };
   } else {
     const password = (document.getElementById('password') as HTMLInputElement).value;
-    req = { host, port: 22, user, password };
+    req = { host, port, user, password };
   }
 
   // SPE-92: the same session connectActiveTab just used, a split pane
@@ -3558,6 +4037,7 @@ function resetPickerView() {
   document.getElementById('picker-grid')!.style.display = 'grid';
   document.getElementById('picker-ssh-fields')!.style.display = 'none';
   document.getElementById('picker-serial-fields')!.style.display = 'none';
+  pendingQuickPort = null;
 }
 function openSessionPicker() {
   // SPE-92: an ordinary New Session, targets the active tab's own

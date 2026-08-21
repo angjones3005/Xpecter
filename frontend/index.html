@@ -335,6 +335,51 @@
     .custom-scrollbar-track { position: absolute; top: 0; right: 2px; bottom: 0; width: 8px; z-index: 5; }
     .custom-scrollbar-thumb { position: absolute; left: 0; right: 0; background: var(--border); border-radius: 4px; cursor: pointer; min-height: 20px; }
     .custom-scrollbar-thumb:hover, .custom-scrollbar-thumb.dragging { background: var(--text-dim); }
+    /* SPE-99: the permanent Home tab's own surface. Deliberately a
+       separate node from #tab-landing, which stays the small "no session
+       yet" placeholder for ordinary un-connected tabs. Home and an empty
+       tab are different states and shouldn't render identically. */
+    #home-view { flex: 1; min-height: 0; overflow-y: auto; flex-direction: column; }
+    /* #terminal is a flex:1 sibling, so leaving it in flow would split
+       the pane 50/50 with Home and leave Home scrolling inside half the
+       height. Home has no terminal to show, and every pane grid is
+       already hidden while it's up, so the whole host comes out of flow. */
+    #terminal-pane.home-active #terminal { display: none; }
+    #home-inner { width: 100%; max-width: 780px; margin: 0 auto; padding: 34px 24px 28px; box-sizing: border-box; display: flex; flex-direction: column; gap: 22px; }
+    #home-hero h1 { margin: 0 0 4px; font-size: 22px; font-weight: 600; letter-spacing: 0.2px; }
+    #home-hero p { margin: 0; font-size: 13px; color: var(--text-dim); }
+    #home-qc-wrap { position: relative; }
+    #home-quick-connect { width: 100%; box-sizing: border-box; min-height: 34px !important; font-size: 14px !important; padding: 7px 11px !important; border-radius: 6px !important; }
+    #home-qc-results { display: none; margin-top: 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-alt); overflow: hidden; }
+    #home-qc-results.open { display: block; }
+    .home-qc-row { display: flex; align-items: center; gap: 9px; padding: 7px 11px; cursor: pointer; font-size: 13px; }
+    .home-qc-row:hover { background: var(--hover); }
+    /* --hover against --bg-alt is a 5-value difference and reads as no
+       highlight at all, which makes the Enter hint point at nothing.
+       The accent bar is what actually marks the row Enter will take. */
+    .home-qc-row.selected { background: var(--hover); box-shadow: inset 2px 0 0 var(--accent); }
+    .home-qc-row .sub { margin-left: auto; color: var(--text-dim); font-size: 11px; padding-left: 10px; }
+    .home-qc-note { padding: 7px 11px; font-size: 12px; color: var(--text-dim); }
+    .home-section-head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.7px; color: var(--text-dim); margin-bottom: 9px; }
+    .home-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(212px, 1fr)); gap: 8px; }
+    .home-card { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-alt); cursor: pointer; min-width: 0; transition: border-color 0.12s ease, background 0.12s ease; }
+    .home-card:hover { border-color: var(--accent); background: var(--hover); }
+    .home-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .home-card-title { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .home-card-sub { font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .home-group-head { font-size: 12px; color: var(--text-dim); margin: 10px 0 5px; }
+    .home-group-head:first-child { margin-top: 0; }
+    .home-saved-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+    .home-saved-row:hover { background: var(--hover); }
+    .home-saved-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .home-saved-row .sub { margin-left: auto; color: var(--text-dim); font-size: 11px; padding-left: 10px; }
+    .home-chip-row { display: flex; flex-wrap: wrap; gap: 7px; }
+    .home-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg-alt); cursor: pointer; font-size: 12px; }
+    .home-chip:hover { border-color: var(--accent); background: var(--hover); }
+    #home-hints { display: flex; flex-wrap: wrap; gap: 6px 16px; border-top: 1px solid var(--border); padding-top: 14px; font-size: 11px; color: var(--text-dim); }
+    #home-hints kbd { border: 1px solid var(--border); border-radius: 3px; padding: 1px 5px; font-family: inherit; font-size: 10px; color: var(--text); }
+    #home-empty { display: none; flex-direction: column; align-items: flex-start; gap: 12px; }
+    #home-empty p { margin: 0; font-size: 13px; color: var(--text-dim); max-width: 46ch; line-height: 1.5; }
   </style>
 </head>
 <body>
@@ -517,6 +562,36 @@
       <div id="tab-landing" style="display:none;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:12px;">
         <div style="font-size:14px;color:var(--text-dim);">No session yet</div>
         <button id="new-session-btn">+ New Session</button>
+      </div>
+      <div id="home-view" style="display:none;">
+        <div id="home-inner">
+          <div id="home-hero">
+            <h1>Specter</h1>
+            <p>Pick up where you left off, or type a host to connect.</p>
+          </div>
+          <div id="home-qc-wrap">
+            <input id="home-quick-connect" type="text" autocomplete="off" spellcheck="false"
+                   placeholder="Search saved sessions, or type user@host to connect&hellip;" />
+            <div id="home-qc-results"></div>
+          </div>
+          <div id="home-empty">
+            <p>No saved sessions yet. Create one and it will show up here, ready to reopen on every launch.</p>
+            <button id="home-new-session-btn">+ New Session</button>
+          </div>
+          <div class="home-section" id="home-recent-section" style="display:none;">
+            <div class="home-section-head">Recent</div>
+            <div id="home-recent-grid" class="home-card-grid"></div>
+          </div>
+          <div class="home-section" id="home-saved-section" style="display:none;">
+            <div class="home-section-head">Saved sessions</div>
+            <div id="home-saved-list"></div>
+          </div>
+          <div class="home-section" id="home-shells-section" style="display:none;">
+            <div class="home-section-head">Local shells</div>
+            <div id="home-shell-chips" class="home-chip-row"></div>
+          </div>
+          <div id="home-hints"></div>
+        </div>
       </div>
       <div id="terminal" style="position:relative;"></div>
     </div>
