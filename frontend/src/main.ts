@@ -2023,6 +2023,54 @@ let copyOnSelectEnabled = localStorage.getItem('specter-copy-on-select') === 'on
 let rightClickPasteEnabled = localStorage.getItem('specter-rclick-paste') !== 'off';
 let highlightEnabled = localStorage.getItem('specter-highlight') !== 'off';
 
+type CommandSnippet = { name: string; command: string };
+let commandSnippets: CommandSnippet[] = loadCommandSnippets();
+
+function loadCommandSnippets(): CommandSnippet[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('specter-command-snippets') || '[]');
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is CommandSnippet =>
+      !!item && typeof item.name === 'string' && typeof item.command === 'string');
+  } catch {
+    return [];
+  }
+}
+
+function saveCommandSnippets() {
+  localStorage.setItem('specter-command-snippets', JSON.stringify(commandSnippets));
+}
+
+function renderCommandSnippetsMenu() {
+  const container = document.getElementById('menu-snippets')!;
+  container.innerHTML = '';
+  for (const snippet of commandSnippets) {
+    const item = document.createElement('div');
+    item.className = 'item';
+    item.textContent = `Snippet: ${snippet.name}`;
+    item.title = snippet.command;
+    item.onclick = () => {
+      closeAllMenus();
+      const tab = activeTabId ? tabs.get(activeTabId) : null;
+      if (!tab) return;
+      const session = focusedSession(tab);
+      if (session.status !== 'connected' || !session.backendId) return;
+      writeToSessionWithPasteGuard(session, `${snippet.command}\r`);
+    };
+    container.appendChild(item);
+  }
+}
+
+function manageCommandSnippets() {
+  const name = prompt('Snippet name:');
+  if (!name?.trim()) return;
+  const command = prompt('Command or configuration block:');
+  if (!command?.trim()) return;
+  commandSnippets.push({ name: name.trim(), command });
+  saveCommandSnippets();
+  renderCommandSnippetsMenu();
+}
+
 const HIGHLIGHT_RULES: [RegExp, string][] = [
   [/\b(connected|up|ok|success)\b/gi, '38;2;51;204;51'],   // bright green, MobaXterm-style
   [/\b(disabled|down|error|fail|failed)\b/gi, '38;2;229;72;77'], // red
@@ -3115,6 +3163,7 @@ document.getElementById('menu-reset-settings')!.addEventListener('click', async 
     'specter-warn-multiline-paste',
     'specter-show-tab-numbers',
     'specter-highlight',
+    'specter-command-snippets',
   ]) {
     localStorage.removeItem(key);
   }
@@ -3124,6 +3173,7 @@ document.getElementById('menu-reset-settings')!.addEventListener('click', async 
   warnMultilinePasteEnabled = true;
   showTabNumbersEnabled = false;
   highlightEnabled = true;
+  commandSnippets = [];
   appSettings = {};
   await App.SaveSettings(appSettings);
   await loadSettingsAndApply();
@@ -3151,6 +3201,12 @@ highlightToggle.addEventListener('change', () => {
   highlightEnabled = highlightToggle.checked;
   localStorage.setItem('specter-highlight', highlightEnabled ? 'on' : 'off');
 });
+
+document.getElementById('menu-manage-snippets')!.addEventListener('click', () => {
+  closeAllMenus();
+  manageCommandSnippets();
+});
+renderCommandSnippetsMenu();
 
 // --- Local shell profiles (SPE-102) ---
 
