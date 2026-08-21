@@ -273,12 +273,54 @@
       border-color: var(--accent);
       box-shadow: 0 2px 7px rgba(0,0,0,0.2);
     }
-    #session-picker-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 2000; }
-    #session-picker-overlay.open { display: flex; }
-    #session-picker { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; width: 280px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
-    #session-picker .picker-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px; }
-    #session-picker .picker-header .close { cursor: pointer; opacity: 0.6; }
-    #session-picker .picker-header .close:hover { opacity: 1; }
+    /* --- Dialogs (SPE-101) ---
+       One overlay, panel and header definition for every dialog in the
+       app. These were duplicated per dialog ID: five copies of the same
+       overlay, five of the same header, five of the same close button.
+       Adding a dialog meant copying six rules, and changing the look
+       meant editing five places and missing one. IDs below now carry
+       only what genuinely differs, which is width and scrolling. */
+    #session-picker-overlay, #lsp-editor-overlay, #session-editor-overlay,
+    #shortcuts-overlay, #backup-restore-overlay, .dialog-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none;
+      align-items: center; justify-content: center; z-index: 2000;
+      padding: 20px; box-sizing: border-box;
+    }
+    #session-picker-overlay.open, #lsp-editor-overlay.open, #session-editor-overlay.open,
+    #shortcuts-overlay.open, #backup-restore-overlay.open, .dialog-overlay.open { display: flex; }
+    #session-picker, #lsp-editor, #session-editor,
+    #shortcuts-dialog, #backup-restore-dialog, .dialog {
+      background: var(--bg); color: var(--text); border: 1px solid var(--border);
+      border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+      max-width: 100%; max-height: 100%; overflow-y: auto;
+    }
+    .dialog { width: 460px; }
+    .picker-header, .dialog-head {
+      display: flex; justify-content: space-between; align-items: center; gap: 10px;
+      padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px;
+    }
+    .picker-header .close, .dialog-head .close { cursor: pointer; opacity: 0.6; font-weight: 400; }
+    .picker-header .close:hover, .dialog-head .close:hover { opacity: 1; }
+    .dialog-head strong { font-weight: 600; }
+    /* A dialog that carries a warning or a refusal says so with the
+       theme's own warning/danger tokens rather than a hardcoded hex, so
+       it survives a theme switch. */
+    .dialog.warning .dialog-head { border-bottom-color: var(--warning); color: var(--warning); }
+    .dialog.danger .dialog-head { border-bottom-color: var(--danger); color: var(--danger); }
+    .dialog-body { padding: 16px; display: flex; flex-direction: column; gap: 10px; font-size: 13px; line-height: 1.5; }
+    .dialog-body p { margin: 0; }
+    .dialog-body code {
+      font-family: Menlo, Consolas, monospace; font-size: 12px;
+      background: var(--bg-input); border: 1px solid var(--border);
+      border-radius: 3px; padding: 1px 5px; word-break: break-all;
+    }
+    .dialog-body .warn { color: var(--warning); }
+    .dialog-body .danger { color: var(--danger); }
+    .dialog-field { width: 100%; box-sizing: border-box; }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 0 16px 16px; }
+    button.danger { background: var(--danger) !important; border-color: var(--danger) !important; color: #ffffff !important; }
+    button.warning { background: var(--warning) !important; border-color: var(--warning) !important; color: var(--bg) !important; }
+    #session-picker { width: 280px; }
     #session-picker .picker-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; padding: 20px; }
     #session-picker .picker-item { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 8px; border-radius: 8px; cursor: pointer; font-size: 13px; color: var(--text); border: 1px solid var(--border); background: var(--bg-input); box-shadow: inset 0 1px 0 rgba(255,255,255,0.04); transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease, box-shadow 0.12s ease; }
     #session-picker .picker-item:hover { background: var(--hover); border-color: var(--accent); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.22); }
@@ -288,43 +330,23 @@
     #connect, #serial-connect, #lsp-save, #se-save { min-width: 112px; }
     /* SPE-102: local shell profile editor, same overlay/dialog shell as
        #session-picker, own ID so both can exist independently. */
-    #lsp-editor-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 2000; }
-    #lsp-editor-overlay.open { display: flex; }
-    #lsp-editor { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; width: 320px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
-    #lsp-editor .picker-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px; }
-    #lsp-editor .picker-header .close { cursor: pointer; opacity: 0.6; }
-    #lsp-editor .picker-header .close:hover { opacity: 1; }
+    #lsp-editor { width: 320px; }
     #lsp-editor .fields { display: flex; flex-direction: column; gap: 8px; padding: 16px; }
     /* SPE-62: real "Edit session" dialog, two tabs (Basic/Advanced) over
        actual SessionProfile fields, no placeholder tabs for settings
        Specter doesn't have per-session yet (terminal theme is global,
        SPE-61; SSH keepalive is global, SPE-79). */
-    #session-editor-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 2000; }
-    #session-editor-overlay.open { display: flex; }
-    #session-editor { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; width: 340px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
-    #shortcuts-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 2000; }
-    #shortcuts-overlay.open { display: flex; }
-    #shortcuts-dialog { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; width: 420px; max-height: 80vh; overflow-y: auto; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
-    #shortcuts-dialog .picker-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px; }
-    #shortcuts-dialog .picker-header .close { cursor: pointer; opacity: 0.6; }
-    #shortcuts-dialog .picker-header .close:hover { opacity: 1; }
+    #session-editor { width: 340px; }
+    #shortcuts-dialog { width: 420px; max-height: 80vh; }
     #shortcuts-dialog .shortcut-group { padding: 8px 16px; }
     #shortcuts-dialog .shortcut-group-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); padding: 8px 0 4px; }
     #shortcuts-dialog .shortcut-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 13px; }
     #shortcuts-dialog .shortcut-keys { font-family: Menlo, Consolas, monospace; font-size: 12px; color: var(--text-dim); background: var(--bg-input); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
     #shortcuts-dialog .shortcut-note { padding: 8px 16px 14px; font-size: 11px; color: var(--text-dim); border-top: 1px solid var(--border); }
-    #backup-restore-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 2000; }
-    #backup-restore-overlay.open { display: flex; }
-    #backup-restore-dialog { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; width: 340px; max-height: 70vh; overflow-y: auto; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
-    #backup-restore-dialog .picker-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px; }
-    #backup-restore-dialog .picker-header .close { cursor: pointer; opacity: 0.6; }
-    #backup-restore-dialog .picker-header .close:hover { opacity: 1; }
+    #backup-restore-dialog { width: 340px; max-height: 70vh; }
     #backup-restore-dialog .backup-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 16px; font-size: 13px; cursor: pointer; }
     #backup-restore-dialog .backup-row:hover { background: var(--hover); }
     #backup-restore-dialog .backup-empty { padding: 16px; font-size: 12px; color: var(--text-dim); }
-    #session-editor .picker-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px; }
-    #session-editor .picker-header .close { cursor: pointer; opacity: 0.6; }
-    #session-editor .picker-header .close:hover { opacity: 1; }
     #session-editor .editor-tabs { display: flex; border-bottom: 1px solid var(--border); }
     #session-editor .editor-tab { flex: 1; text-align: center; padding: 8px; cursor: pointer; font-size: 13px; color: var(--text-dim); border-bottom: 2px solid transparent; user-select: none; }
     #session-editor .editor-tab.active { color: var(--text); border-bottom-color: var(--accent); }
@@ -685,8 +707,8 @@
         <div class="picker-item" id="picker-telnet"><span class="icon">↔</span><span>Telnet</span></div>
       </div>
       <div id="picker-serial-fields" style="display:none;flex-direction:column;gap:8px;padding:16px;">
-        <input id="serial-port" placeholder="/dev/ttyUSB0 or COM3" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
-        <select id="serial-baud" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;">
+        <input id="serial-port" placeholder="/dev/ttyUSB0 or COM3" class="dialog-field" />
+        <select id="serial-baud" class="dialog-field">
           <option value="9600" selected>9600</option>
           <option value="19200">19200</option>
           <option value="38400">38400</option>
@@ -696,10 +718,10 @@
         <button id="serial-connect" style="padding:6px;">Connect</button>
       </div>
       <div id="picker-ssh-fields" style="display:none;padding:16px;display:none;flex-direction:column;gap:8px;">
-        <input id="host" placeholder="host" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
-        <input id="user" placeholder="user" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <input id="host" placeholder="host" class="dialog-field" />
+        <input id="user" placeholder="user" class="dialog-field" />
         <div>
-          <select id="device-kind-select" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;">
+          <select id="device-kind-select" class="dialog-field">
             <option value="host">VM / Host</option>
             <option value="switch">Network switch</option>
             <option value="firewall">Firewall</option>
@@ -710,15 +732,15 @@
           <label><input type="radio" name="authmode" value="key" /> Key</label>
         </div>
         <span id="auth-password-fields">
-          <input id="password" placeholder="password" type="password" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+          <input id="password" placeholder="password" type="password" class="dialog-field" />
         <div id="caps-lock-warning" style="display:none;color:var(--warning);font-size:11px;">⚠ Caps Lock is on</div>
         </span>
         <span id="auth-key-fields" style="display:none;flex-direction:column;gap:8px;">
           <label><input id="use-ssh-agent" type="checkbox" /> Use SSH agent (OpenSSH / Pageant)</label>
           <label><input id="use-internal-agent" type="checkbox" /> Use Specter memory agent</label>
-          <input id="keyPath" placeholder="key path" readonly style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+          <input id="keyPath" placeholder="key path" readonly class="dialog-field" />
           <button id="browse-key">Browse…</button>
-          <input id="passphrase" placeholder="passphrase (if any)" type="password" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+          <input id="passphrase" placeholder="passphrase (if any)" type="password" class="dialog-field" />
         </span>
         <label><input id="x11-toggle" type="checkbox" /> Enable X11 forwarding</label>
         <button id="connect" style="padding:6px;">Connect</button>
@@ -732,8 +754,8 @@
         <span class="close" id="lsp-editor-close">✕</span>
       </div>
       <div class="fields">
-        <input id="lsp-name" placeholder="Name" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
-        <input id="lsp-command" placeholder="Command line (e.g. /bin/zsh, powershell.exe, wsl.exe -d Ubuntu-24.04)" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <input id="lsp-name" placeholder="Name" class="dialog-field" />
+        <input id="lsp-command" placeholder="Command line (e.g. /bin/zsh, powershell.exe, wsl.exe -d Ubuntu-24.04)" class="dialog-field" />
         <div style="display:flex;gap:6px;">
           <input id="lsp-dir" placeholder="Same as Specter" readonly style="flex:1;min-width:0;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
           <button id="lsp-browse-dir" type="button">Browse…</button>
@@ -744,7 +766,7 @@
           <option value="cmd">Command Prompt</option>
           <option value="wsl">WSL / Linux</option>
         </select>
-        <input id="lsp-tabtitle" placeholder="Tab title (defaults to name)" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <input id="lsp-tabtitle" placeholder="Tab title (defaults to name)" class="dialog-field" />
         <div style="display:flex;justify-content:flex-end;gap:6px;margin-top:4px;">
           <button id="lsp-cancel" type="button" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);">Cancel</button>
           <button id="lsp-save" type="button">Save</button>
@@ -763,15 +785,15 @@
         <div class="editor-tab" data-tab="advanced">Advanced settings</div>
       </div>
       <div class="editor-tab-content" id="session-editor-tab-basic">
-        <input id="se-name" placeholder="Name" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <input id="se-name" placeholder="Name" class="dialog-field" />
         <div id="se-ssh-basic-fields" style="display:flex;flex-direction:column;gap:8px;">
-          <input id="se-host" placeholder="host" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
-          <input id="se-port" placeholder="port" type="number" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
-          <input id="se-user" placeholder="user" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+          <input id="se-host" placeholder="host" class="dialog-field" />
+          <input id="se-port" placeholder="port" type="number" class="dialog-field" />
+          <input id="se-user" placeholder="user" class="dialog-field" />
         </div>
         <div id="se-serial-basic-fields" style="display:none;flex-direction:column;gap:8px;">
-          <input id="se-serial-port" placeholder="/dev/ttyUSB0 or COM3" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
-          <select id="se-baud" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;">
+          <input id="se-serial-port" placeholder="/dev/ttyUSB0 or COM3" class="dialog-field" />
+          <select id="se-baud" class="dialog-field">
             <option value="9600">9600</option>
             <option value="19200">19200</option>
             <option value="38400">38400</option>
@@ -789,7 +811,7 @@
           </div>
           <label><input id="se-use-ssh-agent" type="checkbox" /> Use SSH agent (OpenSSH / Pageant)</label>
           <label><input id="se-use-internal-agent" type="checkbox" /> Use Specter memory agent</label>
-          <select id="se-devicekind-select" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;">
+          <select id="se-devicekind-select" class="dialog-field">
             <option value="host">VM / Host</option>
             <option value="switch">Network switch</option>
             <option value="firewall">Firewall</option>
@@ -798,7 +820,7 @@
         <select id="se-group" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 6px;">
           <option value="">No folder</option>
         </select>
-        <input id="se-tags" placeholder="Tags (comma-separated)" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+        <input id="se-tags" placeholder="Tags (comma-separated)" class="dialog-field" />
       </div>
       <div class="editor-actions">
         <button id="se-cancel" type="button" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);">Cancel</button>

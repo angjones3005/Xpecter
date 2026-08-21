@@ -3162,73 +3162,167 @@ document.getElementById('home-new-session-btn')!.addEventListener('click', () =>
 // SPE-65: soft warning for a group/world-readable key file, real
 // OpenSSH refuses to use one outright, Specter warns but lets the user
 // proceed, since it's their key and Specter didn't create the file.
-function showKeyPermWarning(opts: { path: string; mode: string; onProceed: () => void; onCancel: () => void }) {
+// SPE-101: one builder for the dialogs that are constructed in JS
+// rather than declared in index.html. Each used to hardcode its own
+// dark palette (#1e1e1e panel, #ddd text, #3a3a3a border), so all three
+// rendered dark-on-dark for anyone using the light theme. They share
+// the same tokenised .dialog styling as every declared dialog now, and
+// pick up Escape and click-outside dismissal, which only the passphrase
+// prompt previously had.
+type DialogAction = {
+  label: string;
+  kind?: 'primary' | 'secondary' | 'danger' | 'warning';
+  run: () => void;
+};
+
+function buildDialog(opts: {
+  title: string;
+  tone?: 'warning' | 'danger';
+  fill: (body: HTMLDivElement) => void;
+  actions: DialogAction[];
+  onDismiss: () => void;
+}) {
   const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:1000;';
-  const box = document.createElement('div');
-  box.style.cssText = 'background:#1e1e1e;border:2px solid #d29922;border-radius:8px;padding:24px;max-width:480px;color:#ddd;font-family:sans-serif;';
-  box.innerHTML = `
-    <h3 style="margin-top:0;color:#d29922;">Key file permissions are too open</h3>
-    <p><strong>Path:</strong> <code style="word-break:break-all;">${opts.path}</code></p>
-    <p><strong>Mode:</strong> <code>${opts.mode}</code></p>
-    <p>This private key is readable by other users on this system. OpenSSH itself would refuse to use a key like this. You can proceed anyway, but consider running <code>chmod 600 ${opts.path}</code>.</p>
-  `;
-  const btnRow = document.createElement('div');
-  btnRow.style.cssText = 'display:flex;gap:8px;margin-top:16px;';
-  const cancelBtn = document.createElement('button');
-  cancelBtn.textContent = 'Cancel';
-  cancelBtn.onclick = () => { document.body.removeChild(overlay); opts.onCancel(); };
-  const proceedBtn = document.createElement('button');
-  proceedBtn.textContent = 'Use it anyway';
-  proceedBtn.style.cssText = 'background:#d29922;color:#1e1e1e;';
-  proceedBtn.onclick = () => { document.body.removeChild(overlay); opts.onProceed(); };
-  btnRow.appendChild(cancelBtn);
-  btnRow.appendChild(proceedBtn);
-  box.appendChild(btnRow);
-  overlay.appendChild(box);
+  overlay.className = 'dialog-overlay open';
+
+  const dialog = document.createElement('div');
+  dialog.className = 'dialog' + (opts.tone ? ` ${opts.tone}` : '');
+
+  const head = document.createElement('div');
+  head.className = 'dialog-head';
+  const heading = document.createElement('strong');
+  heading.textContent = opts.title;
+  head.appendChild(heading);
+
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+  };
+  const dismiss = () => {
+    if (closed) return;
+    close();
+    opts.onDismiss();
+  };
+  function onKey(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      dismiss();
+    }
+  }
+
+  const closeX = document.createElement('span');
+  closeX.className = 'close';
+  closeX.textContent = '✕';
+  closeX.title = 'Cancel';
+  closeX.onclick = dismiss;
+  head.appendChild(closeX);
+
+  const body = document.createElement('div');
+  body.className = 'dialog-body';
+  opts.fill(body);
+
+  const actions = document.createElement('div');
+  actions.className = 'dialog-actions';
+  for (const action of opts.actions) {
+    const button = document.createElement('button');
+    button.textContent = action.label;
+    if (action.kind && action.kind !== 'primary') button.className = action.kind;
+    button.onclick = () => {
+      close();
+      action.run();
+    };
+    actions.appendChild(button);
+  }
+
+  dialog.appendChild(head);
+  dialog.appendChild(body);
+  dialog.appendChild(actions);
+  overlay.appendChild(dialog);
+  overlay.addEventListener('mousedown', (e) => {
+    if (e.target === overlay) dismiss();
+  });
+  document.addEventListener('keydown', onKey);
   document.body.appendChild(overlay);
+  return { close };
+}
+
+// Label plus value on one line, with the value in a <code> chip. Built
+// with textContent throughout: these dialogs display a hostname, a key
+// type and a fingerprint that all arrive from the far end of a
+// connection that has not been verified yet, and the trust prompt used
+// to interpolate them straight into innerHTML. A hostile server could
+// put markup in there and dress up the very dialog asking whether to
+// trust it.
+function dialogField(body: HTMLDivElement, label: string, value: string) {
+  const line = document.createElement('p');
+  const strong = document.createElement('strong');
+  strong.textContent = `${label}: `;
+  const code = document.createElement('code');
+  code.textContent = value;
+  line.appendChild(strong);
+  line.appendChild(code);
+  body.appendChild(line);
+}
+
+function dialogText(body: HTMLDivElement, text: string, tone?: 'warn' | 'danger') {
+  const para = document.createElement('p');
+  if (tone) para.className = tone;
+  para.textContent = text;
+  body.appendChild(para);
+}
+
+// SPE-63: masked passphrase entry, replacing window.prompt() which has
+// no password mode and showed the passphrase in cleartext on-screen
+// while typing.
+// SPE-65: soft warning for a group/world-readable key file, real
+// OpenSSH refuses to use one outright, Specter warns but lets the user
+// proceed, since it's their key and Specter didn't create the file.
+function showKeyPermWarning(opts: { path: string; mode: string; onProceed: () => void; onCancel: () => void }) {
+  buildDialog({
+    title: 'Key file permissions are too open',
+    tone: 'warning',
+    onDismiss: opts.onCancel,
+    fill: (body) => {
+      dialogField(body, 'Path', opts.path);
+      dialogField(body, 'Mode', opts.mode);
+      dialogText(body, `This private key is readable by other users on this system. OpenSSH itself would refuse to use a key like this. You can proceed anyway, but consider running chmod 600 on ${opts.path}.`);
+    },
+    actions: [
+      { label: 'Cancel', kind: 'secondary', run: opts.onCancel },
+      { label: 'Use it anyway', kind: 'warning', run: opts.onProceed },
+    ],
+  });
 }
 
 function showPassphrasePrompt(opts: { onSubmit: (passphrase: string) => void; onCancel: () => void }) {
-  const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:1000;';
-  const box = document.createElement('div');
-  box.style.cssText = 'background:#1e1e1e;border:2px solid #3a3a3a;border-radius:8px;padding:24px;max-width:380px;width:100%;color:#ddd;font-family:sans-serif;';
-
-  const title = document.createElement('h3');
-  title.style.cssText = 'margin-top:0;color:#ddd;';
-  title.textContent = 'Encrypted key';
-  box.appendChild(title);
-
-  const label = document.createElement('p');
-  label.textContent = 'This private key is encrypted. Enter its passphrase to continue.';
-  box.appendChild(label);
-
   const input = document.createElement('input');
   input.type = 'password';
-  input.autofocus = true;
-  input.style.cssText = 'width:100%;box-sizing:border-box;background:#151515;border:1px solid #3a3a3a;color:#ddd;padding:6px 8px;font-size:13px;';
-  box.appendChild(input);
+  input.placeholder = 'passphrase';
+  input.style.cssText = 'width:100%;box-sizing:border-box;';
 
-  const btnRow = document.createElement('div');
-  btnRow.style.cssText = 'display:flex;gap:8px;margin-top:16px;';
-  const cancelBtn = document.createElement('button');
-  cancelBtn.textContent = 'Cancel';
-  cancelBtn.onclick = () => { document.body.removeChild(overlay); opts.onCancel(); };
-  const submitBtn = document.createElement('button');
-  submitBtn.textContent = 'Continue';
-  submitBtn.style.cssText = 'background:#3178c6;color:white;';
-  const submit = () => { document.body.removeChild(overlay); opts.onSubmit(input.value); };
-  submitBtn.onclick = submit;
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') submit();
-    if (e.key === 'Escape') { document.body.removeChild(overlay); opts.onCancel(); }
+  const dialog = buildDialog({
+    title: 'Encrypted key',
+    onDismiss: opts.onCancel,
+    fill: (body) => {
+      dialogText(body, 'This private key is encrypted. Enter its passphrase to continue.');
+      body.appendChild(input);
+    },
+    actions: [
+      { label: 'Cancel', kind: 'secondary', run: opts.onCancel },
+      { label: 'Continue', run: () => opts.onSubmit(input.value) },
+    ],
   });
-  btnRow.appendChild(cancelBtn);
-  btnRow.appendChild(submitBtn);
-  box.appendChild(btnRow);
-  overlay.appendChild(box);
-  document.body.appendChild(overlay);
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const passphrase = input.value;
+    dialog.close();
+    opts.onSubmit(passphrase);
+  });
   input.focus();
 }
 
@@ -3236,34 +3330,29 @@ function showTrustPrompt(opts: {
   host: string; fingerprint: string; keyType: string; changed: boolean;
   onAccept: () => void; onReject: () => void;
 }) {
-  const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:1000;';
-  const box = document.createElement('div');
-  box.style.cssText = `background:#1e1e1e;border:2px solid ${opts.changed ? '#e5484d' : '#3a3a3a'};border-radius:8px;padding:24px;max-width:480px;color:#ddd;font-family:sans-serif;`;
-  const title = opts.changed ? '⚠️ Host key has CHANGED — possible security risk' : 'Unknown host — verify before connecting';
-  box.innerHTML = `
-    <h3 style="margin-top:0;color:${opts.changed ? '#e5484d' : '#ddd'}">${title}</h3>
-    <p><strong>Host:</strong> ${opts.host}</p>
-    <p><strong>Key type:</strong> ${opts.keyType}</p>
-    <p><strong>Fingerprint:</strong> <code style="word-break:break-all;">${opts.fingerprint}</code></p>
-    ${opts.changed
-      ? '<p style="color:#e5484d;">This host previously presented a different key. This could mean the server was reinstalled — or that your connection is being intercepted. Only proceed if you\'re certain.</p>'
-      : '<p>Verify this fingerprint matches what the server administrator provided before trusting it.</p>'}
-  `;
-  const btnRow = document.createElement('div');
-  btnRow.style.cssText = 'display:flex;gap:8px;margin-top:16px;';
-  const rejectBtn = document.createElement('button');
-  rejectBtn.textContent = 'Cancel';
-  rejectBtn.onclick = () => { document.body.removeChild(overlay); opts.onReject(); };
-  const acceptBtn = document.createElement('button');
-  acceptBtn.textContent = opts.changed ? 'I understand the risk — trust anyway' : 'Trust and connect';
-  acceptBtn.style.cssText = opts.changed ? 'background:#e5484d;color:white;' : 'background:#3178c6;color:white;';
-  acceptBtn.onclick = () => { document.body.removeChild(overlay); opts.onAccept(); };
-  btnRow.appendChild(rejectBtn);
-  btnRow.appendChild(acceptBtn);
-  box.appendChild(btnRow);
-  overlay.appendChild(box);
-  document.body.appendChild(overlay);
+  buildDialog({
+    title: opts.changed
+      ? 'Host key has CHANGED — possible security risk'
+      : 'Unknown host — verify before connecting',
+    tone: opts.changed ? 'danger' : undefined,
+    onDismiss: opts.onReject,
+    fill: (body) => {
+      dialogField(body, 'Host', opts.host);
+      dialogField(body, 'Key type', opts.keyType);
+      dialogField(body, 'Fingerprint', opts.fingerprint);
+      if (opts.changed) {
+        dialogText(body, 'This host previously presented a different key. This could mean the server was reinstalled — or that your connection is being intercepted. Only proceed if you are certain.', 'danger');
+      } else {
+        dialogText(body, 'Verify this fingerprint matches what the server administrator provided before trusting it.');
+      }
+    },
+    actions: [
+      { label: 'Cancel', kind: 'secondary', run: opts.onReject },
+      opts.changed
+        ? { label: 'I understand the risk — trust anyway', kind: 'danger' as const, run: opts.onAccept }
+        : { label: 'Trust and connect', run: opts.onAccept },
+    ],
+  });
 }
 
 function showConnectError(message: string) {
@@ -3276,7 +3365,7 @@ function showConnectError(message: string) {
 
     el.id = 'connect-error';
 
-    el.style.cssText = 'width:100%;color:#e5484d;font-size:12px;padding:2px 0;';
+    el.style.cssText = 'width:100%;color:var(--danger);font-size:12px;padding:2px 0;';
 
     document.getElementById('picker-ssh-fields')!.appendChild(el);
 
