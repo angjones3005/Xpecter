@@ -2514,6 +2514,9 @@ async function connectActiveTab(req: ConnectRequest) {
     target.status = 'connected';
     createTerminalForSession(target, ownerTab);
     wireSSHEvents(target, result.sessionId, req);
+    if (result.connectDurationMs) {
+      target.term?.write(`\r\n\x1b[90mSSH connected in ${result.connectDurationMs} ms.\x1b[0m\r\n`);
+    }
     switchToTab(ownerTab.id);
     closeSessionPicker();
     if (target === focusedSession(ownerTab)) refreshFileList('.', result.sessionId);

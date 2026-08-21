@@ -49,6 +49,7 @@ func NewApp(startupDir string) *App {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	_ = registerContextMenu()
 	cleanupStaleRemoteFiles()
 	// SPE-87: best-effort, fire-and-forget. A slow disk or a failed
 	// write should never delay or block app startup, and there's no
@@ -204,13 +205,14 @@ type ConnectRequest struct {
 }
 
 type ConnectResult struct {
-	SessionID       string `json:"sessionId,omitempty"`
-	NeedsTrust      bool   `json:"needsTrust,omitempty"`
-	Changed         bool   `json:"changed,omitempty"`
-	Host            string `json:"host,omitempty"`
-	Fingerprint     string `json:"fingerprint,omitempty"`
-	KeyType         string `json:"keyType,omitempty"`
-	NeedsPassphrase bool   `json:"needsPassphrase,omitempty"`
+	SessionID         string `json:"sessionId,omitempty"`
+	ConnectDurationMs int64  `json:"connectDurationMs,omitempty"`
+	NeedsTrust        bool   `json:"needsTrust,omitempty"`
+	Changed           bool   `json:"changed,omitempty"`
+	Host              string `json:"host,omitempty"`
+	Fingerprint       string `json:"fingerprint,omitempty"`
+	KeyType           string `json:"keyType,omitempty"`
+	NeedsPassphrase   bool   `json:"needsPassphrase,omitempty"`
 	// NeedsKeyPermConfirm (SPE-65): the selected key file is
 	// group/world-readable. Soft warning, not a hard block, retry with
 	// IgnoreKeyPermWarning once the user's explicitly acknowledged it.
@@ -231,6 +233,7 @@ func (a *App) Connect(req ConnectRequest) (ConnectResult, error) {
 	// A load failure isn't fatal to connecting, defaults to keepalive
 	// enabled (the safe default) rather than blocking the connection.
 	settings, _ := config.LoadSettings()
+	startedAt := time.Now()
 	sess, err := sshclient.Dial(sshclient.Config{
 		Host: req.Host, Port: req.Port, User: req.User,
 		Password: req.Password, KeyPath: req.KeyPath, Passphrase: req.Passphrase,
@@ -286,7 +289,7 @@ func (a *App) Connect(req ConnectRequest) (ConnectResult, error) {
 		return ConnectResult{}, err
 	}
 
-	return ConnectResult{SessionID: id, LegacyCompat: sess.UsedLegacyCompat()}, nil
+	return ConnectResult{SessionID: id, LegacyCompat: sess.UsedLegacyCompat(), ConnectDurationMs: time.Since(startedAt).Milliseconds()}, nil
 }
 
 // closeErrorMessage renders a CloseReason's error for display, matching

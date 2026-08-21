@@ -139,6 +139,7 @@ export namespace main {
 	}
 	export class ConnectResult {
 	    sessionId?: string;
+	    connectDurationMs?: number;
 	    needsTrust?: boolean;
 	    changed?: boolean;
 	    host?: string;
@@ -157,6 +158,7 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.sessionId = source["sessionId"];
+	        this.connectDurationMs = source["connectDurationMs"];
 	        this.needsTrust = source["needsTrust"];
 	        this.changed = source["changed"];
 	        this.host = source["host"];

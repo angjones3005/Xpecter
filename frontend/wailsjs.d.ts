@@ -16,6 +16,7 @@ export interface ConnectRequest {
 }
 export interface ConnectResult {
   sessionId?: string;
+  connectDurationMs?: number;
   needsTrust?: boolean;
   changed?: boolean;
   host?: string;
