@@ -160,6 +160,67 @@
       transform: translateY(1px);
       box-shadow: inset 0 1px 3px rgba(0,0,0,0.25);
     }
+    /* Shared compact control language: dark surface, tight dimensions,
+       quiet borders, and one consistent focus treatment. Important is
+       intentional here because many older controls still carry inline
+       presentation styles. */
+    button,
+    select,
+    input[type="text"],
+    input[type="password"],
+    input[type="number"] {
+      min-height: 24px;
+      box-sizing: border-box;
+      background: var(--bg-input) !important;
+      color: var(--text) !important;
+      border: 1px solid #3d3d3d !important;
+      border-radius: 3px !important;
+      padding: 3px 7px !important;
+      font-size: 12px !important;
+      font-weight: 400 !important;
+      line-height: 1.2 !important;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.04) !important;
+    }
+    button:hover,
+    select:hover,
+    input[type="text"]:hover,
+    input[type="password"]:hover,
+    input[type="number"]:hover {
+      background: var(--hover) !important;
+      border-color: #5a5a5a !important;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.06) !important;
+    }
+    button:focus-visible,
+    select:focus-visible,
+    input[type="text"]:focus,
+    input[type="password"]:focus,
+    input[type="number"]:focus {
+      outline: 1px solid var(--accent);
+      outline-offset: 1px;
+      border-color: var(--accent) !important;
+    }
+    select {
+      min-width: 72px;
+      padding-right: 22px !important;
+      appearance: auto;
+    }
+    #titlebar-controls button {
+      min-height: 0;
+      background: transparent !important;
+      border: none !important;
+      border-radius: 0 !important;
+      padding: 0 !important;
+      box-shadow: none !important;
+      font-size: 13px !important;
+    }
+    #titlebar-controls button:hover {
+      background: var(--hover) !important;
+      border-color: transparent !important;
+      box-shadow: none !important;
+    }
+    #titlebar-controls button#win-close:hover {
+      background: #e5484d !important;
+    }
     button:focus-visible, .picker-item:focus-visible {
       outline: 2px solid var(--accent);
       outline-offset: 2px;
