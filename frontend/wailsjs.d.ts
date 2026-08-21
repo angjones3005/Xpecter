@@ -51,6 +51,9 @@ export interface SessionProfile {
   groupId?: string;
   tags?: string[];
   lastUsed?: string;
+  // Keeps a session at the top of the sidebar and Home regardless of
+  // when it was last used, for the sessions you open on a cold start.
+  pinned?: boolean;
   // Drives the sidebar icon for SSH sessions: '' / 'host' (default,
   // VM/Linux box) or 'switch' (network hardware). Serial sessions
   // always show their own icon regardless of this field.

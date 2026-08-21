@@ -1839,6 +1839,13 @@ function renderSessionRow(s: SessionProfile, depth: number, live: Map<string, Se
   });
 
   const running = live.get(s.id) ?? null;
+  if (s.pinned) {
+    const star = document.createElement('span');
+    star.textContent = '★';
+    star.style.cssText = 'flex:0 0 auto;font-size:8px;color:var(--text-dim);opacity:0.7;';
+    star.title = 'Pinned';
+    row.appendChild(star);
+  }
   const dot = document.createElement('span');
   dot.className = 'side-dot' + (running ? ' live' : '');
   row.appendChild(dot);
@@ -1929,6 +1936,17 @@ function showSessionContextMenu(x: number, y: number, s: SessionProfile) {
   // SPE-100: clicking the row itself switches to a running session
   // rather than dialling a second one, so the 'I really do want another
   // connection to this host' case lives here.
+  const pinItem = document.createElement('div');
+  pinItem.textContent = s.pinned ? 'Unpin' : 'Pin to top';
+  pinItem.style.cssText = 'padding:6px 12px;cursor:pointer;';
+  pinItem.onmouseenter = () => { pinItem.style.background = 'var(--hover)'; };
+  pinItem.onmouseleave = () => { pinItem.style.background = ''; };
+  pinItem.onclick = async () => {
+    menu.remove();
+    await App.SaveSession({ ...s, pinned: !s.pinned });
+    renderSessionList();
+  };
+
   const openItem = document.createElement('div');
   openItem.textContent = 'Open another session';
   openItem.style.cssText = 'padding:6px 12px;cursor:pointer;';
@@ -1960,6 +1978,7 @@ function showSessionContextMenu(x: number, y: number, s: SessionProfile) {
     renderSessionList();
   };
 
+  menu.appendChild(pinItem);
   menu.appendChild(openItem);
   menu.appendChild(editItem);
   menu.appendChild(deleteItem);
@@ -2210,6 +2229,7 @@ let sessionSearchQuery = '';
 // meant the panel opened showing folder names and nothing else.
 const collapsedGroups = new Set<string>(loadCollapsedGroups());
 let runningCollapsed = localStorage.getItem('specter-running-collapsed') === 'on';
+let pinnedCollapsed = localStorage.getItem('specter-pinned-collapsed') === 'on';
 
 function loadCollapsedGroups(): string[] {
   try {
@@ -2565,6 +2585,40 @@ async function renderSessionList() {
     empty.className = 'side-empty';
     empty.textContent = 'No saved sessions yet.';
     list.appendChild(empty);
+  }
+
+  // Pinned first, then running. Pinned answers "the things I always
+  // need", running answers "the things I am in". Both sit above the
+  // tree because both are shortcuts past it.
+  const pinned = sessions.filter((s) => s.pinned);
+  if (pinned.length > 0) {
+    const head = document.createElement('div');
+    head.className = 'side-group';
+    const chev = document.createElement('span');
+    chev.className = 'chev';
+    chev.textContent = pinnedCollapsed ? '▸' : '▾';
+    const icon = document.createElement('span');
+    icon.textContent = '★';
+    icon.style.cssText = 'font-size:10px;';
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = 'Pinned';
+    const count = document.createElement('span');
+    count.className = 'count';
+    count.textContent = String(pinned.length);
+    head.appendChild(chev);
+    head.appendChild(icon);
+    head.appendChild(name);
+    head.appendChild(count);
+    head.onclick = () => {
+      pinnedCollapsed = !pinnedCollapsed;
+      localStorage.setItem('specter-pinned-collapsed', pinnedCollapsed ? 'on' : 'off');
+      renderSessionList();
+    };
+    list.appendChild(head);
+    if (!pinnedCollapsed) {
+      for (const s of pinned) list.appendChild(renderSessionRow(s, 1, live));
+    }
   }
 
   // Running sessions first, so the panel answers "what am I in right
@@ -2985,11 +3039,21 @@ async function renderHomeView() {
     .sort((a, b) => (b.lastUsed! > a.lastUsed! ? 1 : -1))
     .slice(0, HOME_RECENT_LIMIT);
 
+  // Pinned leads on Home for the same reason it leads in the sidebar:
+  // recents are empty or stale on the first launch of the day, which is
+  // exactly when Home has to be useful.
+  const pinned = sessions.filter((s) => s.pinned);
+
   const hasSessions = sessions.length > 0;
   document.getElementById('home-empty')!.style.display = hasSessions ? 'none' : 'flex';
+  document.getElementById('home-pinned-section')!.style.display = pinned.length > 0 ? 'block' : 'none';
   document.getElementById('home-recent-section')!.style.display = recent.length > 0 ? 'block' : 'none';
   document.getElementById('home-saved-section')!.style.display = hasSessions ? 'block' : 'none';
   document.getElementById('home-shells-section')!.style.display = shellProfiles.length > 0 ? 'block' : 'none';
+
+  const pinnedGrid = document.getElementById('home-pinned-grid')!;
+  pinnedGrid.innerHTML = '';
+  for (const s of pinned) pinnedGrid.appendChild(homeCard(s));
 
   const recentGrid = document.getElementById('home-recent-grid')!;
   recentGrid.innerHTML = '';

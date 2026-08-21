@@ -29,6 +29,12 @@ type SessionProfile struct {
 	GroupID       string   `json:"groupId,omitempty"`
 	Tags          []string `json:"tags,omitempty"`
 	LastUsed      string   `json:"lastUsed,omitempty"`
+	// Pinned keeps a session at the top of the sidebar and on Home
+	// regardless of when it was last used. Recents only help once
+	// you have connected recently; this is what makes the panel
+	// useful on a cold start. omitempty so existing sessions.json
+	// files stay byte-identical until something is actually pinned.
+	Pinned bool `json:"pinned,omitempty"`
 	// DeviceKind drives the sidebar icon for SSH sessions: "" or "host"
 	// (default, a VM/Linux box), "switch" (network switch/router), or
 	// "firewall" (e.g. FortiGate). Serial sessions always show their
