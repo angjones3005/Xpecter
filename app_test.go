@@ -15,10 +15,10 @@ func TestCleanupStaleRemoteFiles(t *testing.T) {
 	defer os.RemoveAll(stale)
 
 	old := time.Now().Add(-48 * time.Hour)
-	if err := os.Chtimes(stale, old, old); err != nil {
+	if err := os.WriteFile(filepath.Join(stale, "sample.pdf"), []byte("data"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(stale, "sample.pdf"), []byte("data"), 0o600); err != nil {
+	if err := os.Chtimes(stale, old, old); err != nil {
 		t.Fatal(err)
 	}
 

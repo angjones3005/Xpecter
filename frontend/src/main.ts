@@ -477,6 +477,9 @@ interface Session {
   // than storing a pane index directly, since closing a sibling pane
   // shifts indices, a stored index would go stale.
   ownerTabId: string;
+  // Output can split ANSI sequences or highlightable tokens across backend
+  // events. Keep only that incomplete tail until the next chunk arrives.
+  highlightCarry: string;
 }
 
 // A split pane alongside a tab's primary session. Same shape as
@@ -528,6 +531,7 @@ function createPendingTab(): Tab {
     overlay: null,
     reconnect: null,
     ownerTabId: id,
+    highlightCarry: '',
     layout: 'single',
     extraPanes: [],
     focusedPaneIndex: 0,
@@ -756,6 +760,7 @@ function createEmptyPane(tab: Tab): Pane {
     overlay: null,
     reconnect: null,
     ownerTabId: tab.id,
+    highlightCarry: '',
   };
 }
 
@@ -1825,6 +1830,7 @@ async function openSessionEditor(s: SessionProfile) {
     groupSelect.appendChild(opt);
   }
   groupSelect.value = s.groupId ?? '';
+  (document.getElementById('se-tags') as HTMLInputElement).value = (s.tags ?? []).join(', ');
 
   document.getElementById('session-editor-overlay')!.classList.add('open');
 }
@@ -1855,7 +1861,12 @@ document.getElementById('se-save')!.addEventListener('click', async () => {
   if (!name) return;
 
   const groupId = (document.getElementById('se-group') as HTMLSelectElement).value;
-  const updated: SessionProfile = { ...s, name, groupId: groupId || undefined };
+  const tags = (document.getElementById('se-tags') as HTMLInputElement).value
+    .split(',')
+    .map((tag) => tag.trim())
+    .filter(Boolean)
+    .filter((tag, index, all) => all.indexOf(tag) === index);
+  const updated: SessionProfile = { ...s, name, groupId: groupId || undefined, tags: tags.length > 0 ? tags : undefined };
 
   if (s.type === 'serial') {
     updated.serialPort = (document.getElementById('se-serial-port') as HTMLInputElement).value.trim();
@@ -2029,8 +2040,45 @@ function applyOutputHighlighting(text: string): string {
   return result;
 }
 
+function incompleteAnsiStart(text: string): number | null {
+  const esc = text.lastIndexOf('\x1b');
+  if (esc < 0) return null;
+  const tail = text.slice(esc);
+  if (tail.length === 1) return esc;
+  if (tail[1] === ']') {
+    return tail.includes('\x07') || tail.includes('\x1b\\') ? null : esc;
+  }
+  if (tail[1] === '[') {
+    // eslint-disable-next-line no-control-regex -- ANSI escape detection requires the literal ESC byte
+    return /^\x1b\[[0-9;?]*[A-Za-z]/.test(tail) ? null : esc;
+  }
+  return null;
+}
+
+function mayBeSplitHighlightToken(token: string): boolean {
+  const lower = token.toLowerCase();
+  const keywordPrefixes = ['connected', 'up', 'ok', 'success', 'disabled', 'down', 'error', 'fail', 'failed', 'warning'];
+  if (keywordPrefixes.some((word) => word.startsWith(lower) && word !== lower)) return true;
+  return /^(?:Gi|Te|Fa|Fo|Hu|Po|Eth|Vlan)\d*(?:\/\d*)*$/.test(token);
+}
+
+function splitHighlightChunk(text: string): { ready: string; carry: string } {
+  const ansiStart = incompleteAnsiStart(text);
+  const ansiReady = ansiStart === null ? text : text.slice(0, ansiStart);
+  const ansiCarry = ansiStart === null ? '' : text.slice(ansiStart);
+  const tokenMatch = ansiReady.match(/[A-Za-z][A-Za-z0-9/._-]*$/);
+  if (!tokenMatch || !mayBeSplitHighlightToken(tokenMatch[0])) {
+    return { ready: ansiReady, carry: ansiCarry };
+  }
+  const tokenStart = ansiReady.length - tokenMatch[0].length;
+  return { ready: ansiReady.slice(0, tokenStart), carry: ansiReady.slice(tokenStart) + ansiCarry };
+}
+
 function writeToTerminal(session: Session, data: string) {
-  session.term!.write(applyOutputHighlighting(data));
+  const combined = highlightEnabled ? session.highlightCarry + data : data;
+  const chunk = highlightEnabled ? splitHighlightChunk(combined) : { ready: combined, carry: '' };
+  session.highlightCarry = chunk.carry;
+  session.term!.write(applyOutputHighlighting(chunk.ready));
   if (appSettings.sessionLogDirectory && session.backendId) {
     App.AppendSessionLog(appSettings.sessionLogDirectory, session.backendId, session.label, data).catch((err) => {
       console.error('Session log append failed', err);
@@ -3003,10 +3051,35 @@ document.getElementById('session-log-clear')!.addEventListener('click', async ()
 
 document.getElementById('menu-reset-settings')!.addEventListener('click', async () => {
   closeAllMenus();
-  if (!confirm('Reset appearance settings to defaults? Saved sessions will not be changed.')) return;
-  appSettings = { sshKeepaliveDisabled: appSettings.sshKeepaliveDisabled, keepOpenOnLastTab: appSettings.keepOpenOnLastTab };
+  if (!confirm('Reset all settings to defaults? Saved sessions will not be changed.')) return;
+  for (const key of [
+    'specter-theme',
+    'specter-osc52',
+    'specter-copy-on-select',
+    'specter-rclick-paste',
+    'specter-warn-multiline-paste',
+    'specter-show-tab-numbers',
+    'specter-highlight',
+  ]) {
+    localStorage.removeItem(key);
+  }
+  osc52Enabled = false;
+  copyOnSelectEnabled = false;
+  rightClickPasteEnabled = true;
+  warnMultilinePasteEnabled = true;
+  showTabNumbersEnabled = false;
+  highlightEnabled = true;
+  appSettings = {};
   await App.SaveSettings(appSettings);
   await loadSettingsAndApply();
+  (document.getElementById('osc52-toggle') as HTMLInputElement).checked = false;
+  (document.getElementById('copy-on-select-toggle') as HTMLInputElement).checked = false;
+  (document.getElementById('rclick-paste-toggle') as HTMLInputElement).checked = true;
+  (document.getElementById('warn-multiline-paste-toggle') as HTMLInputElement).checked = true;
+  (document.getElementById('keep-open-last-tab-toggle') as HTMLInputElement).checked = false;
+  (document.getElementById('show-tab-numbers-toggle') as HTMLInputElement).checked = false;
+  (document.getElementById('highlight-toggle') as HTMLInputElement).checked = true;
+  applyTheme('dark');
 });
 
 const showTabNumbersToggle = document.getElementById('show-tab-numbers-toggle') as HTMLInputElement;
