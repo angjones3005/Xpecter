@@ -26,6 +26,8 @@ export function DownloadAndInstallUpdate(arg1:string):Promise<void>;
 
 export function ExportConfigFile():Promise<string>;
 
+export function ExportEncryptedConfigFile(arg1:string):Promise<string>;
+
 export function GetClipboardText():Promise<string>;
 
 export function GetOSUsername():Promise<string>;
@@ -39,6 +41,8 @@ export function GetStartupDir():Promise<string>;
 export function GetVersion():Promise<string>;
 
 export function ImportConfigFile():Promise<string>;
+
+export function ImportEncryptedConfigFile(arg1:string):Promise<string>;
 
 export function ListBackups():Promise<Array<string>>;
 

@@ -2683,6 +2683,13 @@ async function newLocalShellTab(shell: string, label: string, dir = '') {
   await startLocalShellInActiveTab(shell, label, dir);
 }
 
+async function newMoshSession() {
+  const target = prompt('Mosh target (user@host):');
+  if (!target?.trim()) return;
+  const normalized = target.trim();
+  await newLocalShellTab(`mosh ${normalized}`, `Mosh ${normalized}`);
+}
+
 // SPE: lets a local shell start somewhere other than Specter's own
 // working directory. A native folder picker rather than a free-text
 // path field, avoids typos and matches the existing SelectKeyFile/
@@ -3304,6 +3311,10 @@ document.getElementById('menu-new-local-shell')!.addEventListener('click', () =>
   closeAllMenus();
   newLocalShellTab('', 'Local shell');
 });
+document.getElementById('menu-new-mosh')!.addEventListener('click', () => {
+  closeAllMenus();
+  newMoshSession();
+});
 document.getElementById('menu-new-local-shell-in-dir')!.addEventListener('click', () => {
   closeAllMenus();
   newLocalShellInDirectory();
@@ -3633,6 +3644,30 @@ document.getElementById('menu-import-config')!.addEventListener('click', async (
     alert(`Imported configuration from:\n${path}`);
   } catch (err) {
     alert(`Import failed: ${err}`);
+  }
+});
+document.getElementById('menu-export-encrypted-config')!.addEventListener('click', async () => {
+  closeAllMenus();
+  const passphrase = prompt('Passphrase for encrypted configuration:');
+  if (!passphrase) return;
+  try {
+    const path = await App.ExportEncryptedConfigFile(passphrase);
+    if (path) alert(`Exported encrypted configuration to:\n${path}`);
+  } catch (err) {
+    alert(`Encrypted export failed: ${err}`);
+  }
+});
+document.getElementById('menu-import-encrypted-config')!.addEventListener('click', async () => {
+  closeAllMenus();
+  const passphrase = prompt('Passphrase for encrypted configuration:');
+  if (!passphrase) return;
+  try {
+    const path = await App.ImportEncryptedConfigFile(passphrase);
+    if (!path) return;
+    await Promise.all([loadSettingsAndApply(), renderSessionList(), renderLocalShellProfilesMenu()]);
+    alert(`Imported encrypted configuration from:\n${path}`);
+  } catch (err) {
+    alert(`Encrypted import failed: ${err}`);
   }
 });
 

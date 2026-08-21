@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -23,6 +27,7 @@ import (
 	"specter/backend/sshclient"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 type App struct {
@@ -656,6 +661,115 @@ func (a *App) ImportConfigFile() (string, error) {
 	var bundle config.ConfigBundle
 	if err := json.Unmarshal(data, &bundle); err != nil {
 		return "", fmt.Errorf("not a valid Specter config file: %w", err)
+	}
+	if err := config.ImportBundle(bundle); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+type encryptedConfigBundle struct {
+	Version int    `json:"version"`
+	Salt    string `json:"salt"`
+	Nonce   string `json:"nonce"`
+	Data    string `json:"data"`
+}
+
+func deriveBundleKey(passphrase string, salt []byte) []byte {
+	return pbkdf2.Key([]byte(passphrase), salt, 310000, 32, sha256.New)
+}
+
+// ExportEncryptedConfigFile writes a passphrase-protected portable bundle.
+// The encrypted file is suitable for user-managed cloud storage; Specter
+// never uploads it or receives the passphrase.
+func (a *App) ExportEncryptedConfigFile(passphrase string) (string, error) {
+	if passphrase == "" {
+		return "", fmt.Errorf("passphrase cannot be empty")
+	}
+	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "Export Encrypted Specter Configuration",
+		DefaultFilename: "specter-config.enc.json",
+	})
+	if err != nil || path == "" {
+		return path, err
+	}
+	bundle, err := config.ExportBundle()
+	if err != nil {
+		return "", err
+	}
+	plain, err := json.Marshal(bundle)
+	if err != nil {
+		return "", err
+	}
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher(deriveBundleKey(passphrase, salt))
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	envelope := encryptedConfigBundle{Version: 1, Salt: base64.StdEncoding.EncodeToString(salt), Nonce: base64.StdEncoding.EncodeToString(nonce), Data: base64.StdEncoding.EncodeToString(gcm.Seal(nil, nonce, plain, nil))}
+	data, err := json.MarshalIndent(envelope, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return path, os.WriteFile(path, data, 0o600)
+}
+
+// ImportEncryptedConfigFile decrypts and imports a user-managed encrypted
+// bundle. A wrong passphrase fails authentication before any config changes.
+func (a *App) ImportEncryptedConfigFile(passphrase string) (string, error) {
+	if passphrase == "" {
+		return "", fmt.Errorf("passphrase cannot be empty")
+	}
+	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{Title: "Import Encrypted Specter Configuration"})
+	if err != nil || path == "" {
+		return path, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var envelope encryptedConfigBundle
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return "", fmt.Errorf("not a valid encrypted Specter config: %w", err)
+	}
+	salt, err := base64.StdEncoding.DecodeString(envelope.Salt)
+	if err != nil {
+		return "", fmt.Errorf("invalid encrypted config salt: %w", err)
+	}
+	nonce, err := base64.StdEncoding.DecodeString(envelope.Nonce)
+	if err != nil {
+		return "", fmt.Errorf("invalid encrypted config nonce: %w", err)
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(envelope.Data)
+	if err != nil {
+		return "", fmt.Errorf("invalid encrypted config data: %w", err)
+	}
+	block, err := aes.NewCipher(deriveBundleKey(passphrase, salt))
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	plain, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "", fmt.Errorf("wrong passphrase or corrupted encrypted config")
+	}
+	var bundle config.ConfigBundle
+	if err := json.Unmarshal(plain, &bundle); err != nil {
+		return "", fmt.Errorf("decrypted config is invalid: %w", err)
 	}
 	if err := config.ImportBundle(bundle); err != nil {
 		return "", err

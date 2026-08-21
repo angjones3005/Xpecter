@@ -46,6 +46,10 @@ export function ExportConfigFile() {
   return window['go']['main']['App']['ExportConfigFile']();
 }
 
+export function ExportEncryptedConfigFile(arg1) {
+  return window['go']['main']['App']['ExportEncryptedConfigFile'](arg1);
+}
+
 export function GetClipboardText() {
   return window['go']['main']['App']['GetClipboardText']();
 }
@@ -72,6 +76,10 @@ export function GetVersion() {
 
 export function ImportConfigFile() {
   return window['go']['main']['App']['ImportConfigFile']();
+}
+
+export function ImportEncryptedConfigFile(arg1) {
+  return window['go']['main']['App']['ImportEncryptedConfigFile'](arg1);
 }
 
 export function ListBackups() {

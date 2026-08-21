@@ -139,6 +139,8 @@ export interface AppBindings {
   GetStartupDir(): Promise<string>;
   ExportConfigFile(): Promise<string>;
   ImportConfigFile(): Promise<string>;
+  ExportEncryptedConfigFile(passphrase: string): Promise<string>;
+  ImportEncryptedConfigFile(passphrase: string): Promise<string>;
   ListBackups(): Promise<string[]>;
   RestoreBackup(filename: string): Promise<void>;
   ConnectSerial(portName: string, baud: number): Promise<string>;
