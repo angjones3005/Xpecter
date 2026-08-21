@@ -1175,48 +1175,48 @@ function createTerminalForSession(session: Session, tab: Tab) {
       }
       return false;
     }
-    if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'x') {
+    if (e.type === 'keydown' && shortcutMatches(e, 'disconnect')) {
       disconnectSession(session);
       return false;
     }
-    if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
+    if (e.type === 'keydown' && shortcutMatches(e, 'sidebar')) {
       // Not plain Ctrl+B: that's tmux's default prefix key, binding it
       // globally would break every tmux user's workflow the moment
       // they're inside a session.
       toggleSidebar();
       return false;
     }
-    if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+    if (e.type === 'keydown' && shortcutMatches(e, 'paste')) {
       navigator.clipboard.readText().then((text) => writeToSessionWithPasteGuard(session, text)).catch(() => {});
       return false;
     }
-    if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
+    if (e.type === 'keydown' && shortcutMatches(e, 'zoomIn')) {
       // SPE-77. Accepts both '=' and '+' since Plus is Shift+Equals on
       // most layouts, matching how browsers handle Ctrl+= zoom too.
       zoomBy(1);
       return false;
     }
-    if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && e.key === '-') {
+    if (e.type === 'keydown' && shortcutMatches(e, 'zoomOut')) {
       zoomBy(-1);
       return false;
     }
-    if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && e.key === '0') {
+    if (e.type === 'keydown' && shortcutMatches(e, 'resetZoom')) {
       applyFontSize(FONT_SIZE_DEFAULT);
       return false;
     }
-    if (e.type === 'keydown' && e.key === 'F11') {
+    if (e.type === 'keydown' && shortcutMatches(e, 'fullscreen')) {
       toggleFullscreen();
       return false;
     }
-    if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
+    if (e.type === 'keydown' && shortcutMatches(e, 'splitVertical')) {
       setTabLayout(tab, tab.layout === '2h' ? '4' : '2v');
       return false;
     }
-    if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    if (e.type === 'keydown' && shortcutMatches(e, 'splitHorizontal')) {
       setTabLayout(tab, tab.layout === '2v' ? '4' : '2h');
       return false;
     }
-    if (e.type === 'keydown' && e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'w') {
+    if (e.type === 'keydown' && shortcutMatches(e, 'closePane')) {
       closePane(tab, paneIndexOf(tab, session));
       return false;
     }
@@ -2064,6 +2064,41 @@ let osc52Enabled = localStorage.getItem('specter-osc52') === 'on';
 let copyOnSelectEnabled = localStorage.getItem('specter-copy-on-select') === 'on';
 let rightClickPasteEnabled = localStorage.getItem('specter-rclick-paste') !== 'off';
 let highlightEnabled = localStorage.getItem('specter-highlight') !== 'off';
+
+type ShortcutId = 'disconnect' | 'paste' | 'sidebar' | 'zoomIn' | 'zoomOut' | 'resetZoom' | 'fullscreen' | 'splitVertical' | 'splitHorizontal' | 'closePane';
+type ShortcutBinding = { ctrl: boolean; shift: boolean; alt: boolean; key: string };
+const DEFAULT_SHORTCUTS: Record<ShortcutId, ShortcutBinding> = {
+  disconnect: { ctrl: true, shift: true, alt: false, key: 'x' },
+  paste: { ctrl: true, shift: true, alt: false, key: 'v' },
+  sidebar: { ctrl: true, shift: true, alt: false, key: 'b' },
+  zoomIn: { ctrl: true, shift: false, alt: false, key: '=' },
+  zoomOut: { ctrl: true, shift: false, alt: false, key: '-' },
+  resetZoom: { ctrl: true, shift: false, alt: false, key: '0' },
+  fullscreen: { ctrl: false, shift: false, alt: false, key: 'F11' },
+  splitVertical: { ctrl: true, shift: true, alt: false, key: 'd' },
+  splitHorizontal: { ctrl: true, shift: true, alt: false, key: 'Enter' },
+  closePane: { ctrl: true, shift: true, alt: false, key: 'w' },
+};
+let shortcuts: Record<ShortcutId, ShortcutBinding> = loadShortcuts();
+
+function loadShortcuts(): Record<ShortcutId, ShortcutBinding> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('specter-shortcuts') || '{}');
+    return Object.fromEntries(Object.entries(DEFAULT_SHORTCUTS).map(([id, binding]) => [id, { ...binding, ...(parsed[id] || {}) }])) as Record<ShortcutId, ShortcutBinding>;
+  } catch {
+    return { ...DEFAULT_SHORTCUTS };
+  }
+}
+
+function shortcutMatches(event: KeyboardEvent, id: ShortcutId): boolean {
+  const binding = shortcuts[id];
+  const modifier = event.ctrlKey || event.metaKey;
+  return modifier === binding.ctrl && event.shiftKey === binding.shift && event.altKey === binding.alt && event.key.toLowerCase() === binding.key.toLowerCase();
+}
+
+function saveShortcuts() {
+  localStorage.setItem('specter-shortcuts', JSON.stringify(shortcuts));
+}
 
 type CommandSnippet = { name: string; command: string };
 let commandSnippets: CommandSnippet[] = loadCommandSnippets();
@@ -2923,24 +2958,24 @@ document.addEventListener('keydown', (e) => {
   // yet" landing screen, sidebar search box, etc.), the per-terminal
   // version above only fires while an xterm instance actually has
   // focus. Same Ctrl+Shift+B, not plain Ctrl+B (tmux's prefix key).
-  if (e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
+  if (shortcutMatches(e, 'sidebar')) {
     e.preventDefault();
     toggleSidebar();
   }
   // SPE-77 zoom, same global-fallback reasoning.
-  if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
+  if (shortcutMatches(e, 'zoomIn')) {
     e.preventDefault();
     zoomBy(1);
   }
-  if ((e.ctrlKey || e.metaKey) && e.key === '-') {
+  if (shortcutMatches(e, 'zoomOut')) {
     e.preventDefault();
     zoomBy(-1);
   }
-  if ((e.ctrlKey || e.metaKey) && e.key === '0') {
+  if (shortcutMatches(e, 'resetZoom')) {
     e.preventDefault();
     applyFontSize(FONT_SIZE_DEFAULT);
   }
-  if (e.key === 'F11') {
+  if (shortcutMatches(e, 'fullscreen')) {
     e.preventDefault();
     toggleFullscreen();
   }
@@ -3208,6 +3243,7 @@ document.getElementById('menu-reset-settings')!.addEventListener('click', async 
     'specter-show-tab-numbers',
     'specter-highlight',
     'specter-command-snippets',
+    'specter-shortcuts',
   ]) {
     localStorage.removeItem(key);
   }
@@ -3218,6 +3254,7 @@ document.getElementById('menu-reset-settings')!.addEventListener('click', async 
   showTabNumbersEnabled = false;
   highlightEnabled = true;
   commandSnippets = [];
+  shortcuts = { ...DEFAULT_SHORTCUTS };
   appSettings = {};
   await App.SaveSettings(appSettings);
   await loadSettingsAndApply();
@@ -3686,39 +3723,38 @@ document.getElementById('menu-toggle-fullscreen')!.addEventListener('click', () 
 // runtime check (e.ctrlKey || e.metaKey) that treats them
 // interchangeably throughout this file.
 const SHORTCUT_MOD = navigator.platform.toLowerCase().includes('mac') ? 'Cmd' : 'Ctrl';
-const SHORTCUT_GROUPS: { title: string; items: [string, string][] }[] = [
+const SHORTCUT_GROUPS: { title: string; items: [ShortcutId | null, string][] }[] = [
   {
     title: 'Session',
     items: [
-      [`${SHORTCUT_MOD}+Shift+X`, 'Disconnect active session'],
-      [`${SHORTCUT_MOD}+Shift+V`, 'Paste'],
+      ['disconnect', 'Disconnect active session'],
+      ['paste', 'Paste'],
     ],
   },
   {
     title: 'View',
     items: [
-      [`${SHORTCUT_MOD}+Shift+B`, 'Toggle sidebar'],
-      [`${SHORTCUT_MOD}+= / ${SHORTCUT_MOD}+Plus`, 'Zoom in'],
-      [`${SHORTCUT_MOD}+-`, 'Zoom out'],
-      [`${SHORTCUT_MOD}+0`, 'Reset zoom'],
-      ['F11', 'Toggle fullscreen'],
+      ['sidebar', 'Toggle sidebar'],
+      ['zoomIn', 'Zoom in'],
+      ['zoomOut', 'Zoom out'],
+      ['resetZoom', 'Reset zoom'],
+      ['fullscreen', 'Toggle fullscreen'],
     ],
   },
   {
     title: 'Panes',
     items: [
-      [`${SHORTCUT_MOD}+Shift+D`, 'Split vertical / 4-pane grid'],
-      [`${SHORTCUT_MOD}+Shift+Enter`, 'Split horizontal / 4-pane grid'],
-      [`${SHORTCUT_MOD}+Shift+W`, 'Close active pane'],
-      ['Alt+Arrow keys', 'Move focus between panes'],
+      ['splitVertical', 'Split vertical / 4-pane grid'],
+      ['splitHorizontal', 'Split horizontal / 4-pane grid'],
+      ['closePane', 'Close active pane'],
     ],
   },
   {
     title: 'Disconnected session panel',
     items: [
-      ['R', 'Reconnect'],
-      ['S', 'Save session output'],
-      ['Enter', 'Close pane'],
+      [null, 'Reconnect (R)'],
+      [null, 'Save session output (S)'],
+      [null, 'Close pane (Enter)'],
     ],
   },
 ];
@@ -3733,20 +3769,58 @@ function renderShortcutsDialog() {
     titleEl.className = 'shortcut-group-title';
     titleEl.textContent = group.title;
     groupEl.appendChild(titleEl);
-    for (const [keys, label] of group.items) {
+    for (const [id, label] of group.items) {
       const row = document.createElement('div');
       row.className = 'shortcut-row';
       const labelEl = document.createElement('span');
       labelEl.textContent = label;
-      const keysEl = document.createElement('span');
+      const keysEl = document.createElement(id ? 'button' : 'span');
       keysEl.className = 'shortcut-keys';
-      keysEl.textContent = keys;
+      keysEl.textContent = id ? formatShortcut(shortcuts[id]) : label.match(/\(([^)]+)\)$/)?.[1] ?? '';
+      if (id) {
+        (keysEl as HTMLButtonElement).type = 'button';
+        keysEl.title = 'Click to change shortcut';
+        (keysEl as HTMLButtonElement).onclick = () => captureShortcut(id, keysEl as HTMLButtonElement);
+      }
       row.appendChild(labelEl);
       row.appendChild(keysEl);
       groupEl.appendChild(row);
     }
     content.appendChild(groupEl);
   }
+}
+
+function formatShortcut(binding: ShortcutBinding): string {
+  const parts = [];
+  if (binding.ctrl) parts.push(SHORTCUT_MOD);
+  if (binding.shift) parts.push('Shift');
+  if (binding.alt) parts.push('Alt');
+  parts.push(binding.key === ' ' ? 'Space' : binding.key);
+  return parts.join('+');
+}
+
+function captureShortcut(id: ShortcutId, button: HTMLButtonElement) {
+  button.textContent = 'Press keys...';
+  const capture = (event: KeyboardEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.key === 'Escape') {
+      document.removeEventListener('keydown', capture, true);
+      renderShortcutsDialog();
+      return;
+    }
+    if (['Control', 'Meta', 'Shift', 'Alt'].includes(event.key)) return;
+    shortcuts[id] = {
+      ctrl: event.ctrlKey || event.metaKey,
+      shift: event.shiftKey,
+      alt: event.altKey,
+      key: event.key,
+    };
+    saveShortcuts();
+    document.removeEventListener('keydown', capture, true);
+    renderShortcutsDialog();
+  };
+  document.addEventListener('keydown', capture, true);
 }
 
 function openShortcutsDialog() {
