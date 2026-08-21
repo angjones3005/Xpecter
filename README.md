@@ -48,6 +48,8 @@ If something breaks, feels missing, or you'd expect it to work differently, that
 
 ## For developers
 
+Quick troubleshooting reference: [CODEBOOK.md](CODEBOOK.md)
+
 ### What's here
 
 - `main.go`, `app.go` — Wails entrypoint and the bound methods the frontend calls
@@ -76,6 +78,14 @@ Then from the project root:
 wails dev     # live dev mode
 wails build   # produces a native binary per platform
 ```
+
+### Frontend validation on VM-backed folders
+
+If your repo lives on a Linux VM but is accessed from Windows through a mapped drive (for example SSHFS), frontend package installs may fail on the mapped path even when basic file writes work.
+
+Use the VM-native path for Node tooling (`npm ci`, lint, type-check, build), and use Windows for `.exe` smoke tests.
+
+See [CODEBOOK.md](CODEBOOK.md) for the tested workflow and fallback commands.
 
 On Linux, the build may need `-tags webkit2_41` depending on your distro's `webkit2gtk` version:
 

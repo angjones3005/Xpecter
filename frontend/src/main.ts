@@ -3656,7 +3656,8 @@ function setupPaneResize(handleId: string, columnIndex: number, minWidth: number
     const startX = e.clientX;
     const variableName = columnIndex === 0 ? '--sw' : '--ew';
     const widthDirection = columnIndex === 0 ? 1 : -1;
-    const startWidth = parseFloat(getComputedStyle(app).getPropertyValue(variableName));
+    const paneId = columnIndex === 0 ? 'sidebar' : 'editor-pane';
+    const startWidth = document.getElementById(paneId)!.getBoundingClientRect().width;
     handle.classList.add('dragging');
     handle.setPointerCapture(e.pointerId);
 
