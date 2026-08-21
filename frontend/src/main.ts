@@ -2,6 +2,11 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import * as monaco from 'monaco-editor';
+import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
+import JsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
+import CssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker';
+import HtmlWorker from 'monaco-editor/esm/vs/language/html/html.worker?worker';
+import TsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker';
 import '@xterm/xterm/css/xterm.css';
 // SPE-61: bundle real font files for the 3 open-source coding fonts so
 // they render identically everywhere, rather than depending on the
@@ -143,6 +148,20 @@ function fontStack(fontId: string): string {
 const MONACO_THEMES: Record<ThemeName, string> = {
   dark: 'vs-dark',
   light: 'vs',
+};
+
+type MonacoWorkerEnvironment = {
+  getWorker: (_moduleId: string, label: string) => Worker;
+};
+
+(globalThis as typeof globalThis & { MonacoEnvironment: MonacoWorkerEnvironment }).MonacoEnvironment = {
+  getWorker(_moduleId, label) {
+    if (label === 'json') return new JsonWorker();
+    if (label === 'css' || label === 'scss' || label === 'less') return new CssWorker();
+    if (label === 'html' || label === 'handlebars' || label === 'razor') return new HtmlWorker();
+    if (label === 'typescript' || label === 'javascript') return new TsWorker();
+    return new EditorWorker();
+  },
 };
 
 // In-memory copy of backend-persisted settings.json (SPE-61), loaded
