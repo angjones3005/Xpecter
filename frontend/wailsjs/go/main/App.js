@@ -82,6 +82,10 @@ export function ImportEncryptedConfigFile(arg1) {
   return window['go']['main']['App']['ImportEncryptedConfigFile'](arg1);
 }
 
+export function ImportMobaXtermSessions() {
+  return window['go']['main']['App']['ImportMobaXtermSessions']();
+}
+
 export function ListBackups() {
   return window['go']['main']['App']['ListBackups']();
 }
@@ -176,6 +180,14 @@ export function SelectKeyFile() {
 
 export function StartLocalTerminal(arg1, arg2) {
   return window['go']['main']['App']['StartLocalTerminal'](arg1, arg2);
+}
+
+export function StartLocalForward(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['StartLocalForward'](arg1, arg2, arg3, arg4);
+}
+
+export function StopForward(arg1) {
+  return window['go']['main']['App']['StopForward'](arg1);
 }
 
 export function TrustHost(arg1) {

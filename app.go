@@ -12,9 +12,11 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"os"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +37,7 @@ type App struct {
 	sessions map[string]*sshclient.Session
 	locals   map[string]*pty.LocalTerminal
 	serials  map[string]*serialclient.Session
+	forwards map[string]net.Listener
 	// startupDir (SPE-86): a directory passed on the command line at
 	// launch, from Windows Explorer's "Open in Specter" context menu.
 	// Read once by the frontend via GetStartupDir() during its own
@@ -48,6 +51,7 @@ func NewApp(startupDir string) *App {
 		sessions:   make(map[string]*sshclient.Session),
 		locals:     make(map[string]*pty.LocalTerminal),
 		serials:    make(map[string]*serialclient.Session),
+		forwards:   make(map[string]net.Listener),
 		startupDir: startupDir,
 	}
 }
@@ -91,6 +95,9 @@ func (a *App) shutdown(ctx context.Context) {
 	}
 	for _, sc := range a.serials {
 		sc.Close()
+	}
+	for _, listener := range a.forwards {
+		listener.Close()
 	}
 }
 
@@ -668,6 +675,86 @@ func (a *App) ImportConfigFile() (string, error) {
 	return path, nil
 }
 
+// ImportMobaXtermSessions imports simple INI-style MobaXterm session files.
+// Password-like fields are deliberately ignored.
+func (a *App) ImportMobaXtermSessions() (string, int, error) {
+	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title:   "Import MobaXterm Sessions",
+		Filters: []runtime.FileFilter{{DisplayName: "MobaXterm files (*.mxtsessions;*.ini)", Pattern: "*.mxtsessions;*.ini"}},
+	})
+	if err != nil || path == "" {
+		return path, 0, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", 0, err
+	}
+	profiles := parseMobaSessions(string(data))
+	if len(profiles) == 0 {
+		return path, 0, fmt.Errorf("no importable MobaXterm sessions found")
+	}
+	existing, err := config.LoadSessions()
+	if err != nil {
+		return "", 0, err
+	}
+	existing = append(existing, profiles...)
+	return path, len(profiles), config.SaveSessions(existing)
+}
+
+func parseMobaSessions(data string) []config.SessionProfile {
+	var profiles []config.SessionProfile
+	var current config.SessionProfile
+	flush := func() {
+		if current.Host != "" {
+			if current.Name == "" {
+				current.Name = current.User + "@" + current.Host
+			}
+			if current.Port == 0 {
+				current.Port = 22
+			}
+			current.ID = idgen.New()
+			profiles = append(profiles, current)
+		}
+		current = config.SessionProfile{}
+	}
+	for _, raw := range strings.Split(data, "\n") {
+		line := strings.TrimSpace(strings.TrimSuffix(raw, "\r"))
+		if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			flush()
+			section := strings.Trim(line, "[]")
+			current.Name = section[strings.LastIndex(section, "\\")+1:]
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(parts[0]))
+		value := strings.TrimSpace(parts[1])
+		switch key {
+		case "name", "sessionname", "session":
+			if current.Name == "" {
+				current.Name = value
+			}
+		case "host", "hostname", "ip", "address", "remotehost":
+			current.Host = value
+		case "user", "username", "remoteuser":
+			current.User = value
+		case "port", "remoteport":
+			if n, err := strconv.Atoi(value); err == nil {
+				current.Port = n
+			}
+		case "keypath", "privatekey", "privatekeypath":
+			current.KeyPath = value
+		}
+	}
+	flush()
+	return profiles
+}
+
 type encryptedConfigBundle struct {
 	Version int    `json:"version"`
 	Salt    string `json:"salt"`
@@ -816,6 +903,54 @@ func (a *App) CloseSSH(id string) error {
 	}
 	delete(a.sessions, id)
 	return sess.Close()
+}
+
+// StartLocalForward binds a local TCP port and forwards each connection
+// through an existing SSH session to remoteHost:remotePort.
+func (a *App) StartLocalForward(sessionID string, localPort int, remoteHost string, remotePort int) (string, error) {
+	sess, ok := a.sessions[sessionID]
+	if !ok {
+		return "", fmt.Errorf("no such session: %s", sessionID)
+	}
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", localPort))
+	if err != nil {
+		return "", err
+	}
+	forwardID := idgen.New()
+	a.forwards[forwardID] = listener
+	go func() {
+		for {
+			local, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			remote, err := sess.SSHClient().Dial("tcp", net.JoinHostPort(remoteHost, fmt.Sprintf("%d", remotePort)))
+			if err != nil {
+				local.Close()
+				continue
+			}
+			go proxyTCP(local, remote)
+		}
+	}()
+	return forwardID, nil
+}
+
+func proxyTCP(left, right net.Conn) {
+	defer left.Close()
+	defer right.Close()
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(left, right); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(right, left); done <- struct{}{} }()
+	<-done
+}
+
+func (a *App) StopForward(id string) error {
+	listener, ok := a.forwards[id]
+	if !ok {
+		return nil
+	}
+	delete(a.forwards, id)
+	return listener.Close()
 }
 
 // --- SFTP / remote file editing ---

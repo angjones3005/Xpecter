@@ -141,6 +141,9 @@ export interface AppBindings {
   ImportConfigFile(): Promise<string>;
   ExportEncryptedConfigFile(passphrase: string): Promise<string>;
   ImportEncryptedConfigFile(passphrase: string): Promise<string>;
+  ImportMobaXtermSessions(): Promise<{ path: string; count: number }>;
+  StartLocalForward(sessionId: string, localPort: number, remoteHost: string, remotePort: number): Promise<string>;
+  StopForward(id: string): Promise<void>;
   ListBackups(): Promise<string[]>;
   RestoreBackup(filename: string): Promise<void>;
   ConnectSerial(portName: string, baud: number): Promise<string>;

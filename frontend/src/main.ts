@@ -2709,6 +2709,25 @@ async function newMoshSession() {
   await newLocalShellTab(`mosh ${normalized}`, `Mosh ${normalized}`);
 }
 
+async function newLocalForward() {
+  const tab = activeTabId ? tabs.get(activeTabId) : null;
+  const session = tab ? focusedSession(tab) : null;
+  if (!session || session.mode !== 'ssh' || !session.backendId) {
+    alert('Open an SSH session before creating a port forward.');
+    return;
+  }
+  const localPort = Number(prompt('Local port:'));
+  const remoteHost = prompt('Remote host (from the SSH server):', '127.0.0.1');
+  const remotePort = Number(prompt('Remote port:'));
+  if (!localPort || !remoteHost || !remotePort) return;
+  try {
+    const id = await App.StartLocalForward(session.backendId, localPort, remoteHost, remotePort);
+    alert(`Forward active: 127.0.0.1:${localPort} -> ${remoteHost}:${remotePort}\nID: ${id}`);
+  } catch (err) {
+    alert(`Could not start port forward: ${err}`);
+  }
+}
+
 // SPE: lets a local shell start somewhere other than Specter's own
 // working directory. A native folder picker rather than a free-text
 // path field, avoids typos and matches the existing SelectKeyFile/
@@ -3334,6 +3353,10 @@ document.getElementById('menu-new-mosh')!.addEventListener('click', () => {
   closeAllMenus();
   newMoshSession();
 });
+document.getElementById('menu-new-local-forward')!.addEventListener('click', () => {
+  closeAllMenus();
+  newLocalForward();
+});
 document.getElementById('menu-new-local-shell-in-dir')!.addEventListener('click', () => {
   closeAllMenus();
   newLocalShellInDirectory();
@@ -3687,6 +3710,18 @@ document.getElementById('menu-import-encrypted-config')!.addEventListener('click
     alert(`Imported encrypted configuration from:\n${path}`);
   } catch (err) {
     alert(`Encrypted import failed: ${err}`);
+  }
+});
+document.getElementById('menu-import-mobaxterm')!.addEventListener('click', async () => {
+  closeAllMenus();
+  try {
+    const result = await App.ImportMobaXtermSessions();
+    if (result.path) {
+      await renderSessionList();
+      alert(`Imported ${result.count} MobaXterm session(s). Passwords were not imported.`);
+    }
+  } catch (err) {
+    alert(`MobaXterm import failed: ${err}`);
   }
 });
 

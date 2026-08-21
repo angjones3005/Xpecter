@@ -44,6 +44,8 @@ export function ImportConfigFile():Promise<string>;
 
 export function ImportEncryptedConfigFile(arg1:string):Promise<string>;
 
+export function ImportMobaXtermSessions():Promise<{path:string,count:number}>;
+
 export function ListBackups():Promise<Array<string>>;
 
 export function ListGroups():Promise<Array<config.SessionGroup>>;
@@ -91,6 +93,10 @@ export function SelectImageFile():Promise<string>;
 export function SelectKeyFile():Promise<string>;
 
 export function StartLocalTerminal(arg1:string,arg2:string):Promise<string>;
+
+export function StartLocalForward(arg1:string,arg2:number,arg3:string,arg4:number):Promise<string>;
+
+export function StopForward(arg1:string):Promise<void>;
 
 export function TrustHost(arg1:string):Promise<void>;
 
