@@ -2709,6 +2709,14 @@ async function newMoshSession() {
   await newLocalShellTab(`mosh ${normalized}`, `Mosh ${normalized}`);
 }
 
+async function newTelnetSession() {
+  const host = prompt('Telnet host:');
+  if (!host?.trim()) return;
+  const port = Number(prompt('Telnet port:', '23'));
+  if (!port) return;
+  await newLocalShellTab(`telnet ${host.trim()} ${port}`, `Telnet ${host.trim()}`);
+}
+
 async function newLocalForward() {
   const tab = activeTabId ? tabs.get(activeTabId) : null;
   const session = tab ? focusedSession(tab) : null;
@@ -3352,6 +3360,10 @@ document.getElementById('menu-new-local-shell')!.addEventListener('click', () =>
 document.getElementById('menu-new-mosh')!.addEventListener('click', () => {
   closeAllMenus();
   newMoshSession();
+});
+document.getElementById('menu-new-telnet')!.addEventListener('click', () => {
+  closeAllMenus();
+  newTelnetSession();
 });
 document.getElementById('menu-new-local-forward')!.addEventListener('click', () => {
   closeAllMenus();
