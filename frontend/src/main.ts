@@ -600,6 +600,29 @@ function renderTabBar() {
     tabIndex++;
     const el = document.createElement('div');
     el.className = 'tab' + (tab.id === activeTabId ? ' active' : '');
+    el.draggable = true;
+    el.dataset.tabId = tab.id;
+    el.addEventListener('dragstart', (event) => {
+      event.dataTransfer?.setData('text/specter-tab-id', tab.id);
+      event.dataTransfer?.setData('text/plain', tab.id);
+      el.classList.add('dragging');
+    });
+    el.addEventListener('dragend', () => {
+      el.classList.remove('dragging');
+      bar.querySelectorAll('.tab.drop-target').forEach((item) => item.classList.remove('drop-target'));
+    });
+    el.addEventListener('dragover', (event) => {
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+      el.classList.add('drop-target');
+    });
+    el.addEventListener('dragleave', () => el.classList.remove('drop-target'));
+    el.addEventListener('drop', (event) => {
+      event.preventDefault();
+      el.classList.remove('drop-target');
+      const draggedId = event.dataTransfer?.getData('text/specter-tab-id') || event.dataTransfer?.getData('text/plain');
+      if (draggedId && draggedId !== tab.id) reorderTabs(draggedId, tab.id);
+    });
     el.onclick = () => switchToTab(tab.id);
 
     if (showTabNumbersEnabled) {
@@ -652,6 +675,17 @@ function renderTabBar() {
       wrapper.classList.toggle('focused', active.layout !== 'single' && i === active.focusedPaneIndex);
     });
   }
+}
+
+function reorderTabs(draggedId: string, targetId: string) {
+  const ordered = Array.from(tabs.values());
+  const draggedIndex = ordered.findIndex((tab) => tab.id === draggedId);
+  if (draggedIndex < 0 || !ordered.some((tab) => tab.id === targetId)) return;
+  const [dragged] = ordered.splice(draggedIndex, 1);
+  ordered.splice(ordered.findIndex((tab) => tab.id === targetId), 0, dragged);
+  tabs.clear();
+  for (const tab of ordered) tabs.set(tab.id, tab);
+  renderTabBar();
 }
 
 function switchToTab(id: string) {
