@@ -684,30 +684,46 @@ func (a *App) ImportConfigFile() (string, error) {
 	return path, nil
 }
 
+// MobaImportResult is a struct rather than a (path, count, error)
+// triple because Wails marshals a bound method returning at most one
+// value plus an error: internal/binding.BoundMethod.Call switches on the
+// output count and handles only 1 and 2. With three returns it matched
+// neither case, so the frontend received null and every error, including
+// "no importable MobaXterm sessions found", was dropped on the floor.
+// The import itself had already run and saved by then, so the sessions
+// landed while the UI reported a TypeError and never refreshed the list.
+type MobaImportResult struct {
+	Path  string `json:"path"`
+	Count int    `json:"count"`
+}
+
 // ImportMobaXtermSessions imports simple INI-style MobaXterm session files.
 // Password-like fields are deliberately ignored.
-func (a *App) ImportMobaXtermSessions() (string, int, error) {
+func (a *App) ImportMobaXtermSessions() (MobaImportResult, error) {
 	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
 		Title:   "Import MobaXterm Sessions",
 		Filters: []runtime.FileFilter{{DisplayName: "MobaXterm files (*.mxtsessions;*.ini)", Pattern: "*.mxtsessions;*.ini"}},
 	})
 	if err != nil || path == "" {
-		return path, 0, err
+		return MobaImportResult{Path: path}, err
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", 0, err
+		return MobaImportResult{}, err
 	}
 	profiles := parseMobaSessions(string(data))
 	if len(profiles) == 0 {
-		return path, 0, fmt.Errorf("no importable MobaXterm sessions found")
+		return MobaImportResult{}, fmt.Errorf("no importable MobaXterm sessions found")
 	}
 	existing, err := config.LoadSessions()
 	if err != nil {
-		return "", 0, err
+		return MobaImportResult{}, err
 	}
 	existing = append(existing, profiles...)
-	return path, len(profiles), config.SaveSessions(existing)
+	if err := config.SaveSessions(existing); err != nil {
+		return MobaImportResult{}, err
+	}
+	return MobaImportResult{Path: path, Count: len(profiles)}, nil
 }
 
 func parseMobaSessions(data string) []config.SessionProfile {

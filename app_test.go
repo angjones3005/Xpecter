@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -46,5 +47,21 @@ func TestRemoteTempFilePathUsesRemoteBaseName(t *testing.T) {
 	want := filepath.Join(`C:\Temp\remote`, "report.pdf")
 	if got != want {
 		t.Fatalf("remoteTempFilePath() = %q, want %q", got, want)
+	}
+}
+
+// Wails marshals a bound method returning at most one value plus an
+// error: internal/binding.BoundMethod.Call switches on the output count
+// and handles only 1 and 2. A method with three returns matches neither
+// case, so it reaches the frontend as null with its error discarded, and
+// nothing in the Go build or the TypeScript build says a word about it.
+// ImportMobaXtermSessions shipped that way. This catches the next one.
+func TestBoundMethodsReturnAtMostTwoValues(t *testing.T) {
+	appType := reflect.TypeOf(&App{})
+	for i := 0; i < appType.NumMethod(); i++ {
+		method := appType.Method(i)
+		if count := method.Type.NumOut(); count > 2 {
+			t.Errorf("App.%s returns %d values; Wails marshals at most 2 (value plus error), so the frontend would receive null", method.Name, count)
+		}
 	}
 }
