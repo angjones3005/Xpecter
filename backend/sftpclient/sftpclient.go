@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"time"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -83,6 +84,10 @@ func DownloadFile(client *ssh.Client, remotePath string, localPath string) error
 		return err
 	}
 	defer func() { _ = src.Close() }()
+	info, err := src.Stat()
+	if err != nil {
+		return err
+	}
 
 	dst, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -92,7 +97,10 @@ func DownloadFile(client *ssh.Client, remotePath string, localPath string) error
 		_ = dst.Close()
 		return err
 	}
-	return dst.Close()
+	if err := dst.Close(); err != nil {
+		return err
+	}
+	return os.Chtimes(localPath, info.ModTime(), info.ModTime())
 }
 
 func WriteFile(client *ssh.Client, filePath string, content string) error {
@@ -116,7 +124,7 @@ func WriteFile(client *ssh.Client, filePath string, content string) error {
 // UploadFile writes raw bytes to a remote path, used for binary-safe
 // file uploads (drag-and-drop from the local OS), as distinct from
 // WriteFile which is used for the text-based Monaco editor save path.
-func UploadFile(client *ssh.Client, filePath string, data []byte) error {
+func UploadFile(client *ssh.Client, filePath string, data []byte, modifiedAt time.Time) error {
 	c, err := sftp.NewClient(client)
 	if err != nil {
 		return err
@@ -130,5 +138,11 @@ func UploadFile(client *ssh.Client, filePath string, data []byte) error {
 		_ = f.Close()
 		return err
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if modifiedAt.IsZero() {
+		return nil
+	}
+	return c.Chtimes(filePath, modifiedAt, modifiedAt)
 }

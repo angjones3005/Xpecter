@@ -174,8 +174,8 @@ export function TrustHostDespiteChange(arg1) {
   return window['go']['main']['App']['TrustHostDespiteChange'](arg1);
 }
 
-export function UploadRemoteFile(arg1, arg2, arg3) {
-  return window['go']['main']['App']['UploadRemoteFile'](arg1, arg2, arg3);
+export function UploadRemoteFile(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['UploadRemoteFile'](arg1, arg2, arg3, arg4);
 }
 
 export function WriteLocalFile(arg1, arg2) {

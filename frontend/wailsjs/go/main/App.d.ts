@@ -89,7 +89,7 @@ export function TrustHost(arg1:string):Promise<void>;
 
 export function TrustHostDespiteChange(arg1:string):Promise<void>;
 
-export function UploadRemoteFile(arg1:string,arg2:string,arg3:string):Promise<void>;
+export function UploadRemoteFile(arg1:string,arg2:string,arg3:string,arg4:number):Promise<void>;
 
 export function WriteLocalFile(arg1:string,arg2:string):Promise<void>;
 

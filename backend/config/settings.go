@@ -41,6 +41,9 @@ type Settings struct {
 	// written before this field existed. A plain "Enabled bool" would
 	// have silently defaulted every existing user to keepalive OFF.
 	SSHKeepaliveDisabled bool `json:"sshKeepaliveDisabled,omitempty"`
+
+	// KeepOpenOnLastTab keeps the app running when the final tab closes.
+	KeepOpenOnLastTab bool `json:"keepOpenOnLastTab,omitempty"`
 }
 
 func settingsPath() (string, error) {

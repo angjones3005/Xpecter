@@ -736,7 +736,7 @@ func (a *App) WriteRemoteFile(id string, path string, content string) error {
 // is used because Wails bindings serialize over JSON, which requires
 // valid UTF-8 strings, arbitrary binary data (images, executables, etc.)
 // is not valid UTF-8 and would be corrupted if sent as a raw string.
-func (a *App) UploadRemoteFile(id string, path string, base64Content string) error {
+func (a *App) UploadRemoteFile(id string, path string, base64Content string, modifiedAt int64) error {
 	sess, ok := a.sessions[id]
 	if !ok {
 		return fmt.Errorf("no such session: %s", id)
@@ -745,5 +745,9 @@ func (a *App) UploadRemoteFile(id string, path string, base64Content string) err
 	if err != nil {
 		return fmt.Errorf("invalid base64 upload payload: %w", err)
 	}
-	return sftpclient.UploadFile(sess.SSHClient(), path, data)
+	var modTime time.Time
+	if modifiedAt > 0 {
+		modTime = time.UnixMilli(modifiedAt)
+	}
+	return sftpclient.UploadFile(sess.SSHClient(), path, data, modTime)
 }

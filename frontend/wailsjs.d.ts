@@ -93,6 +93,7 @@ export interface Settings {
   // SPE-79. Inverted polarity matches the Go struct: false/absent means
   // keepalive is ON (the default), only true actually disables it.
   sshKeepaliveDisabled?: boolean;
+  keepOpenOnLastTab?: boolean;
 }
 // Check-for-updates: a GitHub releases API check on launch. Includes an
 // in-app download+launch flow (DownloadAndInstallUpdate below), the
@@ -155,7 +156,7 @@ export interface AppBindings {
   ReadRemoteFile(id: string, path: string): Promise<string>;
   OpenRemoteFile(id: string, path: string): Promise<void>;
   WriteRemoteFile(id: string, path: string, content: string): Promise<void>;
-  UploadRemoteFile(id: string, path: string, base64Content: string): Promise<void>;
+  UploadRemoteFile(id: string, path: string, base64Content: string, modifiedAt: number): Promise<void>;
 }
 interface WailsRuntime {
   EventsOn(eventName: string, callback: (...data: unknown[]) => void): () => void;

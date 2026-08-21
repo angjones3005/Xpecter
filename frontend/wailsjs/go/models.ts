@@ -80,6 +80,7 @@ export namespace config {
 	    colorScheme?: string;
 	    fontFamily?: string;
 	    fontSize?: number;
+		keepOpenOnLastTab?: boolean;
 	    sshKeepaliveDisabled?: boolean;
 	
 	    static createFrom(source: any = {}) {

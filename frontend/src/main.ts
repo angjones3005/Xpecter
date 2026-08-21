@@ -355,6 +355,9 @@ async function loadSettingsAndApply() {
   const keepaliveToggle = document.getElementById('ssh-keepalive-toggle') as HTMLInputElement;
   keepaliveToggle.checked = !appSettings.sshKeepaliveDisabled;
 
+  const keepOpenToggle = document.getElementById('keep-open-last-tab-toggle') as HTMLInputElement;
+  keepOpenToggle.checked = !!appSettings.keepOpenOnLastTab;
+
   const initialSize = appSettings.fontSize || FONT_SIZE_DEFAULT;
   const fontSizeSelect = document.getElementById('font-size-select') as HTMLSelectElement;
   fontSizeSelect.value = String(initialSize);
@@ -690,8 +693,12 @@ async function closeTab(id: string) {
     if (remaining.length > 0) {
       switchToTab(remaining[remaining.length - 1]);
     } else {
-      const fresh = createPendingTab();
-      switchToTab(fresh.id);
+      if (appSettings.keepOpenOnLastTab) {
+        const fresh = createPendingTab();
+        switchToTab(fresh.id);
+      } else {
+        runtime.Quit();
+      }
     }
   } else {
     renderTabBar();
@@ -1474,7 +1481,7 @@ async function uploadFilesToCurrentDir(files: FileList) {
     const base64 = btoa(binary);
     const remotePath = currentRemotePath === '.' ? file.name : `${currentRemotePath}/${file.name}`;
     try {
-      await App.UploadRemoteFile(currentRemoteSessionId, remotePath, base64);
+      await App.UploadRemoteFile(currentRemoteSessionId, remotePath, base64, file.lastModified);
     } catch (err) {
       console.error('Upload failed for', file.name, err);
     }
@@ -1512,14 +1519,13 @@ function setAuthMode(mode: 'password' | 'key') {
 }
 
 function setDeviceKind(kind: 'host' | 'switch' | 'firewall') {
-  const radio = document.querySelector(`input[name="devicekind"][value="${kind}"]`) as HTMLInputElement;
-  radio.checked = true;
+  (document.getElementById('device-kind-select') as HTMLSelectElement).value = kind;
 }
 
 function currentDeviceKind(): 'host' | 'switch' | 'firewall' {
-  const checked = document.querySelector('input[name="devicekind"]:checked') as HTMLInputElement | null;
-  if (checked?.value === 'switch') return 'switch';
-  if (checked?.value === 'firewall') return 'firewall';
+  const value = (document.getElementById('device-kind-select') as HTMLSelectElement).value;
+  if (value === 'switch') return 'switch';
+  if (value === 'firewall') return 'firewall';
   return 'host';
 }
 
@@ -1720,12 +1726,6 @@ function attachMenuAutoClose(menu: HTMLElement) {
   setTimeout(() => document.addEventListener('click', closeMenu), 0);
 }
 
-const DEVICE_KINDS: { value: 'host' | 'switch' | 'firewall'; label: string }[] = [
-  { value: 'host', label: 'VM / Host' },
-  { value: 'switch', label: 'Network switch' },
-  { value: 'firewall', label: 'Firewall' },
-];
-
 // SPE-62: single "Edit session" entry replaces the old Rename prompt()
 // and Device-type flyout, both folded into the real edit dialog now.
 function showSessionContextMenu(x: number, y: number, s: SessionProfile) {
@@ -1802,20 +1802,9 @@ async function openSessionEditor(s: SessionProfile) {
     (document.getElementById('se-user') as HTMLInputElement).value = s.user ?? '';
     (document.getElementById('se-keypath') as HTMLInputElement).value = s.keyPath ?? '';
 
-    const radios = document.getElementById('se-devicekind-radios')!;
-    radios.innerHTML = '';
+    const deviceKindSelect = document.getElementById('se-devicekind-select') as HTMLSelectElement;
     const current = s.deviceKind === 'switch' || s.deviceKind === 'firewall' ? s.deviceKind : 'host';
-    for (const k of DEVICE_KINDS) {
-      const label = document.createElement('label');
-      const radio = document.createElement('input');
-      radio.type = 'radio';
-      radio.name = 'se-devicekind';
-      radio.value = k.value;
-      radio.checked = k.value === current;
-      label.appendChild(radio);
-      label.appendChild(document.createTextNode(' ' + k.label));
-      radios.appendChild(label);
-    }
+    deviceKindSelect.value = current;
   }
 
   const groupSelect = document.getElementById('se-group') as HTMLSelectElement;
@@ -1869,8 +1858,7 @@ document.getElementById('se-save')!.addEventListener('click', async () => {
     updated.user = (document.getElementById('se-user') as HTMLInputElement).value.trim();
     const keyPath = (document.getElementById('se-keypath') as HTMLInputElement).value.trim();
     updated.keyPath = keyPath || undefined;
-    const checked = document.querySelector('input[name="se-devicekind"]:checked') as HTMLInputElement | null;
-    updated.deviceKind = (checked?.value as 'host' | 'switch' | 'firewall' | undefined) ?? 'host';
+    updated.deviceKind = (document.getElementById('se-devicekind-select') as HTMLSelectElement).value as 'host' | 'switch' | 'firewall';
   }
 
   await App.SaveSession(updated);
@@ -2973,6 +2961,20 @@ keepaliveToggle.addEventListener('change', () => {
   App.SaveSettings(appSettings);
 });
 
+const keepOpenToggle = document.getElementById('keep-open-last-tab-toggle') as HTMLInputElement;
+keepOpenToggle.addEventListener('change', () => {
+  appSettings.keepOpenOnLastTab = keepOpenToggle.checked;
+  App.SaveSettings(appSettings);
+});
+
+document.getElementById('menu-reset-settings')!.addEventListener('click', async () => {
+  closeAllMenus();
+  if (!confirm('Reset appearance settings to defaults? Saved sessions will not be changed.')) return;
+  appSettings = { sshKeepaliveDisabled: appSettings.sshKeepaliveDisabled, keepOpenOnLastTab: appSettings.keepOpenOnLastTab };
+  await App.SaveSettings(appSettings);
+  await loadSettingsAndApply();
+});
+
 const showTabNumbersToggle = document.getElementById('show-tab-numbers-toggle') as HTMLInputElement;
 showTabNumbersToggle.checked = showTabNumbersEnabled;
 showTabNumbersToggle.addEventListener('change', () => {
@@ -3136,6 +3138,14 @@ function closeAllMenus() {
 }
 
 document.querySelectorAll('#menubar .menu-item').forEach((item) => {
+  item.addEventListener('mouseenter', () => {
+    const anyMenuOpen = document.querySelector('#menubar .menu-dropdown.open');
+    const dropdown = item.querySelector('.menu-dropdown')!;
+    if (!anyMenuOpen || dropdown.classList.contains('open')) return;
+    closeAllMenus();
+    dropdown.classList.add('open');
+    item.classList.add('open');
+  });
   item.addEventListener('click', (e) => {
     e.stopPropagation();
     const dropdown = item.querySelector('.menu-dropdown')!;
@@ -3640,7 +3650,7 @@ let editorWidth: number | null = null;
 
 function setupPaneResize(handleId: string, columnIndex: number, minWidth: number) {
   const handle = document.getElementById(handleId)!;
-  handle.addEventListener('mousedown', (e) => {
+  handle.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     const app = document.getElementById('app')!;
     const startX = e.clientX;
@@ -3648,22 +3658,27 @@ function setupPaneResize(handleId: string, columnIndex: number, minWidth: number
     const widthDirection = columnIndex === 0 ? 1 : -1;
     const startWidth = parseFloat(getComputedStyle(app).getPropertyValue(variableName));
     handle.classList.add('dragging');
+    handle.setPointerCapture(e.pointerId);
 
-    const onMouseMove = (moveEvent: MouseEvent) => {
+    const onPointerMove = (moveEvent: PointerEvent) => {
       const delta = moveEvent.clientX - startX;
       const newWidth = Math.max(minWidth, startWidth + widthDirection * delta);
       app.style.setProperty(variableName, `${newWidth}px`);
       if (columnIndex === 0) sidebarWidth = newWidth;
       else editorWidth = newWidth;
+    };
+
+    const finishResize = () => {
+      handle.classList.remove('dragging');
+      handle.removeEventListener('pointermove', onPointerMove);
+      handle.removeEventListener('pointerup', finishResize);
+      handle.removeEventListener('pointercancel', finishResize);
+      if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
       refitActiveTerminal();
     };
-    const onMouseUp = () => {
-      handle.classList.remove('dragging');
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-    };
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
+    handle.addEventListener('pointermove', onPointerMove);
+    handle.addEventListener('pointerup', finishResize);
+    handle.addEventListener('pointercancel', finishResize);
   });
 }
 

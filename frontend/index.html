@@ -76,7 +76,7 @@
     #statusbar { flex: 0 0 auto; height: 22px; background: var(--bg-alt); border-top: 1px solid var(--border); display: flex; align-items: center; padding: 0 10px; font-size: 11px; color: var(--text-dim); }
     #app.sidebar-collapsed { --sw: 0px; --rsw: 0px; }
     #app.sidebar-collapsed #sidebar, #app.sidebar-collapsed #resize-sidebar { display: none; }
-    .resize-handle { cursor: col-resize; background: transparent; }
+    .resize-handle { cursor: col-resize; background: transparent; touch-action: none; user-select: none; }
     #resize-sidebar { grid-column: 2; grid-row: 1; }
     #resize-editor { grid-column: 4; grid-row: 1; }
     .resize-handle:hover, .resize-handle.dragging { background: var(--accent); }
@@ -143,26 +143,37 @@
       background: var(--accent);
       color: #ffffff;
       border: none;
-      border-radius: 5px;
-      padding: 6px 14px;
+      border-radius: 6px;
+      padding: 7px 14px;
       font-size: 13px;
+      font-weight: 600;
+      line-height: 1.2;
       cursor: pointer;
-      transition: opacity 0.12s ease;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.12);
+      transition: background 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease, transform 0.12s ease;
     }
     button:hover {
-      opacity: 0.85;
+      background: #3d8de0;
+      box-shadow: 0 2px 7px rgba(49,120,198,0.28), inset 0 1px 0 rgba(255,255,255,0.14);
     }
     button:active {
-      opacity: 0.7;
+      transform: translateY(1px);
+      box-shadow: inset 0 1px 3px rgba(0,0,0,0.25);
     }
-    .toolbar button, .picker-item, #session-picker .close {
+    button:focus-visible, .picker-item:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    button.secondary, .toolbar button, #session-picker .close {
       background: var(--bg-input);
       color: var(--text);
-      border: 1px solid var(--border);
+      border: 1px solid #4a4a4a;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.05);
     }
-    .toolbar button:hover {
-      opacity: 1;
+    button.secondary:hover, .toolbar button:hover, #session-picker .close:hover {
       background: var(--hover);
+      border-color: var(--accent);
+      box-shadow: 0 2px 7px rgba(0,0,0,0.2);
     }
     #session-picker-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 2000; }
     #session-picker-overlay.open { display: flex; }
@@ -171,9 +182,12 @@
     #session-picker .picker-header .close { cursor: pointer; opacity: 0.6; }
     #session-picker .picker-header .close:hover { opacity: 1; }
     #session-picker .picker-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; padding: 20px; }
-    #session-picker .picker-item { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--text); border: 1px solid var(--border); }
-    #session-picker .picker-item:hover { background: var(--hover); border-color: var(--accent); }
-    #session-picker .picker-item .icon { font-size: 28px; }
+    #session-picker .picker-item { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 8px; border-radius: 8px; cursor: pointer; font-size: 13px; color: var(--text); border: 1px solid var(--border); background: var(--bg-input); box-shadow: inset 0 1px 0 rgba(255,255,255,0.04); transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease, box-shadow 0.12s ease; }
+    #session-picker .picker-item:hover { background: var(--hover); border-color: var(--accent); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.22); }
+    #session-picker .picker-item:active { transform: translateY(0); }
+    #session-picker .picker-item .icon { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 10px; background: rgba(49,120,198,0.14); color: #8fc5ff; font-size: 24px; }
+    #new-session-btn { padding: 9px 18px; border-radius: 7px; letter-spacing: 0.01em; }
+    #connect, #serial-connect, #lsp-save, #se-save { min-width: 112px; }
     /* SPE-102: local shell profile editor, same overlay/dialog shell as
        #session-picker, own ID so both can exist independently. */
     #lsp-editor-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 2000; }
@@ -377,12 +391,14 @@
         <div class="item"><label><input type="checkbox" id="rclick-paste-toggle" checked /> Right-click to paste</label></div>
         <div class="item"><label><input type="checkbox" id="warn-multiline-paste-toggle" checked /> Warn before pasting multiple lines</label></div>
         <div class="item"><label><input type="checkbox" id="ssh-keepalive-toggle" checked /> SSH keepalive (prevent idle disconnects)</label></div>
+        <div class="item"><label><input type="checkbox" id="keep-open-last-tab-toggle" /> Keep app open when last tab closes</label></div>
         <div class="item"><label><input type="checkbox" id="show-tab-numbers-toggle" /> Show tab numbers</label></div>
         <div class="item"><label><input type="checkbox" id="highlight-toggle" checked /> Highlight status keywords</label></div>
         <div class="separator"></div>
         <div class="item" id="menu-export-config">Export Configuration…</div>
         <div class="item" id="menu-import-config">Import Configuration…</div>
         <div class="item" id="menu-restore-backup">Restore from Backup…</div>
+        <div class="item" id="menu-reset-settings">Reset appearance settings to defaults</div>
         <div class="separator"></div>
         <div class="item" id="menu-check-updates" style="cursor:pointer;">Check for Updates&#8230; <span id="menu-version" style="opacity:0.5;font-size:11px;"></span></div>
       </div>
@@ -427,7 +443,7 @@
       </div>
       <div id="tab-landing" style="display:none;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:12px;">
         <div style="font-size:14px;color:var(--text-dim);">No session yet</div>
-        <button id="new-session-btn" style="padding:8px 18px;font-size:13px;">+ New Session</button>
+        <button id="new-session-btn">+ New Session</button>
       </div>
       <div id="terminal" style="position:relative;"></div>
     </div>
@@ -476,9 +492,11 @@
         <input id="host" placeholder="host" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
         <input id="user" placeholder="user" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
         <div>
-          <label style="margin-right:10px;"><input type="radio" name="devicekind" value="host" checked /> VM / Host</label>
-          <label style="margin-right:10px;"><input type="radio" name="devicekind" value="switch" /> Switch</label>
-          <label><input type="radio" name="devicekind" value="firewall" /> Firewall</label>
+          <select id="device-kind-select" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;">
+            <option value="host">VM / Host</option>
+            <option value="switch">Network switch</option>
+            <option value="firewall">Firewall</option>
+          </select>
         </div>
         <div>
           <label style="margin-right:10px;"><input type="radio" name="authmode" value="password" checked /> Password</label>
@@ -559,7 +577,11 @@
             <button id="se-browse-key" type="button">Browse…</button>
             <button id="se-clear-key" type="button">Clear</button>
           </div>
-          <div id="se-devicekind-radios" style="display:flex;flex-direction:column;gap:4px;"></div>
+          <select id="se-devicekind-select" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;">
+            <option value="host">VM / Host</option>
+            <option value="switch">Network switch</option>
+            <option value="firewall">Firewall</option>
+          </select>
         </div>
         <select id="se-group" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 6px;">
           <option value="">No folder</option>
