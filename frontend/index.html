@@ -317,6 +317,25 @@
     .dialog-body .warn { color: var(--warning); }
     .dialog-body .danger { color: var(--danger); }
     .dialog-field { width: 100%; box-sizing: border-box; }
+    /* Settings used to be 25 controls in a menubar dropdown with three
+       separators for structure, which is what an implementation dump
+       looks like. Grouped into a real dialog, with the one genuinely
+       risky option given its own marked group rather than sitting
+       between Copy on select and Right-click to paste. */
+    #settings-dialog { width: 460px; max-height: 82vh; }
+    .settings-group { padding: 12px 16px; border-bottom: 1px solid var(--border); }
+    .settings-group:last-child { border-bottom: none; }
+    .settings-group-title { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-dim); margin-bottom: 8px; }
+    .settings-group.sensitive { border-left: 2px solid var(--warning); }
+    .settings-group.sensitive .settings-group-title { color: var(--warning); }
+    .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0; font-size: 13px; min-width: 0; }
+    .settings-row label { display: flex; align-items: center; gap: 7px; flex: 1 1 auto; min-width: 0; cursor: pointer; }
+    .settings-row select { flex: 0 0 auto; max-width: 190px; }
+    .settings-row input[type="range"] { flex: 0 0 auto; width: 160px; }
+    .settings-note { font-size: 11px; color: var(--text-dim); line-height: 1.5; margin-top: 3px; }
+    .settings-action { padding: 4px 0; font-size: 13px; cursor: pointer; user-select: none; }
+    .settings-action:hover { color: var(--accent); }
+    .settings-action.danger:hover { color: var(--danger); }
     .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 0 16px 16px; }
     button.danger { background: var(--danger) !important; border-color: var(--danger) !important; color: #ffffff !important; }
     button.warning { background: var(--warning) !important; border-color: var(--warning) !important; color: var(--bg) !important; }
@@ -489,10 +508,33 @@
         <div class="item" id="menu-tool-text-editor">Text Editor</div>
       </div>
     </div>
-    <div class="menu-item" data-menu="settings">Settings
-      <div class="menu-dropdown" id="menu-settings">
-        <div class="item"><label>Theme <select id="theme-select"><option value="dark">Dark</option><option value="light">Light</option></select></label></div>
-        <div class="item"><label>Terminal colors
+    <div class="menu-item" data-menu="settings" data-opens="settings-overlay">Settings</div>
+    <div id="titlebar-spacer"></div>
+    <div id="titlebar-controls">
+      <button id="theme-toggle-btn" title="Toggle light/dark theme">&#127762;</button>
+      <button id="win-minimize" title="Minimize">&#9472;</button>
+      <button id="win-maximize" title="Maximize">&#9633;</button>
+      <button id="win-close" title="Close">&#10005;</button>
+    </div>
+  </div>
+  <div id="update-banner" style="display:none;align-items:center;gap:10px;padding:6px 14px;background:#1f3a5f;border-bottom:1px solid var(--border);font-size:12px;color:#cfe3ff;">
+    <span id="update-banner-text"></span>
+    <button id="update-banner-download" style="margin-left:auto;padding:3px 10px;font-size:12px;">Download</button>
+    <span id="update-banner-dismiss" style="cursor:pointer;opacity:0.7;padding:0 4px;" title="Dismiss">&#10005;</span>
+  </div>
+  <div id="settings-overlay" class="dialog-overlay">
+    <div id="settings-dialog" class="dialog">
+      <div class="dialog-head">
+        <strong>Settings</strong>
+        <span class="close" id="settings-close">&#10005;</span>
+      </div>
+
+      <div class="settings-group">
+        <div class="settings-group-title">Appearance</div>
+        <div class="settings-row"><label for="theme-select">Theme</label>
+          <select id="theme-select"><option value="dark">Dark</option><option value="light">Light</option></select>
+        </div>
+        <div class="settings-row"><label for="colorscheme-select">Terminal colors</label>
           <select id="colorscheme-select">
             <option value="dark">Dark (default)</option>
             <option value="light">Light (default)</option>
@@ -504,8 +546,8 @@
             <option value="one-dark">One Dark</option>
             <option value="tokyo-night">Tokyo Night</option>
           </select>
-        </label></div>
-        <div class="item"><label>Font
+        </div>
+        <div class="settings-row"><label for="font-select">Font</label>
           <select id="font-select">
             <option value="menlo">Menlo</option>
             <option value="consolas">Consolas</option>
@@ -519,77 +561,83 @@
             <option value="victor">Victor Mono</option>
             <option value="ubuntumono">Ubuntu Mono</option>
           </select>
-        </label></div>
-        <div class="item"><label>Font size
+        </div>
+        <div class="settings-row"><label for="font-size-select">Font size</label>
           <select id="font-size-select">
-            <option value="8">8px</option>
-            <option value="9">9px</option>
-            <option value="10">10px</option>
-            <option value="11">11px</option>
-            <option value="12">12px</option>
-            <option value="13">13px</option>
-            <option value="14">14px</option>
-            <option value="15">15px</option>
-            <option value="16">16px</option>
-            <option value="17">17px</option>
-            <option value="18">18px</option>
-            <option value="19">19px</option>
-            <option value="20">20px</option>
-            <option value="21">21px</option>
-            <option value="22">22px</option>
-            <option value="23">23px</option>
-            <option value="24">24px</option>
-            <option value="25">25px</option>
-            <option value="26">26px</option>
-            <option value="27">27px</option>
-            <option value="28">28px</option>
-            <option value="29">29px</option>
-            <option value="30">30px</option>
-            <option value="31">31px</option>
+            <option value="8">8px</option><option value="9">9px</option><option value="10">10px</option>
+            <option value="11">11px</option><option value="12">12px</option><option value="13">13px</option>
+            <option value="14">14px</option><option value="15">15px</option><option value="16">16px</option>
+            <option value="17">17px</option><option value="18">18px</option><option value="19">19px</option>
+            <option value="20">20px</option><option value="21">21px</option><option value="22">22px</option>
+            <option value="23">23px</option><option value="24">24px</option><option value="25">25px</option>
+            <option value="26">26px</option><option value="27">27px</option><option value="28">28px</option>
+            <option value="29">29px</option><option value="30">30px</option><option value="31">31px</option>
             <option value="32">32px</option>
           </select>
-        </label></div>
-        <div class="separator"></div>
-        <div class="item"><label>Wallpaper <button id="wallpaper-browse" type="button">Browse...</button></label></div>
-        <div class="item" id="wallpaper-opacity-row" style="display:none;">
-          <label>Opacity <input type="range" id="wallpaper-opacity" min="0" max="60" value="15" style="vertical-align:middle;" /></label>
         </div>
-        <div class="item" id="wallpaper-clear-row" style="display:none;"><span id="wallpaper-clear" style="cursor:pointer;color:var(--danger);">Clear wallpaper</span></div>
-        <div class="separator"></div>
-        <div class="item"><label><input type="checkbox" id="osc52-toggle" /> OSC 52 clipboard sync (remote can write to your clipboard)</label></div>
-        <div class="item"><label><input type="checkbox" id="copy-on-select-toggle" /> Copy on select</label></div>
-        <div class="item"><label><input type="checkbox" id="rclick-paste-toggle" checked /> Right-click to paste</label></div>
-        <div class="item"><label><input type="checkbox" id="warn-multiline-paste-toggle" checked /> Warn before pasting multiple lines</label></div>
-        <div class="item"><label><input type="checkbox" id="ssh-keepalive-toggle" checked /> SSH keepalive (prevent idle disconnects)</label></div>
-        <div class="item"><label><input type="checkbox" id="keep-open-last-tab-toggle" /> Keep app open when last tab closes</label></div>
-        <div class="item"><label>Session log directory <button id="session-log-browse" type="button">Choose...</button></label></div>
-        <div class="item" id="session-log-clear-row" style="display:none;"><span id="session-log-clear" style="cursor:pointer;color:var(--danger);">Disable session logging</span></div>
-        <div class="item"><label><input type="checkbox" id="show-tab-numbers-toggle" /> Show tab numbers</label></div>
-        <div class="item"><label><input type="checkbox" id="highlight-toggle" checked /> Highlight status keywords</label></div>
-        <div class="separator"></div>
-        <div class="item" id="menu-export-config">Export Configuration…</div>
-        <div class="item" id="menu-import-config">Import Configuration…</div>
-        <div class="item" id="menu-export-encrypted-config">Export Encrypted Configuration…</div>
-        <div class="item" id="menu-import-encrypted-config">Import Encrypted Configuration…</div>
-        <div class="item" id="menu-import-mobaxterm">Import from MobaXterm…</div>
-        <div class="item" id="menu-restore-backup">Restore from Backup…</div>
-        <div class="item" id="menu-reset-settings">Reset appearance settings to defaults</div>
-        <div class="separator"></div>
-        <div class="item" id="menu-check-updates" style="cursor:pointer;">Check for Updates&#8230; <span id="menu-version" style="opacity:0.5;font-size:11px;"></span></div>
+        <div class="settings-row"><label>Wallpaper</label>
+          <button id="wallpaper-browse" type="button" class="secondary">Browse&hellip;</button>
+        </div>
+        <div class="settings-row" id="wallpaper-opacity-row" style="display:none;">
+          <label for="wallpaper-opacity">Opacity</label>
+          <input type="range" id="wallpaper-opacity" min="0" max="60" value="15" />
+        </div>
+        <div class="settings-row" id="wallpaper-clear-row" style="display:none;">
+          <span class="settings-action danger" id="wallpaper-clear">Clear wallpaper</span>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <div class="settings-group-title">Terminal</div>
+        <div class="settings-row"><label><input type="checkbox" id="highlight-toggle" checked /> Highlight status keywords</label></div>
+        <div class="settings-row"><label><input type="checkbox" id="show-tab-numbers-toggle" /> Show tab numbers</label></div>
+        <div class="settings-row"><label><input type="checkbox" id="ssh-keepalive-toggle" checked /> SSH keepalive (prevent idle disconnects)</label></div>
+        <div class="settings-row"><label><input type="checkbox" id="keep-open-last-tab-toggle" /> Keep app open when last tab closes</label></div>
+      </div>
+
+      <div class="settings-group">
+        <div class="settings-group-title">Clipboard &amp; paste</div>
+        <div class="settings-row"><label><input type="checkbox" id="copy-on-select-toggle" /> Copy on select</label></div>
+        <div class="settings-row"><label><input type="checkbox" id="rclick-paste-toggle" checked /> Right-click to paste</label></div>
+        <div class="settings-row"><label><input type="checkbox" id="warn-multiline-paste-toggle" checked /> Warn before pasting multiple lines</label></div>
+      </div>
+
+      <div class="settings-group sensitive">
+        <div class="settings-group-title">Security</div>
+        <div class="settings-row"><label><input type="checkbox" id="osc52-toggle" /> Allow remote hosts to write to your clipboard (OSC 52)</label></div>
+        <div class="settings-note">Off by default. With this on, anything running on the remote end can replace your local clipboard contents silently, including on a host you have not decided to trust yet.</div>
+      </div>
+
+      <div class="settings-group">
+        <div class="settings-group-title">Session logging</div>
+        <div class="settings-row"><label>Log directory</label>
+          <button id="session-log-browse" type="button" class="secondary">Choose&hellip;</button>
+        </div>
+        <div class="settings-note">Off until a directory is chosen. Specter then appends raw session output to per-session files.</div>
+        <div class="settings-row" id="session-log-clear-row" style="display:none;">
+          <span class="settings-action danger" id="session-log-clear">Disable session logging</span>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <div class="settings-group-title">Configuration</div>
+        <div class="settings-action" id="menu-export-config">Export configuration&hellip;</div>
+        <div class="settings-action" id="menu-import-config">Import configuration&hellip;</div>
+        <div class="settings-action" id="menu-export-encrypted-config">Export encrypted configuration&hellip;</div>
+        <div class="settings-action" id="menu-import-encrypted-config">Import encrypted configuration&hellip;</div>
+        <div class="settings-action" id="menu-import-mobaxterm">Import from MobaXterm&hellip;</div>
+        <div class="settings-action" id="menu-restore-backup">Restore from backup&hellip;</div>
+        <div class="settings-action danger" id="menu-reset-settings">Reset appearance settings to defaults</div>
+      </div>
+
+      <div class="settings-group">
+        <div class="settings-group-title">About</div>
+        <div class="settings-row">
+          <span class="settings-action" id="menu-check-updates">Check for updates&hellip;</span>
+          <span id="menu-version" class="settings-note"></span>
+        </div>
       </div>
     </div>
-    <div id="titlebar-spacer"></div>
-    <div id="titlebar-controls">
-      <button id="theme-toggle-btn" title="Toggle light/dark theme">&#127762;</button>
-      <button id="win-minimize" title="Minimize">&#9472;</button>
-      <button id="win-maximize" title="Maximize">&#9633;</button>
-      <button id="win-close" title="Close">&#10005;</button>
-    </div>
-  </div>
-  <div id="update-banner" style="display:none;align-items:center;gap:10px;padding:6px 14px;background:#1f3a5f;border-bottom:1px solid var(--border);font-size:12px;color:#cfe3ff;">
-    <span id="update-banner-text"></span>
-    <button id="update-banner-download" style="margin-left:auto;padding:3px 10px;font-size:12px;">Download</button>
-    <span id="update-banner-dismiss" style="cursor:pointer;opacity:0.7;padding:0 4px;" title="Dismiss">&#10005;</span>
   </div>
   <div id="app">
     <div id="sidebar">

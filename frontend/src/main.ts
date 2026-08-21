@@ -4357,9 +4357,15 @@ function closeAllMenus() {
 }
 
 document.querySelectorAll('#menubar .menu-item').forEach((item) => {
+  // SPE-101: a menubar entry can now open a dialog instead of owning a
+  // dropdown (Settings does), so the dropdown lookup has to tolerate
+  // not finding one rather than assert it away.
+  const dropdown = item.querySelector('.menu-dropdown') as HTMLElement | null;
+  const opensDialog = (item as HTMLElement).dataset.opens;
+
   item.addEventListener('mouseenter', () => {
+    if (!dropdown) return;
     const anyMenuOpen = document.querySelector('#menubar .menu-dropdown.open');
-    const dropdown = item.querySelector('.menu-dropdown')!;
     if (!anyMenuOpen || dropdown.classList.contains('open')) return;
     closeAllMenus();
     dropdown.classList.add('open');
@@ -4367,7 +4373,12 @@ document.querySelectorAll('#menubar .menu-item').forEach((item) => {
   });
   item.addEventListener('click', (e) => {
     e.stopPropagation();
-    const dropdown = item.querySelector('.menu-dropdown')!;
+    if (opensDialog) {
+      closeAllMenus();
+      document.getElementById(opensDialog)?.classList.add('open');
+      return;
+    }
+    if (!dropdown) return;
     const wasOpen = dropdown.classList.contains('open');
     closeAllMenus();
     if (!wasOpen) {
@@ -4375,6 +4386,25 @@ document.querySelectorAll('#menubar .menu-item').forEach((item) => {
       item.classList.add('open');
     }
   });
+});
+
+// Settings is a dialog now, so it needs the dismissal the dropdown got
+// for free from the document-level menu close.
+const settingsOverlay = document.getElementById('settings-overlay')!;
+function closeSettingsDialog() {
+  settingsOverlay.classList.remove('open');
+}
+document.getElementById('settings-close')!.addEventListener('click', closeSettingsDialog);
+settingsOverlay.addEventListener('mousedown', (e) => {
+  if (e.target === settingsOverlay) closeSettingsDialog();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && settingsOverlay.classList.contains('open')) closeSettingsDialog();
+});
+// Anything that opens a file picker, swaps configuration or restarts a
+// flow reads better with the panel out of the way first.
+settingsOverlay.querySelectorAll('.settings-action').forEach((action) => {
+  action.addEventListener('click', closeSettingsDialog);
 });
 
 // Bug fix: clicking anything inside an open dropdown (a <select>, a
