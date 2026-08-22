@@ -106,8 +106,8 @@ type x11Stream interface {
 }
 
 func proxyX11(left x11Stream, right x11Stream) {
-	defer left.Close()
-	defer right.Close()
+	defer func() { _ = left.Close() }()
+	defer func() { _ = right.Close() }()
 	done := make(chan struct{}, 2)
 	go func() { _, _ = io.Copy(left, right); done <- struct{}{} }()
 	go func() { _, _ = io.Copy(right, left); done <- struct{}{} }()
