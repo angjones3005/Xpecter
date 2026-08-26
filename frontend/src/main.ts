@@ -188,110 +188,608 @@ const MONACO_THEMES: Record<ThemeName, string> = {
   light: 'specter-light',
 };
 
-// SPE-107: Monaco bundles 78 languages and Haskell is not one of them.
-// The editor's old hand-written extension map had an `hs: 'haskell'`
-// entry pointing at a language id that was never registered, so .hs
-// files have always fallen back to plaintext, silently. Registering a
-// real grammar here fixes that and puts Haskell in the same registry
-// languageForPath and the Set Language picker already read, so nothing
-// else needs to know it's a local addition.
-monaco.languages.register({
+// --- Functional languages (SPE-107) ---
+// Monaco bundles 78 languages. Of the functional family it ships
+// Clojure, Elixir, F#, Scala, Scheme and Julia, and misses the rest, so
+// the editor's old hand-written extension map had an `hs: 'haskell'`
+// entry pointing at an id that was never registered: .hs files quietly
+// fell back to plaintext, and the map looked like support without being
+// any. These fill the gap, and because they go into the same registry
+// Monaco's own languages live in, languageForPath and the Set Language
+// picker pick them up with no special-casing.
+
+type LanguageSpec = {
+  id: string;
+  extensions: string[];
+  aliases: string[];
+  configuration: monaco.languages.LanguageConfiguration;
+  tokenizer: monaco.languages.IMonarchLanguage;
+};
+
+function registerLanguage(spec: LanguageSpec) {
+  monaco.languages.register({ id: spec.id, extensions: spec.extensions, aliases: spec.aliases });
+  monaco.languages.setLanguageConfiguration(spec.id, spec.configuration);
+  monaco.languages.setMonarchTokensProvider(spec.id, spec.tokenizer);
+}
+
+const CLOSING_PAIRS = [
+  { open: '{', close: '}' },
+  { open: '[', close: ']' },
+  { open: '(', close: ')' },
+  { open: '"', close: '"' },
+];
+
+// Haskell, PureScript, Idris and Elm share a syntax down to the
+// two-dash line comment that must not swallow an operator like -->, and
+// the nesting {- -} block comment. One tokenizer, four keyword lists.
+function haskellFamilyTokenizer(postfix: string, keywords: string[]): monaco.languages.IMonarchLanguage {
+  return {
+    defaultToken: '',
+    tokenPostfix: postfix,
+    keywords,
+    // The reserved operators, which read as syntax rather than as a
+    // function you could have defined yourself.
+    operators: ['::', '->', '<-', '=>', '=', '|', '\\', '@', '~', '..', ':'],
+    symbols: /[!#$%&*+./<=>?@\\^|\-~:]+/,
+    // Numeric and \^X control escapes, plus the named ASCII ones (NUL,
+    // ESC, DEL and friends) matched generically rather than enumerated:
+    // getting that list subtly wrong is worse than matching it loosely.
+    escapes: /\\(?:[abfnrtv\\"'0&]|x[0-9A-Fa-f]+|o[0-7]+|\d+|\^[A-Z@[\]\\^_]|[A-Z]{2,3})/,
+    tokenizer: {
+      root: [
+        [/\{-#/, { token: 'metatag', next: '@pragma' }],
+        [/\{-/, { token: 'comment', next: '@comment' }],
+        // Two or more dashes start a comment only when what follows is
+        // not another symbol character: --> and --| are operators.
+        [/--+(?![!#$%&*+./<=>?@\\^|~:]).*$/, 'comment'],
+
+        [/"/, { token: 'string.quote', next: '@string' }],
+        [/'(?:[^\\']|@escapes)'/, 'string'],
+
+        [/0[xX][0-9a-fA-F_]+/, 'number.hex'],
+        [/0[oO][0-7_]+/, 'number.octal'],
+        [/0[bB][01_]+/, 'number.binary'],
+        [/\d+(\.\d+)?([eE][-+]?\d+)?/, 'number'],
+
+        // Constructors, type names and module qualifiers are all the
+        // capitalised half of the naming rule, and all read the same
+        // way at a glance.
+        [/[A-Z][\w']*/, 'type.identifier'],
+
+        [/[a-z_][\w']*/, { cases: { '@keywords': 'keyword', '@default': 'identifier' } }],
+
+        [/[()[\]{}]/, '@brackets'],
+        [/[,;`]/, 'delimiter'],
+
+        [/@symbols/, { cases: { '@operators': 'keyword.operator', '@default': 'operator' } }],
+
+        [/[ \t\r\n]+/, ''],
+      ],
+
+      // These block comments nest, unlike C's.
+      comment: [
+        [/[^{-]+/, 'comment'],
+        [/\{-/, 'comment', '@push'],
+        [/-\}/, 'comment', '@pop'],
+        [/[{-]/, 'comment'],
+      ],
+
+      pragma: [
+        [/#-\}/, { token: 'metatag', next: '@pop' }],
+        [/[^#]+/, 'metatag'],
+        [/#/, 'metatag'],
+      ],
+
+      string: [
+        [/[^\\"]+/, 'string'],
+        [/@escapes/, 'string.escape'],
+        [/\\./, 'string.escape.invalid'],
+        [/"/, { token: 'string.quote', next: '@pop' }],
+      ],
+    },
+  };
+}
+
+const HASKELL_CONFIGURATION: monaco.languages.LanguageConfiguration = {
+  comments: { lineComment: '--', blockComment: ['{-', '-}'] },
+  brackets: [['{', '}'], ['[', ']'], ['(', ')']],
+  autoClosingPairs: CLOSING_PAIRS,
+  surroundingPairs: [...CLOSING_PAIRS, { open: "'", close: "'" }],
+};
+
+registerLanguage({
   id: 'haskell',
   extensions: ['.hs', '.lhs', '.hs-boot'],
   aliases: ['Haskell', 'haskell'],
-});
-
-monaco.languages.setLanguageConfiguration('haskell', {
-  comments: { lineComment: '--', blockComment: ['{-', '-}'] },
-  brackets: [['{', '}'], ['[', ']'], ['(', ')']],
-  autoClosingPairs: [
-    { open: '{', close: '}' },
-    { open: '[', close: ']' },
-    { open: '(', close: ')' },
-    { open: '"', close: '"' },
-  ],
-  surroundingPairs: [
-    { open: '{', close: '}' },
-    { open: '[', close: ']' },
-    { open: '(', close: ')' },
-    { open: '"', close: '"' },
-    { open: "'", close: "'" },
-  ],
-});
-
-monaco.languages.setMonarchTokensProvider('haskell', {
-  defaultToken: '',
-  tokenPostfix: '.hs',
-
-  keywords: [
+  configuration: HASKELL_CONFIGURATION,
+  tokenizer: haskellFamilyTokenizer('.hs', [
     'case', 'class', 'data', 'default', 'deriving', 'do', 'else', 'family',
     'forall', 'foreign', 'hiding', 'if', 'import', 'in', 'infix', 'infixl',
     'infixr', 'instance', 'let', 'mdo', 'module', 'newtype', 'of', 'proc',
     'qualified', 'rec', 'then', 'type', 'where',
-  ],
+  ]),
+});
 
-  // The reserved operators, which read as syntax rather than as a
-  // function you could have defined yourself.
-  operators: ['::', '->', '<-', '=>', '=', '|', '\\', '@', '~', '..', ':'],
+// PureScript and Idris get their own ids rather than being folded into
+// Haskell's extension list: the grammar is close enough to share, but
+// the status bar saying "Haskell" over a .purs file would be a small
+// lie, and the Set Language picker should offer them by name.
+registerLanguage({
+  id: 'purescript',
+  extensions: ['.purs'],
+  aliases: ['PureScript', 'purescript'],
+  configuration: HASKELL_CONFIGURATION,
+  tokenizer: haskellFamilyTokenizer('.purs', [
+    'ado', 'case', 'class', 'data', 'derive', 'do', 'else', 'false', 'forall',
+    'foreign', 'hiding', 'if', 'import', 'in', 'infix', 'infixl', 'infixr',
+    'instance', 'let', 'module', 'newtype', 'of', 'then', 'true', 'type',
+    'where',
+  ]),
+});
 
-  symbols: /[!#$%&*+./<=>?@\\^|\-~:]+/,
+registerLanguage({
+  id: 'idris',
+  extensions: ['.idr', '.lidr'],
+  aliases: ['Idris', 'idris'],
+  configuration: HASKELL_CONFIGURATION,
+  tokenizer: haskellFamilyTokenizer('.idr', [
+    'auto', 'case', 'class', 'data', 'do', 'dsl', 'else', 'export', 'if',
+    'implementation', 'implicit', 'import', 'impossible', 'in', 'infix',
+    'infixl', 'infixr', 'instance', 'interface', 'let', 'module', 'mutual',
+    'namespace', 'of', 'parameters', 'partial', 'postulate', 'private',
+    'public', 'record', 'rewrite', 'then', 'total', 'using', 'where', 'with',
+  ]),
+});
 
-  // Numeric and \^X control escapes, plus the named ASCII ones (NUL,
-  // ESC, DEL and friends) matched generically rather than enumerated:
-  // getting that list subtly wrong is worse than matching it loosely.
-  escapes: /\\(?:[abfnrtv\\"'0&]|x[0-9A-Fa-f]+|o[0-7]+|\d+|\^[A-Z@[\]\\^_]|[A-Z]{2,3})/,
+registerLanguage({
+  id: 'elm',
+  extensions: ['.elm'],
+  aliases: ['Elm', 'elm'],
+  configuration: HASKELL_CONFIGURATION,
+  tokenizer: haskellFamilyTokenizer('.elm', [
+    'alias', 'as', 'case', 'effect', 'else', 'exposing', 'if', 'import', 'in',
+    'let', 'module', 'of', 'port', 'then', 'type', 'where',
+  ]),
+});
 
+// OCaml and Standard ML share the (* *) comment, which also nests, and
+// the ' that is a character quote in one position and a type variable
+// in another.
+function mlFamilyTokenizer(postfix: string, keywords: string[]): monaco.languages.IMonarchLanguage {
+  return {
+    defaultToken: '',
+    tokenPostfix: postfix,
+    keywords,
+    operators: ['->', '<-', '::', ':=', '|>', '@@', '=', '|', '&&', '||', '^'],
+    symbols: /[=><!~?:&|+\-*/^%@.#]+/,
+    escapes: /\\(?:[\\"'ntbr ]|\d{3}|x[0-9A-Fa-f]{2}|o[0-3][0-7]{2})/,
+    tokenizer: {
+      root: [
+        [/\(\*/, { token: 'comment', next: '@comment' }],
+
+        // Standard ML's character literal and tuple projection. OCaml
+        // spells neither, and its own # (method call) falls through to
+        // the symbol rule below.
+        [/#"(?:[^\\"]|@escapes)*"/, 'string'],
+        [/#\d+/, 'operator'],
+
+        [/"/, { token: 'string.quote', next: '@string' }],
+        // The character literal has to be tried before the type
+        // variable, since 'a' and 'a differ only by the closing quote.
+        [/'(?:[^\\']|@escapes)'/, 'string'],
+        [/'[a-z_][\w']*/, 'type.identifier'],
+        [/`[A-Z][\w']*/, 'type.identifier'],
+        [/[A-Z][\w']*/, 'type.identifier'],
+
+        [/0[xX][0-9a-fA-F_]+/, 'number.hex'],
+        [/0[oO][0-7_]+/, 'number.octal'],
+        [/0[bB][01_]+/, 'number.binary'],
+        [/\d[\d_]*(\.[\d_]*)?([eE][-+]?\d+)?/, 'number'],
+
+        [/[a-z_][\w']*/, { cases: { '@keywords': 'keyword', '@default': 'identifier' } }],
+
+        [/[()[\]{}]/, '@brackets'],
+        [/[;,]/, 'delimiter'],
+
+        [/@symbols/, { cases: { '@operators': 'keyword.operator', '@default': 'operator' } }],
+
+        [/[ \t\r\n]+/, ''],
+      ],
+
+      comment: [
+        [/[^(*]+/, 'comment'],
+        [/\(\*/, 'comment', '@push'],
+        [/\*\)/, 'comment', '@pop'],
+        [/[(*]/, 'comment'],
+      ],
+
+      string: [
+        [/[^\\"]+/, 'string'],
+        [/@escapes/, 'string.escape'],
+        [/\\./, 'string.escape.invalid'],
+        [/"/, { token: 'string.quote', next: '@pop' }],
+      ],
+    },
+  };
+}
+
+const ML_CONFIGURATION: monaco.languages.LanguageConfiguration = {
+  comments: { blockComment: ['(*', '*)'] },
+  brackets: [['{', '}'], ['[', ']'], ['(', ')']],
+  autoClosingPairs: CLOSING_PAIRS,
+  surroundingPairs: CLOSING_PAIRS,
+};
+
+registerLanguage({
+  id: 'ocaml',
+  extensions: ['.ml', '.mli'],
+  aliases: ['OCaml', 'ocaml'],
+  configuration: ML_CONFIGURATION,
+  tokenizer: mlFamilyTokenizer('.ml', [
+    'and', 'as', 'assert', 'asr', 'begin', 'class', 'constraint', 'do',
+    'done', 'downto', 'else', 'end', 'exception', 'external', 'false', 'for',
+    'fun', 'function', 'functor', 'if', 'in', 'include', 'inherit',
+    'initializer', 'land', 'lazy', 'let', 'lor', 'lsl', 'lsr', 'lxor',
+    'match', 'method', 'mod', 'module', 'mutable', 'new', 'nonrec', 'object',
+    'of', 'open', 'or', 'private', 'rec', 'sig', 'struct', 'then', 'to',
+    'true', 'try', 'type', 'val', 'virtual', 'when', 'while', 'with',
+  ]),
+});
+
+registerLanguage({
+  id: 'sml',
+  extensions: ['.sml', '.sig'],
+  aliases: ['Standard ML', 'sml'],
+  configuration: ML_CONFIGURATION,
+  tokenizer: mlFamilyTokenizer('.sml', [
+    'abstype', 'and', 'andalso', 'as', 'case', 'datatype', 'do', 'else',
+    'end', 'eqtype', 'exception', 'false', 'fn', 'fun', 'functor', 'handle',
+    'if', 'in', 'include', 'infix', 'infixr', 'let', 'local', 'nonfix', 'of',
+    'op', 'open', 'orelse', 'raise', 'rec', 'sharing', 'sig', 'signature',
+    'struct', 'structure', 'then', 'true', 'type', 'val', 'where', 'while',
+    'with', 'withtype',
+  ]),
+});
+
+registerLanguage({
+  id: 'erlang',
+  extensions: ['.erl', '.hrl', '.escript'],
+  aliases: ['Erlang', 'erlang'],
+  configuration: {
+    comments: { lineComment: '%' },
+    brackets: [['{', '}'], ['[', ']'], ['(', ')']],
+    autoClosingPairs: CLOSING_PAIRS,
+    surroundingPairs: CLOSING_PAIRS,
+  },
   tokenizer: {
-    root: [
-      [/\{-#/, { token: 'metatag', next: '@pragma' }],
-      [/\{-/, { token: 'comment', next: '@comment' }],
-      // Two or more dashes start a comment only when what follows is
-      // not another symbol character: --> and --| are operators.
-      [/--+(?![!#$%&*+./<=>?@\\^|~:]).*$/, 'comment'],
-
-      [/"/, { token: 'string.quote', next: '@string' }],
-      [/'(?:[^\\']|@escapes)'/, 'string'],
-
-      [/0[xX][0-9a-fA-F_]+/, 'number.hex'],
-      [/0[oO][0-7_]+/, 'number.octal'],
-      [/0[bB][01_]+/, 'number.binary'],
-      [/\d+(\.\d+)?([eE][-+]?\d+)?/, 'number'],
-
-      // Constructors, type names and module qualifiers are all the
-      // capitalised half of Haskell's naming rule, and all read the
-      // same way at a glance.
-      [/[A-Z][\w']*/, 'type.identifier'],
-
-      [/[a-z_][\w']*/, { cases: { '@keywords': 'keyword', '@default': 'identifier' } }],
-
-      [/[()[\]{}]/, '@brackets'],
-      [/[,;`]/, 'delimiter'],
-
-      [/@symbols/, { cases: { '@operators': 'keyword.operator', '@default': 'operator' } }],
-
-      [/[ \t\r\n]+/, ''],
+    defaultToken: '',
+    tokenPostfix: '.erl',
+    keywords: [
+      'after', 'and', 'andalso', 'band', 'begin', 'bnot', 'bor', 'bsl', 'bsr',
+      'bxor', 'case', 'catch', 'cond', 'div', 'else', 'end', 'fun', 'if',
+      'let', 'maybe', 'not', 'of', 'or', 'orelse', 'receive', 'rem', 'try',
+      'when', 'xor',
     ],
-
-    // Haskell's block comments nest, unlike C's.
-    comment: [
-      [/[^{-]+/, 'comment'],
-      [/\{-/, 'comment', '@push'],
-      [/-\}/, 'comment', '@pop'],
-      [/[{-]/, 'comment'],
+    operators: [
+      '->', '<-', '=>', ':=', '||', '|', '++', '--', '==', '/=', '=<', '>=',
+      '=:=', '=/=', '!', '=', '::',
     ],
+    symbols: /[=><!~?:&|+\-*/^%#]+/,
+    escapes: /\\(?:[abdefnrstv\\"']|\^[A-Za-z]|x[0-9A-Fa-f]{2}|x\{[0-9A-Fa-f]+\}|\d{1,3})/,
+    tokenizer: {
+      root: [
+        [/%.*$/, 'comment'],
 
-    pragma: [
-      [/#-\}/, { token: 'metatag', next: '@pop' }],
-      [/[^#]+/, 'metatag'],
-      [/#/, 'metatag'],
-    ],
+        // Module attributes, spelled out rather than matched as
+        // "minus then any atom": Monarch has no start-of-line anchor
+        // mid-stream, and the loose version colours every binary minus
+        // that happens to be followed by an atom.
+        [/-\s*(?:author|behaviour|behavior|callback|compile|define|doc|else|endif|export_type|export|file|ifdef|ifndef|include_lib|include|import|moduledoc|module|on_load|opaque|optional_callbacks|record|spec|type|undef|vsn)\b/, 'keyword'],
 
-    string: [
-      [/[^\\"]+/, 'string'],
-      [/@escapes/, 'string.escape'],
-      [/\\./, 'string.escape.invalid'],
-      [/"/, { token: 'string.quote', next: '@pop' }],
+        [/"/, { token: 'string.quote', next: '@string' }],
+        // Quoted atoms, and the $c character literal.
+        [/'[^'\\]*(?:\\.[^'\\]*)*'/, 'string'],
+        [/\$(?:@escapes|.)/, 'string'],
+
+        // Variables are the capitalised half of Erlang's naming rule,
+        // and _ on its own is the one everybody writes most.
+        [/[A-Z_][\w@]*/, 'variable'],
+
+        [/\d+#[0-9a-zA-Z]+/, 'number'],
+        [/\d+(\.\d+)?([eE][-+]?\d+)?/, 'number'],
+
+        [/[a-z][\w@]*/, { cases: { '@keywords': 'keyword', '@default': 'identifier' } }],
+
+        [/[()[\]{}]/, '@brackets'],
+        [/[;,.]/, 'delimiter'],
+
+        [/@symbols/, { cases: { '@operators': 'keyword.operator', '@default': 'operator' } }],
+
+        [/[ \t\r\n]+/, ''],
+      ],
+
+      string: [
+        [/[^\\"]+/, 'string'],
+        [/@escapes/, 'string.escape'],
+        [/\\./, 'string.escape.invalid'],
+        [/"/, { token: 'string.quote', next: '@pop' }],
+      ],
+    },
+  },
+});
+
+registerLanguage({
+  id: 'nix',
+  extensions: ['.nix'],
+  aliases: ['Nix', 'nix'],
+  configuration: {
+    comments: { lineComment: '#', blockComment: ['/*', '*/'] },
+    brackets: [['{', '}'], ['[', ']'], ['(', ')']],
+    autoClosingPairs: CLOSING_PAIRS,
+    surroundingPairs: CLOSING_PAIRS,
+  },
+  tokenizer: {
+    defaultToken: '',
+    tokenPostfix: '.nix',
+    keywords: [
+      'assert', 'builtins', 'else', 'false', 'if', 'import', 'in', 'inherit',
+      'let', 'null', 'or', 'rec', 'then', 'true', 'with',
     ],
+    operators: ['=', ':', '?', '//', '++', '->', '&&', '||', '!', '==', '!=', '<=', '>='],
+    symbols: /[=><!~?:&|+\-*/@]+/,
+    tokenizer: {
+      root: [
+        [/#.*$/, 'comment'],
+        [/\/\*/, { token: 'comment', next: '@comment' }],
+
+        // The indented string comes first: '' opens one, and would
+        // otherwise read as an empty single-quoted nothing.
+        [/''/, { token: 'string.quote', next: '@indentedString' }],
+        [/"/, { token: 'string.quote', next: '@string' }],
+
+        // <nixpkgs> lookups and literal paths, which are a real type in
+        // this language rather than just strings that look like one.
+        [/<[\w.+-]+(?:\/[\w.+-]+)*>/, 'string'],
+        [/(?:\.{1,2}|~)?\/[\w.+-]+(?:\/[\w.+-]+)*/, 'string'],
+
+        [/\d+(\.\d+)?/, 'number'],
+
+        [/[a-zA-Z_][\w'-]*/, { cases: { '@keywords': 'keyword', '@default': 'identifier' } }],
+
+        [/[()[\]{}]/, '@brackets'],
+        [/[;,.]/, 'delimiter'],
+
+        [/@symbols/, { cases: { '@operators': 'keyword.operator', '@default': 'operator' } }],
+
+        [/[ \t\r\n]+/, ''],
+      ],
+
+      comment: [
+        [/[^/*]+/, 'comment'],
+        [/\*\//, { token: 'comment', next: '@pop' }],
+        [/[/*]/, 'comment'],
+      ],
+
+      string: [
+        [/[^\\"$]+/, 'string'],
+        [/\$\{/, { token: 'delimiter.bracket', next: '@interpolation' }],
+        [/\\./, 'string.escape'],
+        [/\$/, 'string'],
+        [/"/, { token: 'string.quote', next: '@pop' }],
+      ],
+
+      indentedString: [
+        [/[^'$]+/, 'string'],
+        [/\$\{/, { token: 'delimiter.bracket', next: '@interpolation' }],
+        [/''\$/, 'string.escape'],
+        [/''/, { token: 'string.quote', next: '@pop' }],
+        [/['$]/, 'string'],
+      ],
+
+      // Interpolation is ordinary Nix again, so it borrows root's rules
+      // and only has to know where it ends.
+      interpolation: [
+        [/\}/, { token: 'delimiter.bracket', next: '@pop' }],
+        { include: '@root' },
+      ],
+    },
+  },
+});
+
+registerLanguage({
+  id: 'lisp',
+  extensions: ['.lisp', '.cl', '.lsp', '.el', '.rkt'],
+  aliases: ['Lisp', 'lisp', 'Common Lisp', 'Racket'],
+  configuration: {
+    comments: { lineComment: ';', blockComment: ['#|', '|#'] },
+    brackets: [['{', '}'], ['[', ']'], ['(', ')']],
+    autoClosingPairs: CLOSING_PAIRS,
+    surroundingPairs: CLOSING_PAIRS,
+  },
+  tokenizer: {
+    defaultToken: '',
+    tokenPostfix: '.lisp',
+    keywords: [
+      'and', 'begin', 'case', 'cond', 'declare', 'defconstant', 'defclass',
+      'define', 'define-record-type', 'define-struct', 'define-syntax',
+      'defgeneric', 'defmacro', 'defmethod', 'defpackage', 'defparameter',
+      'defstruct', 'defun', 'defvar', 'delay', 'do', 'else', 'flet', 'if',
+      'in-package', 'labels', 'lambda', 'let', 'let*', 'let-values', 'letrec',
+      'loop', 'macrolet', 'multiple-value-bind', 'nil', 'not', 'or', 'progn',
+      'quasiquote', 'quote', 'require', 'return', 'return-from', 'set!',
+      'setf', 'setq', 'struct', 't', 'unless', 'unwind-protect', 'when',
+    ],
+    tokenizer: {
+      root: [
+        [/;.*$/, 'comment'],
+        [/#\|/, { token: 'comment', next: '@blockComment' }],
+
+        [/"/, { token: 'string.quote', next: '@string' }],
+        // Character literals: #\a, #\newline.
+        [/#\\(?:[a-zA-Z][a-zA-Z0-9-]*|.)/, 'string'],
+        [/#[tf]\b/, 'keyword'],
+
+        // Self-evaluating keywords, :like-this.
+        [/:[\w+\-*/<>=!?.]+/, 'type.identifier'],
+
+        [/[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?/, 'number'],
+        [/#[xX][0-9a-fA-F]+/, 'number.hex'],
+        [/#[bB][01]+/, 'number.binary'],
+        [/#[oO][0-7]+/, 'number.octal'],
+
+        [/[()[\]]/, '@brackets'],
+        [/['`,@]/, 'operator'],
+
+        // Everything that is not whitespace, a bracket or a reader
+        // character is a symbol, which is as close as this language
+        // gets to an identifier rule.
+        [/[^\s()[\]"';`,]+/, { cases: { '@keywords': 'keyword', '@default': 'identifier' } }],
+
+        [/[ \t\r\n]+/, ''],
+      ],
+
+      blockComment: [
+        [/[^#|]+/, 'comment'],
+        [/#\|/, 'comment', '@push'],
+        [/\|#/, 'comment', '@pop'],
+        [/[#|]/, 'comment'],
+      ],
+
+      string: [
+        [/[^\\"]+/, 'string'],
+        [/\\./, 'string.escape'],
+        [/"/, { token: 'string.quote', next: '@pop' }],
+      ],
+    },
+  },
+});
+
+registerLanguage({
+  id: 'agda',
+  extensions: ['.agda', '.lagda'],
+  aliases: ['Agda', 'agda'],
+  configuration: HASKELL_CONFIGURATION,
+  tokenizer: haskellFamilyTokenizer('.agda', [
+    'abstract', 'constructor', 'data', 'do', 'field', 'forall', 'hiding',
+    'import', 'in', 'inductive', 'infix', 'infixl', 'infixr', 'instance',
+    'let', 'macro', 'module', 'mutual', 'open', 'overlap', 'pattern',
+    'postulate', 'primitive', 'private', 'public', 'quote', 'record',
+    'renaming', 'rewrite', 'syntax', 'using', 'variable', 'where', 'with',
+  ]),
+});
+
+// Lean is close to the Haskell family but not in it: the block comment
+// is /- -/ rather than {- -}, the line comment has no operator
+// exception to worry about, and tactic names are worth their own colour
+// since a proof is mostly tactics.
+registerLanguage({
+  id: 'lean',
+  extensions: ['.lean'],
+  aliases: ['Lean', 'lean'],
+  configuration: {
+    comments: { lineComment: '--', blockComment: ['/-', '-/'] },
+    brackets: [['{', '}'], ['[', ']'], ['(', ')']],
+    autoClosingPairs: CLOSING_PAIRS,
+    surroundingPairs: CLOSING_PAIRS,
+  },
+  tokenizer: {
+    defaultToken: '',
+    tokenPostfix: '.lean',
+    keywords: [
+      'abbrev', 'attribute', 'axiom', 'by', 'calc', 'class', 'def',
+      'deriving', 'do', 'else', 'end', 'example', 'exists', 'extends', 'for',
+      'from', 'fun', 'have', 'if', 'import', 'in', 'inductive', 'infix',
+      'infixl', 'infixr', 'instance', 'let', 'macro', 'macro_rules', 'match',
+      'mutual', 'namespace', 'noncomputable', 'notation', 'opaque', 'open',
+      'partial', 'postfix', 'prefix', 'private', 'protected', 'return',
+      'section', 'set_option', 'show', 'structure', 'syntax', 'theorem',
+      'then', 'this', 'universe', 'unsafe', 'variable', 'where', 'while',
+      'with', 'lemma', 'obtain', 'suffices', 'sorry',
+    ],
+    // A proof body is mostly these, so they read better as their own
+    // category than as undifferentiated identifiers.
+    tactics: [
+      'apply', 'assumption', 'cases', 'constructor', 'contradiction',
+      'decide', 'exact', 'induction', 'intro', 'intros', 'linarith', 'omega',
+      'refine', 'rfl', 'ring', 'rintro', 'rw', 'simp', 'simpa', 'split',
+      'subst', 'trivial', 'unfold', 'use',
+    ],
+    typeKeywords: ['Prop', 'Sort', 'Type'],
+    operators: [
+      '=>', '->', '<-', ':=', '|', '=', '<|>', '>>=', '$', '::', '++', '..',
+      '↦', '→', '←', '∀', '∃', '∧', '∨', '¬', '≠', '≤', '≥', '∘', '×',
+    ],
+    symbols: /[=><!~?:&|+\-*/^%@.↦→←∀∃∧∨¬≠≤≥∘×]+/,
+    escapes: /\\(?:[abfnrtv\\"']|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4})/,
+    tokenizer: {
+      root: [
+        // The doc comment opens with the same two characters as the
+        // ordinary one, so it has to be tried first.
+        [/\/--/, { token: 'comment.doc', next: '@docComment' }],
+        [/\/-/, { token: 'comment', next: '@comment' }],
+        [/--.*$/, 'comment'],
+
+        // Attributes: @[simp], @[inline].
+        [/@\[/, { token: 'metatag', next: '@attribute' }],
+
+        [/"/, { token: 'string.quote', next: '@string' }],
+        [/'(?:[^\\']|@escapes)'/, 'string'],
+
+        [/0[xX][0-9a-fA-F_]+/, 'number.hex'],
+        [/0[bB][01_]+/, 'number.binary'],
+        [/\d+(\.\d+)?([eE][-+]?\d+)?/, 'number'],
+
+        // Anonymous constructors and other bracket-shaped notation.
+        [/[⟨⟩]/, '@brackets'],
+
+        [/[A-Z][\w'!?₀-₉]*/, {
+          cases: { '@typeKeywords': 'keyword', '@default': 'type.identifier' },
+        }],
+
+        [/[a-zA-Z_][\w'!?₀-₉]*/, {
+          cases: {
+            '@keywords': 'keyword',
+            '@tactics': 'keyword.control',
+            '@default': 'identifier',
+          },
+        }],
+
+        [/[()[\]{}]/, '@brackets'],
+        [/[,;]/, 'delimiter'],
+
+        [/@symbols/, { cases: { '@operators': 'keyword.operator', '@default': 'operator' } }],
+
+        [/[ \t\r\n]+/, ''],
+      ],
+
+      // Lean's block comments nest, so the doc variant closes through
+      // the same counter the ordinary one uses.
+      comment: [
+        [/[^/-]+/, 'comment'],
+        [/\/-/, 'comment', '@push'],
+        [/-\//, 'comment', '@pop'],
+        [/[/-]/, 'comment'],
+      ],
+
+      docComment: [
+        [/[^/-]+/, 'comment.doc'],
+        [/\/-/, 'comment.doc', '@push'],
+        [/-\//, 'comment.doc', '@pop'],
+        [/[/-]/, 'comment.doc'],
+      ],
+
+      attribute: [
+        [/\]/, { token: 'metatag', next: '@pop' }],
+        [/[^\]]+/, 'metatag'],
+      ],
+
+      string: [
+        [/[^\\"]+/, 'string'],
+        [/@escapes/, 'string.escape'],
+        [/\\./, 'string.escape.invalid'],
+        [/"/, { token: 'string.quote', next: '@pop' }],
+      ],
+    },
   },
 });
 
@@ -4344,12 +4842,177 @@ function manageCommandSnippets() {
   renderCommandSnippetsMenu();
 }
 
-const HIGHLIGHT_RULES: [RegExp, string][] = [
-  [/\b(connected|up|ok|success)\b/gi, '38;2;51;204;51'],   // bright green, MobaXterm-style
-  [/\b(disabled|down|error|fail|failed)\b/gi, '38;2;229;72;77'], // red
-  [/\b(warning)\b/gi, '38;2;210;153;34'],                   // yellow
-  [/\b(?:Gi|Te|Fa|Fo|Hu|Po|Eth|Vlan)\d+(?:\/\d+)*\b/g, '38;2;198;120;221'], // magenta, interface/port identifiers
+// --- Terminal output colouring (SPE-108) ---
+// This started as four rules: three status words and an interface name.
+// Real switch and server output has far more in it worth telling apart
+// at a glance, so the rule set is much wider now, and two things about
+// the old mechanics had to change to carry it.
+//
+//   1. It ran one .replace() per rule over the whole string, so each
+//      pass saw the escape codes the previous passes had inserted. With
+//      only word-boundary rules that was harmless. Add a rule that
+//      matches digits and it starts colouring the "38;2;51;204;51"
+//      inside an earlier rule's own escape, which corrupts the output.
+//      The rules are one alternation now, applied in a single pass that
+//      never sees what it emitted.
+//
+//   2. It used fixed RGB values, so the highlighting ignored whichever
+//      colour scheme the person had picked. Categories map onto the
+//      active scheme's own ANSI colours instead, so Gruvbox output
+//      looks like Gruvbox.
+
+// The word lists are the source for both the patterns below and the
+// split-token check further down, so the two cannot drift apart.
+const GOOD_WORDS = [
+  'up', 'ok', 'okay', 'active', 'connected', 'established', 'enabled',
+  'success', 'successful', 'successfully', 'complete', 'completed', 'passed',
+  'valid', 'permit', 'permitted', 'allow', 'allowed', 'online', 'running',
+  'healthy', 'reachable', 'synchronised', 'synchronized', 'available',
+  'ready', 'true', 'yes', 'open', 'accept', 'accepted', 'forwarding',
+  'full-duplex', 'inuse', 'trusted',
 ];
+
+const BAD_WORDS = [
+  'down', 'error', 'errors', 'errdisable', 'errdisabled', 'err-disabled',
+  'fail', 'failed', 'failure', 'failures', 'denied', 'deny', 'drop',
+  'dropped', 'drops', 'discard', 'discarded', 'discards', 'critical', 'crit',
+  'alert', 'emergency', 'emerg', 'invalid', 'refused', 'unreachable',
+  'timeout', 'timeouts', 'timed-out', 'disabled', 'inactive', 'offline',
+  'dead', 'blocked', 'violation', 'reject', 'rejected', 'unavailable',
+  'missing', 'corrupt', 'corrupted', 'abort', 'aborted', 'false', 'closed',
+  'unknown', 'notconnect', 'suspended', 'denied.', 'crash', 'crashed',
+];
+
+const WARN_WORDS = [
+  'warn', 'warning', 'warnings', 'notice', 'degraded', 'partial', 'pending',
+  'retry', 'retries', 'retrying', 'deprecated', 'unstable', 'flapping',
+  'congestion', 'throttled', 'throttling', 'half-duplex', 'blocking',
+  'listening', 'learning', 'stale', 'idle',
+];
+
+// Configuration vocabulary. Deliberately network-flavoured and
+// deliberately not generic English: colouring "show" or "source" would
+// light up half of any shell session for no information at all.
+const CONFIG_WORDS = [
+  'interface', 'switchport', 'spanning-tree', 'portfast', 'bpduguard',
+  'bpdufilter', 'loopguard', 'rootguard', 'channel-group', 'port-channel',
+  'etherchannel', 'encapsulation', 'dot1q', 'nonegotiate', 'negotiation',
+  'access-list', 'prefix-list', 'route-map', 'class-map', 'policy-map',
+  'service-policy', 'storm-control', 'load-interval', 'snmp-server',
+  'default-gateway', 'running-config', 'startup-config', 'address-family',
+  'redistribute', 'neighbor', 'remote-as', 'router-id', 'passive-interface',
+  'standby', 'vrrp', 'hsrp', 'preempt', 'authentication', 'authorization',
+  'accounting', 'tacacs', 'radius', 'aaa', 'banner', 'hostname', 'shutdown',
+  'description', 'duplex', 'speed', 'mtu', 'vlan', 'vrf', 'ospf', 'eigrp',
+  'bgp', 'isis', 'lldp', 'cdp', 'udld', 'lacp', 'pagp', 'dhcp', 'snooping',
+  'arp', 'nat', 'qos', 'trunk', 'native', 'allowed', 'permit', 'deny',
+  'inside', 'outside', 'secondary', 'no', 'ip', 'ipv6',
+];
+
+// Longest first: the alternation takes the first branch that matches, so
+// an unsorted list lets "fail" shadow "failure".
+function wordPattern(words: string[]): string {
+  const sorted = [...words].sort((a, b) => b.length - a.length);
+  return String.raw`\b(?:${sorted.join('|')})\b`;
+}
+
+type HighlightCategory =
+  | 'good' | 'bad' | 'warn' | 'iface' | 'addr' | 'number'
+  | 'string' | 'keyword' | 'meta' | 'path' | 'time';
+
+// Order is priority order: at any position the first pattern that
+// matches wins, so specific goes before general. A MAC address has to
+// be tried before IPv6, which would otherwise happily read
+// aa:bb:cc:dd:ee:ff as an address, and every number rule comes last,
+// since nearly everything above it contains digits.
+const HIGHLIGHT_RULES: { category: HighlightCategory; pattern: string }[] = [
+  // Timestamps, in the shapes ISO-8601, syslog and IOS all use.
+  { category: 'time', pattern: String.raw`\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?` },
+  { category: 'time', pattern: String.raw`\*?[A-Z][a-z]{2} {1,2}\d{1,2} \d{2}:\d{2}:\d{2}(?:\.\d+)?` },
+  { category: 'time', pattern: String.raw`\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b` },
+
+  // Hardware and network addresses.
+  { category: 'addr', pattern: String.raw`\b[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}\b` },
+  { category: 'addr', pattern: String.raw`\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b` },
+  { category: 'addr', pattern: String.raw`\b(?:[0-9a-f]{1,4}:){2,7}(?::|[0-9a-f]{1,4})(?:\/\d{1,3})?` },
+  { category: 'addr', pattern: String.raw`\b(?:\d{1,3}\.){3}\d{1,3}(?:\/\d{1,2})?\b` },
+
+  // Interface names, long form and the abbreviations everybody types.
+  { category: 'iface', pattern: String.raw`\b(?:Ten|Twenty|Forty|Fifty|Hundred|Gigabit|Fast|Ten-?Gigabit|Twenty-?Five|Four-?Hundred)?Ethernet\d+(?:\/\d+)*(?:\.\d+)?\b` },
+  { category: 'iface', pattern: String.raw`\b(?:Port-channel|Bundle-Ether|Loopback|Tunnel|Serial|Vlan|Management|Multilink|Dialer|Async)\d+(?:\.\d+)?\b` },
+  { category: 'iface', pattern: String.raw`\b(?:Gi|Te|Twe|Fo|Fi|Hu|Fa|Eth|Et|Po|Vl|Lo|Tu|Se|Ma|Bu)\d+(?:\/\d+)*(?:\.\d+)?\b` },
+  { category: 'iface', pattern: String.raw`\b(?:eth|ens|enp|eno|wlan|wlp|bond|br|docker|veth|tun|tap|virbr)\d+[\w.]*\b` },
+
+  // The %FACILITY-severity-MNEMONIC tag leading every IOS log line.
+  { category: 'meta', pattern: String.raw`%[A-Z][A-Z0-9_]*-\d-[A-Z0-9_]+` },
+  { category: 'meta', pattern: String.raw`\b(?:https?|ftps?|ssh|sftp|tftp|telnet|scp|rsync):\/\/[^\s"'<>]+` },
+
+  // Filesystem paths, both conventions. Two segments minimum, so this
+  // does not fight the interface rules over things shaped like 1/0/1.
+  { category: 'path', pattern: String.raw`\b[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n ]+\\?)+` },
+  { category: 'path', pattern: String.raw`(?:^|(?<=[\s=:(,]))~?\/[\w.@+-]+(?:\/[\w.@+-]+)+\/?` },
+
+  { category: 'string', pattern: String.raw`"[^"\n]{0,200}"` },
+
+  // Outcomes. These are the words the eye should find without reading.
+  { category: 'good', pattern: wordPattern(GOOD_WORDS) },
+  { category: 'bad', pattern: wordPattern(BAD_WORDS) },
+  { category: 'warn', pattern: wordPattern(WARN_WORDS) },
+  { category: 'keyword', pattern: wordPattern(CONFIG_WORDS) },
+
+  // Sizes, rates and percentages read as one unit, not as a number that
+  // happens to be followed by some letters.
+  { category: 'number', pattern: String.raw`\b\d+(?:\.\d+)?\s?(?:[KMGTP]i?[Bb]|[KMGT]?bps|[KMGT]?pps|[num]?s)\b` },
+  { category: 'number', pattern: String.raw`\b\d+(?:\.\d+)?%` },
+  { category: 'number', pattern: String.raw`\b0x[0-9a-f]+\b` },
+  { category: 'number', pattern: String.raw`\b\d+(?:\.\d+)?\b` },
+];
+
+// One alternation, one pass. The named groups say which rule won, and
+// are generated rather than spelled out so the rules stay a plain list.
+const HIGHLIGHT_RE = new RegExp(
+  HIGHLIGHT_RULES.map((rule, index) => `(?<h${index}>${rule.pattern})`).join('|'),
+  'gi',
+);
+
+// Which of the active scheme's ANSI colours each category borrows.
+// Picked to stay distinguishable across every bundled scheme rather
+// than being tuned to one of them.
+const HIGHLIGHT_COLORS: Record<HighlightCategory, string> = {
+  good: 'green',
+  bad: 'red',
+  warn: 'yellow',
+  iface: 'cyan',
+  addr: 'brightMagenta',
+  number: 'magenta',
+  string: 'brightYellow',
+  keyword: 'blue',
+  meta: 'brightCyan',
+  path: 'brightBlue',
+  time: 'brightBlack',
+};
+
+function ansiTruecolor(hex: string): string {
+  const value = parseInt(hex.replace('#', ''), 16);
+  return `38;2;${Math.floor(value / 65536) % 256};${Math.floor(value / 256) % 256};${value % 256}`;
+}
+
+// Rebuilt only when the scheme changes. This is read once per matched
+// token, and parsing eleven hex values there would mean doing it
+// thousands of times per screenful.
+let highlightPaletteCache: { scheme: ColorScheme; codes: Record<HighlightCategory, string> } | null = null;
+
+function highlightPalette(): Record<HighlightCategory, string> {
+  const scheme = currentColorScheme();
+  if (highlightPaletteCache?.scheme === scheme) return highlightPaletteCache.codes;
+  const colors = TERMINAL_COLOR_SCHEMES[scheme];
+  const codes = {} as Record<HighlightCategory, string>;
+  for (const [category, name] of Object.entries(HIGHLIGHT_COLORS)) {
+    codes[category as HighlightCategory] = ansiTruecolor(colors[name] ?? colors.white);
+  }
+  highlightPaletteCache = { scheme, codes };
+  return codes;
+}
 
 // Matches existing ANSI/OSC escape sequences so they can be preserved
 // untouched. Covers CSI (colors, cursor movement: \x1b[...m etc.), OSC
@@ -4360,24 +5023,55 @@ const HIGHLIGHT_RULES: [RegExp, string][] = [
 const ANSI_SEQUENCE_RE = /\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-9;?]*[a-zA-Z]|[a-zA-Z0-9])/g;
 
 function highlightPlainText(text: string): string {
-  let result = text;
-  for (const [pattern, code] of HIGHLIGHT_RULES) {
-    result = result.replace(pattern, (match) => `\x1b[${code}m${match}\x1b[0m`);
+  const palette = highlightPalette();
+  return text.replace(HIGHLIGHT_RE, (match, ...args) => {
+    const groups = args[args.length - 1] as Record<string, string | undefined> | undefined;
+    if (!groups) return match;
+    for (let index = 0; index < HIGHLIGHT_RULES.length; index += 1) {
+      if (groups[`h${index}`] === undefined) continue;
+      // 39 restores the default foreground and nothing else. A full 0m
+      // reset would also clear bold, and any background the far end had
+      // set around this run.
+      return `\x1b[${palette[HIGHLIGHT_RULES[index].category]}m${match}\x1b[39m`;
+    }
+    return match;
+  });
+}
+
+// True when an SGR sequence leaves a foreground colour in effect, false
+// when it clears one. Anything that is not an SGR sequence leaves the
+// current state alone.
+function sgrLeavesColorActive(sequence: string, current: boolean): boolean {
+  if (!sequence.startsWith('\x1b[') || !sequence.endsWith('m')) return current;
+  const params = sequence.slice(2, -1);
+  if (params === '' || params === '0') return false;
+  let active = current;
+  for (const part of params.split(';')) {
+    const code = Number(part);
+    if (code === 0 || code === 39) active = false;
+    else if ((code >= 30 && code <= 38) || (code >= 90 && code <= 97)) active = true;
   }
-  return result;
+  return active;
 }
 
 function applyOutputHighlighting(text: string): string {
   if (!highlightEnabled) return text;
   let result = '';
   let lastIndex = 0;
+  // Text the far end already coloured is left exactly as it sent it.
+  // Recolouring inside a coloured run is how a highlighter breaks
+  // somebody's prompt, their pager, or vim.
+  let colorActive = false;
   for (const match of text.matchAll(ANSI_SEQUENCE_RE)) {
     const idx = match.index!;
-    result += highlightPlainText(text.slice(lastIndex, idx));
+    const plain = text.slice(lastIndex, idx);
+    result += colorActive ? plain : highlightPlainText(plain);
     result += match[0]; // pass existing escape sequences through untouched
+    colorActive = sgrLeavesColorActive(match[0], colorActive);
     lastIndex = idx + match[0].length;
   }
-  result += highlightPlainText(text.slice(lastIndex));
+  const tail = text.slice(lastIndex);
+  result += colorActive ? tail : highlightPlainText(tail);
   return result;
 }
 
@@ -4396,18 +5090,40 @@ function incompleteAnsiStart(text: string): number | null {
   return null;
 }
 
+// Every prefix of every word the rules can match. A token split across
+// two backend events is held back only when it could still grow into
+// one of them, which is what stops a prompt that happens to end
+// mid-word from being swallowed and never drawn.
+const HIGHLIGHT_WORD_PREFIXES = (() => {
+  const prefixes = new Set<string>();
+  for (const word of [...GOOD_WORDS, ...BAD_WORDS, ...WARN_WORDS, ...CONFIG_WORDS]) {
+    for (let length = 2; length < word.length; length += 1) prefixes.add(word.slice(0, length));
+  }
+  return prefixes;
+})();
+
 function mayBeSplitHighlightToken(token: string): boolean {
-  const lower = token.toLowerCase();
-  const keywordPrefixes = ['connected', 'up', 'ok', 'success', 'disabled', 'down', 'error', 'fail', 'failed', 'warning'];
-  if (keywordPrefixes.some((word) => word.startsWith(lower) && word !== lower)) return true;
-  return /^(?:Gi|Te|Fa|Fo|Hu|Po|Eth|Vlan)\d*(?:\/\d*)*$/.test(token);
+  // One character is as likely to be the tail of a prompt as the start
+  // of a word, and holding a prompt back is far worse than missing a
+  // highlight. The upper bound is one character over a full IPv6
+  // address, the longest thing worth waiting for.
+  if (token.length < 2 || token.length > 40) return false;
+  if (HIGHLIGHT_WORD_PREFIXES.has(token.toLowerCase())) return true;
+  // A partly-arrived address. Both of these insist on a separator, so
+  // an ordinary word or a bare number is never held back.
+  if (/^\d{1,3}(?:\.\d{1,3}){1,3}\.?$/.test(token)) return true;
+  if (/^[0-9a-f]{1,4}(?:[.:-][0-9a-f]{0,4})+$/i.test(token)) return true;
+  // A partly-arrived interface name.
+  return /^(?:Gi|Te|Twe|Fo|Fi|Hu|Fa|Eth|Et|Po|Vl|Lo|Tu|Se|Ma|Bu)\d*(?:\/\d*)*$/i.test(token);
 }
 
 function splitHighlightChunk(text: string): { ready: string; carry: string } {
   const ansiStart = incompleteAnsiStart(text);
   const ansiReady = ansiStart === null ? text : text.slice(0, ansiStart);
   const ansiCarry = ansiStart === null ? '' : text.slice(ansiStart);
-  const tokenMatch = ansiReady.match(/[A-Za-z][A-Za-z0-9/._-]*$/);
+  // Widened past letters so a half-arrived address can be held too.
+  // Whether it actually is stays mayBeSplitHighlightToken's decision.
+  const tokenMatch = ansiReady.match(/[A-Za-z0-9][A-Za-z0-9/._:-]*$/);
   if (!tokenMatch || !mayBeSplitHighlightToken(tokenMatch[0])) {
     return { ready: ansiReady, carry: ansiCarry };
   }
