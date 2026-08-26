@@ -18,6 +18,7 @@ type ConfigBundle struct {
 	Sessions           []SessionProfile    `json:"sessions"`
 	Groups             []SessionGroup      `json:"groups"`
 	LocalShellProfiles []LocalShellProfile `json:"localShellProfiles"`
+	Folders            []Folder            `json:"folders,omitempty"`
 }
 
 // ExportBundle gathers the current Settings, Sessions, Groups, and
@@ -40,12 +41,17 @@ func ExportBundle() (ConfigBundle, error) {
 	if err != nil {
 		return ConfigBundle{}, err
 	}
+	folders, err := LoadFolders()
+	if err != nil {
+		return ConfigBundle{}, err
+	}
 	return ConfigBundle{
 		Version:            configBundleVersion,
 		Settings:           settings,
 		Sessions:           sessions,
 		Groups:             groups,
 		LocalShellProfiles: profiles,
+		Folders:            folders,
 	}, nil
 }
 
@@ -105,7 +111,24 @@ func ImportBundle(bundle ConfigBundle) error {
 		}
 		profiles = append(profiles, p)
 	}
-	return SaveLocalShellProfiles(profiles)
+	if err := SaveLocalShellProfiles(profiles); err != nil {
+		return err
+	}
+
+	// Absent from any bundle exported before SPE-106, which is just an
+	// empty list to merge in, so no version bump is needed.
+	folders, err := LoadFolders()
+	if err != nil {
+		return err
+	}
+	existingFolderIDs := idSet(folders, func(f Folder) string { return f.ID })
+	for _, f := range bundle.Folders {
+		if existingFolderIDs[f.ID] {
+			f.ID = idgen.New()
+		}
+		folders = append(folders, f)
+	}
+	return SaveFolders(folders)
 }
 
 // idSet builds a lookup set of IDs from a slice of any type that has

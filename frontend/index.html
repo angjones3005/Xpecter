@@ -46,8 +46,6 @@
     #menubar .menu-dropdown .item { padding: 6px 12px; cursor: pointer; white-space: nowrap; }
     #menubar .menu-dropdown .item:hover { background: var(--hover); }
     #menubar .menu-dropdown .item.disabled { opacity: 0.4; cursor: default; pointer-events: none; }
-    #editor-saveas-menu .item { padding: 6px 12px; cursor: pointer; white-space: nowrap; }
-    #editor-saveas-menu .item:hover { background: var(--hover); }
     #menubar .menu-dropdown .separator { border-top: 1px solid var(--border); margin: 4px 0; }
     #menubar .menu-dropdown .item label { display: flex; align-items: center; gap: 6px; cursor: pointer; width: 100%; justify-content: space-between; }
     /* Frameless window: this bar IS the title bar (--wails-draggable:drag
@@ -63,18 +61,15 @@
     #titlebar-controls button#win-close:hover { background: #e5484d; color: #ffffff; }
     #app {
       flex: 1; min-height: 0; display: grid;
-      /* --sw/--ew/--rsw/--rew as variables (rather than hardcoding
-         pixel values in every collapse-state combination below).
-         Resize-handle tracks (--rsw/--rew) collapse to 0px alongside
-         their pane, not fixed at 5px always, matching the original
-         explicit combined rule this replaces (0px 0px 1fr 0px 0px when
-         both were collapsed), a stray 5px gap would remain otherwise
-         even when fully collapsed. */
+      /* --sw/--rsw as variables (rather than hardcoding pixel values
+         in both collapse states below). The resize-handle track
+         (--rsw) collapses to 0px alongside the sidebar rather than
+         staying 5px always, a stray gap would remain otherwise.
+         SPE-103: the editor no longer has a column here, it's a
+         session tab now rather than a permanent third pane. */
       --sw: 220px;
-      --ew: 1fr;
       --rsw: 5px;
-      --rew: 5px;
-      grid-template-columns: var(--sw) var(--rsw) 1fr var(--rew) var(--ew);
+      grid-template-columns: var(--sw) var(--rsw) 1fr;
       grid-template-rows: 1fr;
     }
     #statusbar { flex: 0 0 auto; height: 22px; background: var(--bg-alt); border-top: 1px solid var(--border); display: flex; align-items: center; padding: 0 10px; font-size: 11px; color: var(--text-dim); }
@@ -82,7 +77,6 @@
     #app.sidebar-collapsed #sidebar, #app.sidebar-collapsed #resize-sidebar { display: none; }
     .resize-handle { cursor: col-resize; background: transparent; touch-action: none; user-select: none; }
     #resize-sidebar { grid-column: 2; grid-row: 1; }
-    #resize-editor { grid-column: 4; grid-row: 1; }
     .resize-handle:hover, .resize-handle.dragging { background: var(--accent); }
     /* --- Sidebar (SPE-100) ---
        One section pattern for sessions, shells and remote files, so the
@@ -124,21 +118,34 @@
     .side-group .name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .side-group .count { flex: 0 0 auto; opacity: 0.6; font-size: 10px; }
     .side-group.drop-target, .side-row.drop-target { box-shadow: inset 0 0 0 1px var(--accent); background: var(--hover); }
+    /* SPE-106: a pinned folder that is currently open in an editor,
+       the folder equivalent of the live dot on a running session. */
+    .side-row.folder-open .name { color: var(--accent-ink); }
     .side-empty { padding: 3px 8px 5px; font-size: 11px; color: var(--text-dim); opacity: 0.7; }
     #session-search { width: 100%; box-sizing: border-box; margin: 0 0 5px; font-size: 12px !important; }
-    #terminal-pane { border-right: 1px solid var(--border); min-width: 0; display: flex; flex-direction: column; overflow: hidden; grid-column: 3; grid-row: 1; }
-    #editor-pane { min-width: 0; display: flex; flex-direction: column; overflow: hidden; grid-column: 5; grid-row: 1; }
-    #app.editor-collapsed { --ew: 0px; --rew: 0px; }
-    #app.editor-collapsed #editor-pane, #app.editor-collapsed #resize-editor { display: none; }
+    #terminal-pane { min-width: 0; display: flex; flex-direction: column; overflow: hidden; grid-column: 3; grid-row: 1; }
     #terminal { flex: 1; min-height: 0; padding: 4px; box-sizing: border-box; }
     /* SPE-92: split-pane terminal layouts. A 1-cell grid (the default,
        tab.layout === 'single') looks identical to a plain block
        container, so every tab uses this same structure uniformly,
        whether split or not. */
-    .tab-pane-grid { width: 100%; height: 100%; display: grid; gap: 2px; background: var(--border); }
+    .tab-pane-grid { width: 100%; height: 100%; display: grid; gap: 2px; background: var(--border); position: relative; }
     .pane-wrapper { background: var(--bg); display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; outline: 2px solid transparent; outline-offset: -2px; }
     .pane-wrapper.focused { outline-color: var(--accent); }
-    .pane-header { display: flex; align-items: center; justify-content: space-between; padding: 2px 8px; font-size: 11px; background: var(--bg-alt); border-bottom: 1px solid var(--border); user-select: none; cursor: default; }
+    /* SPE-105: dragging a pane by its header onto another swaps the
+       two. The dragged pane fades, the one under the cursor outlines. */
+    .pane-wrapper.pane-dragging { opacity: 0.45; }
+    .pane-wrapper.drop-target { outline-color: var(--accent); background: var(--hover); }
+    /* SPE-105: absolutely positioned, so it sits over the grid gap
+       without becoming a grid item of its own and throwing the cell
+       count out. Wider than the 2px gap it straddles, because a 2px
+       grab target is a 2px grab target. */
+    .pane-divider { position: absolute; z-index: 6; background: transparent; touch-action: none; }
+    .pane-divider.vertical { top: 0; bottom: 0; width: 9px; margin-left: -4.5px; cursor: col-resize; }
+    .pane-divider.horizontal { left: 0; right: 0; height: 9px; margin-top: -4.5px; cursor: row-resize; }
+    .pane-divider:hover, .pane-divider.dragging { background: var(--accent); }
+    .pane-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 8px; font-size: 11px; background: var(--bg-alt); border-bottom: 1px solid var(--border); user-select: none; cursor: grab; }
+    .pane-header:active { cursor: grabbing; }
     .pane-header-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .pane-header-close { opacity: 0.5; cursor: pointer; padding: 0 2px; }
     .pane-header-close:hover { opacity: 1; color: var(--danger); }
@@ -147,7 +154,94 @@
     .term-instance .xterm, .term-instance .xterm-viewport, .term-instance .xterm-screen, .term-instance canvas { background: transparent !important; background-color: transparent !important; }
     .pane-landing { flex: 1; display: flex; align-items: center; justify-content: center; }
     .pane-landing-btn { padding: 8px 18px; font-size: 13px; }
-    #editor { flex: 1; min-height: 0; }
+    /* --- Text editor sessions (SPE-103) ---
+       The editor is a session now, not a right-hand pane, and it lives
+       in the same pane grid the terminals do: one of these fills a
+       whole editor tab, or sits in one cell of a split next to a live
+       shell. Document tabs, the Monaco host and a status bar stack
+       vertically inside it. */
+    .editor-view { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); }
+    .editor-doc-bar { flex: 0 0 auto; display: flex; align-items: stretch; overflow-x: auto; background: var(--bg-alt); border-bottom: 1px solid var(--border); scrollbar-width: none; }
+    .editor-doc-bar::-webkit-scrollbar { display: none; }
+    .doc-tab { display: flex; align-items: center; gap: 7px; padding: 6px 8px 6px 11px; font-size: 12px; color: var(--text-dim); border-right: 1px solid var(--border); cursor: pointer; white-space: nowrap; max-width: 230px; }
+    .doc-tab:hover { background: var(--hover); }
+    .doc-tab.active { background: var(--bg); color: var(--text); box-shadow: inset 0 2px 0 var(--accent); }
+    .doc-tab.dragging { opacity: 0.45; }
+    .doc-tab.drop-target { border-left: 2px solid var(--accent); }
+    .doc-tab .doc-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+    .doc-tab .doc-remote { flex: 0 0 auto; font-size: 10px; opacity: 0.75; }
+    /* Exactly one of these two occupies the 14px slot at any moment, so
+       a tab never changes width: the dirty dot is what you need to see
+       at a glance, the close button is what you need on demand. */
+    .doc-tab .doc-close, .doc-tab .doc-dot { flex: 0 0 auto; width: 14px; text-align: center; border-radius: 3px; }
+    .doc-tab .doc-close { opacity: 0.35; }
+    .doc-tab:hover .doc-close, .doc-tab.active .doc-close { opacity: 0.7; }
+    .doc-tab .doc-close:hover { opacity: 1; background: var(--bg-input); color: var(--danger); }
+    .doc-tab .doc-dot { display: none; color: var(--accent-ink); font-size: 15px; line-height: 1; }
+    .doc-tab.dirty .doc-close { display: none; }
+    .doc-tab.dirty .doc-dot { display: block; }
+    .doc-tab.dirty:hover .doc-close { display: block; }
+    .doc-tab.dirty:hover .doc-dot { display: none; }
+    /* SPE-106: the folder control heads the document strip. The empty
+       state used to be the only way to reach Open Folder, and it is
+       gone the moment there is a buffer open. */
+    .doc-folder { display: flex; align-items: center; gap: 5px; padding: 0 10px; cursor: pointer; color: var(--text-dim); border-right: 1px solid var(--border); font-size: 11.5px; white-space: nowrap; }
+    .doc-folder:hover { background: var(--hover); color: var(--text); }
+    .doc-folder.active { color: var(--accent-ink); }
+    .doc-folder .caret { font-size: 9px; opacity: 0.7; }
+    .doc-add { display: flex; align-items: center; padding: 0 11px; color: var(--text-dim); cursor: pointer; font-size: 14px; }
+    .doc-add:hover { color: var(--text); background: var(--hover); }
+    .editor-main { flex: 1; min-height: 0; display: flex; }
+    .editor-body { flex: 1; min-width: 0; min-height: 0; position: relative; }
+    /* SPE-105: the opened folder. Hidden entirely until there is one,
+       rather than sitting there empty telling you it has nothing. */
+    .editor-tree { display: none; flex: 0 0 auto; width: 212px; border-right: 1px solid var(--border); overflow: auto; font-size: 12.5px; padding-bottom: 8px; }
+    .editor-view.has-folder .editor-tree { display: block; }
+    .editor-tree-head { display: flex; align-items: center; gap: 5px; padding: 5px 8px; position: sticky; top: 0; background: var(--bg); border-bottom: 1px solid var(--border); }
+    .editor-tree-head .name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 600; }
+    .editor-tree-head .act { flex: 0 0 auto; cursor: pointer; opacity: 0.5; padding: 0 3px; font-size: 11px; }
+    .editor-tree-head .act:hover { opacity: 1; color: var(--text); }
+    .tree-row { display: flex; align-items: center; gap: 5px; padding: 2px 8px; cursor: pointer; white-space: nowrap; min-width: 0; line-height: 1.6; }
+    .tree-row:hover { background: var(--hover); }
+    .tree-row.open { color: var(--accent-ink); }
+    .tree-row .chev { flex: 0 0 auto; width: 9px; font-size: 9px; opacity: 0.7; }
+    .tree-row .name { overflow: hidden; text-overflow: ellipsis; }
+    .editor-tree-note { padding: 4px 12px; font-size: 11px; color: var(--text-dim); }
+    .editor-host { position: absolute; inset: 0; }
+    .editor-empty { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 18px; padding: 24px; box-sizing: border-box; text-align: center; overflow-y: auto; }
+    .editor-view.empty .editor-host { visibility: hidden; }
+    .editor-view.empty .editor-empty { display: flex; }
+    .editor-empty h2 { margin: 0 0 5px; font-size: 18px; font-weight: 600; }
+    .editor-empty p { margin: 0; font-size: 12.5px; color: var(--text-dim); }
+    .editor-empty-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+    .editor-recent { display: flex; flex-direction: column; gap: 1px; width: 100%; max-width: 470px; text-align: left; }
+    .editor-recent-head { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-dim); margin-bottom: 5px; }
+    .editor-recent-row { display: flex; align-items: baseline; gap: 9px; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12.5px; min-width: 0; }
+    .editor-recent-row:hover { background: var(--hover); }
+    .editor-recent-row .name { flex: 0 0 auto; }
+    .editor-recent-row .dir { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); font-family: Menlo, Consolas, monospace; font-size: 10.5px; }
+    .editor-statusbar { flex: 0 0 auto; display: flex; align-items: center; gap: 2px; height: 23px; padding: 0 8px; background: var(--bg-alt); border-top: 1px solid var(--border); font-size: 11px; color: var(--text-dim); user-select: none; }
+    .editor-statusbar .es-item { cursor: pointer; padding: 2px 6px; border-radius: 3px; white-space: nowrap; }
+    .editor-statusbar .es-item:hover { background: var(--hover); color: var(--text); }
+    .editor-statusbar .es-path { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 4px 0 2px; }
+    .editor-statusbar .es-path .es-dirty { color: var(--accent-ink); }
+    /* Shared quick-pick overlay (SPE-103): one filtered list widget
+       behind Go to File, the command palette and the language picker,
+       so all three behave identically instead of being three near
+       copies that drift apart. */
+    #quickpick-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: none; align-items: flex-start; justify-content: center; z-index: 2500; padding: 64px 20px 20px; box-sizing: border-box; }
+    #quickpick-overlay.open { display: flex; }
+    #quickpick { width: 580px; max-width: 100%; max-height: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,0.5); overflow: hidden; display: flex; flex-direction: column; }
+    #quickpick-input { width: 100%; box-sizing: border-box; border: none !important; border-bottom: 1px solid var(--border) !important; border-radius: 0 !important; background: var(--bg-input); padding: 9px 12px !important; font-size: 13px !important; }
+    #quickpick-input:focus { outline: none; box-shadow: none; }
+    #quickpick-list { overflow-y: auto; max-height: 400px; }
+    .qp-row { display: flex; align-items: baseline; gap: 10px; padding: 6px 12px; cursor: pointer; font-size: 13px; min-width: 0; }
+    .qp-row:hover { background: var(--hover); }
+    .qp-row.selected { background: var(--hover); box-shadow: inset 2px 0 0 var(--accent); }
+    .qp-row .qp-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .qp-row .qp-detail { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); font-size: 11px; }
+    .qp-row .qp-hint { flex: 0 0 auto; color: var(--text-dim); font-size: 10.5px; font-family: Menlo, Consolas, monospace; }
+    .qp-empty { padding: 11px 12px; font-size: 12px; color: var(--text-dim); }
     .toolbar { padding: 6px 10px; font-size: 13px; background: var(--bg-alt); border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
     .toolbar input { background: var(--bg-input); border: 1px solid var(--border); color: var(--text); padding: 3px 6px; width: 90px; min-width: 0; }
     .toolbar button { padding: 3px 8px; }
@@ -163,6 +257,17 @@
     .tab.drop-target { border-left: 2px solid var(--accent); }
     .tab-add { padding: 6px 10px; cursor: pointer; color: var(--text-dim); font-size: 14px; }
     .tab-add:hover { color: var(--text); }
+    /* SPE-104: splits the tab you're in, as opposed to .tab-add's new
+       tab. Deliberately not another "+": two of those in one strip is
+       a coin flip about which one you get. */
+    #tab-split-btn { display: none; align-items: center; gap: 4px; align-self: stretch; padding: 0 10px; cursor: pointer; color: var(--text-dim); font-size: 12px; user-select: none; border-left: 1px solid var(--border); }
+    #tab-split-btn:hover { color: var(--text); background: var(--hover); }
+    #tab-split-btn .caret { font-size: 9px; opacity: 0.7; }
+    .popup-menu { position: fixed; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 5px; padding: 4px 0; z-index: 2000; min-width: 200px; font-size: 13px; box-shadow: 0 6px 18px rgba(0,0,0,0.4); }
+    .popup-menu .item { display: flex; align-items: center; gap: 9px; padding: 6px 12px; cursor: pointer; white-space: nowrap; }
+    .popup-menu .item:hover { background: var(--hover); }
+    .popup-menu .item .glyph { flex: 0 0 auto; width: 16px; text-align: center; opacity: 0.85; }
+    .popup-menu .separator { border-top: 1px solid var(--border); margin: 4px 0; }
     #theme-select {
       background: var(--bg-input);
       border: 1px solid var(--border);
@@ -370,6 +475,12 @@
       font-size: 9px; color: var(--text-dim); border: 1px solid var(--border);
       border-radius: 3px; padding: 0 4px; opacity: 0.75;
     }
+    /* The editor is a session without a connection, so it gets its own
+       full-width row rather than sitting in the protocol grid as if it
+       were a fifth way to reach a host. */
+    #session-picker .picker-item.picker-wide { grid-column: 1 / -1; flex-direction: row; align-items: center; text-align: left; gap: 12px; padding: 12px 14px; }
+    #session-picker .picker-wide .icon { flex: 0 0 auto; width: 38px; height: 38px; font-size: 19px; }
+    #session-picker .picker-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
     #session-picker .picker-foot { grid-column: 1 / -1; padding-top: 2px; text-align: center; font-size: 11px; color: var(--text-dim); }
     #new-session-btn { padding: 9px 18px; border-radius: 7px; letter-spacing: 0.01em; }
     #connect, #serial-connect, #lsp-save, #se-save { min-width: 112px; }
@@ -450,6 +561,7 @@
     #home-inner { width: 100%; max-width: 780px; margin: 0 auto; padding: 34px 24px 28px; box-sizing: border-box; display: flex; flex-direction: column; gap: 22px; }
     #home-hero { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
     #home-hero .home-hero-text { min-width: 0; }
+    #home-hero .home-hero-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
     #home-hero button { flex: 0 0 auto; }
     #home-hero h1 { margin: 0 0 4px; font-size: 22px; font-weight: 600; letter-spacing: 0.2px; }
     #home-hero p { margin: 0; font-size: 13px; color: var(--text-dim); }
@@ -492,6 +604,7 @@
     <div id="titlebar-brand"><img src="/appicon.png" alt="" /><span>Specter</span></div>
     <div class="menu-item" data-menu="terminal">Terminal
       <div class="menu-dropdown" id="menu-terminal">
+        <div class="item" id="menu-new-window">New Window</div>
         <div class="item" id="menu-new-tab">New Tab</div>
         <div class="item" id="menu-new-local-shell">New Local Shell</div>
         <div class="item" id="menu-new-mosh">New Mosh Session</div>
@@ -511,12 +624,12 @@
     <div class="menu-item" data-menu="sessions">Sessions
       <div class="menu-dropdown" id="menu-sessions">
         <div class="item" id="menu-new-session">New Session</div>
+        <div class="item" id="menu-new-editor">New Text Editor</div>
         <div class="item" id="menu-new-folder">New Folder</div>
       </div>
     </div>
     <div class="menu-item" data-menu="view">View
       <div class="menu-dropdown" id="menu-view">
-        <div class="item" id="menu-toggle-editor">Toggle Editor Pane</div>
         <div class="item" id="menu-toggle-sidebar">Toggle Sidebar <span style="opacity:0.5;font-size:11px;">Ctrl+Shift+B</span></div>
         <div class="separator"></div>
         <div class="item" id="menu-layout-single">Single Pane</div>
@@ -695,6 +808,17 @@
           <div id="local-shell-profile-list"></div>
         </div>
       </div>
+      <div class="side-section" data-section="folders">
+        <div class="side-head">
+          <span class="chev">&#9662;</span>
+          <span class="title">Folders</span>
+          <span class="count" id="folders-count"></span>
+          <span class="act" id="folder-add-btn" title="Pin a folder">+</span>
+        </div>
+        <div class="side-body">
+          <div id="folder-list"></div>
+        </div>
+      </div>
       <div class="side-section" data-section="files">
         <div class="side-head" id="remote-files-header">
           <span class="chev">&#9662;</span>
@@ -710,7 +834,7 @@
       <div style="display:flex;align-items:center;background:var(--bg-input);border-bottom:1px solid var(--border);">
         <span id="sidebar-expand-btn" title="Show sidebar (Ctrl+Shift+B)" style="display:none;cursor:pointer;padding:0 8px;opacity:0.6;user-select:none;align-self:stretch;">&#10095;</span>
         <div id="tab-bar" style="display:flex;overflow-x:auto;flex:1;"></div>
-        <span id="editor-expand-btn" title="Show editor pane" style="display:none;cursor:pointer;padding:0 8px;opacity:0.6;user-select:none;align-self:stretch;">&#10094;</span>
+        <span id="tab-split-btn" title="Open another terminal or an editor in this tab"><span>&#9647;&#9647;</span><span class="caret">&#9662;</span></span>
       </div>
       <div id="tab-landing" style="display:none;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:12px;">
         <div style="font-size:14px;color:var(--text-dim);">No session yet</div>
@@ -723,7 +847,10 @@
               <h1>Specter</h1>
               <p>Pick up where you left off, or type a host to connect.</p>
             </div>
-            <button id="home-new-session-top">+ New Session</button>
+            <div class="home-hero-actions">
+              <button id="home-new-session-top">+ New Session</button>
+              <button id="home-new-editor-top" type="button" class="secondary">&#128221; Text Editor</button>
+            </div>
           </div>
           <div id="home-qc-wrap">
             <input id="home-quick-connect" type="text" autocomplete="off" spellcheck="false"
@@ -746,6 +873,10 @@
             <div class="home-section-head">Saved sessions</div>
             <div id="home-saved-list"></div>
           </div>
+          <div class="home-section" id="home-editor-section" style="display:none;">
+            <div class="home-section-head">Editor</div>
+            <div id="home-editor-list"></div>
+          </div>
           <div class="home-section" id="home-shells-section" style="display:none;">
             <div class="home-section-head">Local shells</div>
             <div id="home-shell-chips" class="home-chip-row"></div>
@@ -754,24 +885,6 @@
         </div>
       </div>
       <div id="terminal" style="position:relative;"></div>
-    </div>
-    <div class="resize-handle" id="resize-editor"></div>
-    <div id="editor-pane">
-      <div class="toolbar">
-        <span id="editor-path">No file open</span>
-        <span id="editor-status" style="opacity:0;transition:opacity 0.3s;margin-left:8px;font-size:11px;"></span>
-        <span id="editor-open-btn" title="Open a local file" style="margin-left:auto;cursor:pointer;opacity:0.7;padding:0 6px;">&#128193; Open</span>
-        <span id="editor-save-btn" title="Save (Ctrl+S)" style="cursor:pointer;opacity:0.7;padding:0 6px;">&#128190; Save</span>
-        <span id="editor-saveas-btn" title="Save As" style="cursor:pointer;opacity:0.7;padding:0 6px;position:relative;">
-          Save As&#8230;
-          <div id="editor-saveas-menu" style="display:none;position:absolute;top:100%;right:0;background:var(--bg-alt);border:1px solid var(--border);min-width:140px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.4);">
-            <div class="item" id="editor-saveas-local">&#128187; Local file&#8230;</div>
-            <div class="item" id="editor-saveas-remote">&#127760; Remote path&#8230;</div>
-          </div>
-        </span>
-        <span id="editor-close" style="cursor:pointer;opacity:0.5;padding:0 6px;">&#10005;</span>
-      </div>
-      <div id="editor"></div>
     </div>
   </div>
   <div id="session-picker-overlay">
@@ -805,7 +918,15 @@
           <span class="picker-name">Telnet</span>
           <span class="picker-desc">Unencrypted, for legacy gear</span>
         </div>
-        <div class="picker-foot">Press 1-4 to choose, or Esc to close.</div>
+        <div class="picker-item picker-wide" id="picker-editor" tabindex="0" role="button">
+          <span class="picker-key">5</span>
+          <span class="icon">&#128221;</span>
+          <span class="picker-text">
+            <span class="picker-name">Editor</span>
+            <span class="picker-desc">Edit local files and files on any connected host &mdash; no connection of its own</span>
+          </span>
+        </div>
+        <div class="picker-foot">Press 1-5 to choose, or Esc to close.</div>
       </div>
       <div id="picker-serial-fields" style="display:none;flex-direction:column;gap:8px;padding:16px;">
         <input id="serial-port" placeholder="/dev/ttyUSB0 or COM3" class="dialog-field" />
@@ -946,6 +1067,12 @@
         <span class="close" id="backup-restore-close">✕</span>
       </div>
       <div id="backup-restore-list"></div>
+    </div>
+  </div>
+  <div id="quickpick-overlay">
+    <div id="quickpick">
+      <input id="quickpick-input" type="text" autocomplete="off" spellcheck="false" />
+      <div id="quickpick-list"></div>
     </div>
   </div>
   <div id="statusbar">Specter</div>

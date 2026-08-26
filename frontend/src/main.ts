@@ -30,7 +30,7 @@ import '@fontsource/victor-mono/400.css';
 import '@fontsource/victor-mono/700.css';
 import '@fontsource/ubuntu-mono/400.css';
 import '@fontsource/ubuntu-mono/700.css';
-import type { RemoteFile, ConnectRequest, SessionProfile, SessionGroup, SessionClosedEvent, Settings, UpdateInfo, LocalShellProfile } from '../wailsjs.d.ts';
+import type { RemoteFile, LocalFile, Folder, ConnectRequest, SessionProfile, SessionGroup, SessionClosedEvent, Settings, UpdateInfo, LocalShellProfile } from '../wailsjs.d.ts';
 
 type ThemeName = 'dark' | 'light';
 
@@ -145,10 +145,155 @@ function fontStack(fontId: string): string {
   return FONT_OPTIONS.find((f) => f.value === fontId)?.stack ?? FONT_OPTIONS[0].stack;
 }
 
+// SPE-103: custom themes rather than plain vs-dark/vs, so the editor's
+// own chrome (gutter, current-line highlight, widgets) sits in
+// Specter's palette instead of VS Code's inside a Specter window. The
+// syntax colors themselves are inherited, there's no reason to
+// re-invent those.
+monaco.editor.defineTheme('specter-dark', {
+  base: 'vs-dark',
+  inherit: true,
+  rules: [],
+  colors: {
+    'editor.background': '#1e1e1e',
+    'editorGutter.background': '#1e1e1e',
+    'editor.lineHighlightBackground': '#ffffff0a',
+    'editorLineNumber.foreground': '#5a5a5a',
+    'editorLineNumber.activeForeground': '#bbbbbb',
+    'editorIndentGuide.background1': '#2d2d2d',
+    'editorWidget.background': '#252525',
+    'editorWidget.border': '#333333',
+    'editorCursor.foreground': '#dddddd',
+  },
+});
+monaco.editor.defineTheme('specter-light', {
+  base: 'vs',
+  inherit: true,
+  rules: [],
+  colors: {
+    'editor.background': '#ffffff',
+    'editorGutter.background': '#ffffff',
+    'editor.lineHighlightBackground': '#0000000a',
+    'editorLineNumber.foreground': '#9a9a9a',
+    'editorLineNumber.activeForeground': '#333333',
+    'editorIndentGuide.background1': '#e4e4e4',
+    'editorWidget.background': '#f3f3f3',
+    'editorWidget.border': '#d0d0d0',
+    'editorCursor.foreground': '#1e1e1e',
+  },
+});
+
 const MONACO_THEMES: Record<ThemeName, string> = {
-  dark: 'vs-dark',
-  light: 'vs',
+  dark: 'specter-dark',
+  light: 'specter-light',
 };
+
+// SPE-107: Monaco bundles 78 languages and Haskell is not one of them.
+// The editor's old hand-written extension map had an `hs: 'haskell'`
+// entry pointing at a language id that was never registered, so .hs
+// files have always fallen back to plaintext, silently. Registering a
+// real grammar here fixes that and puts Haskell in the same registry
+// languageForPath and the Set Language picker already read, so nothing
+// else needs to know it's a local addition.
+monaco.languages.register({
+  id: 'haskell',
+  extensions: ['.hs', '.lhs', '.hs-boot'],
+  aliases: ['Haskell', 'haskell'],
+});
+
+monaco.languages.setLanguageConfiguration('haskell', {
+  comments: { lineComment: '--', blockComment: ['{-', '-}'] },
+  brackets: [['{', '}'], ['[', ']'], ['(', ')']],
+  autoClosingPairs: [
+    { open: '{', close: '}' },
+    { open: '[', close: ']' },
+    { open: '(', close: ')' },
+    { open: '"', close: '"' },
+  ],
+  surroundingPairs: [
+    { open: '{', close: '}' },
+    { open: '[', close: ']' },
+    { open: '(', close: ')' },
+    { open: '"', close: '"' },
+    { open: "'", close: "'" },
+  ],
+});
+
+monaco.languages.setMonarchTokensProvider('haskell', {
+  defaultToken: '',
+  tokenPostfix: '.hs',
+
+  keywords: [
+    'case', 'class', 'data', 'default', 'deriving', 'do', 'else', 'family',
+    'forall', 'foreign', 'hiding', 'if', 'import', 'in', 'infix', 'infixl',
+    'infixr', 'instance', 'let', 'mdo', 'module', 'newtype', 'of', 'proc',
+    'qualified', 'rec', 'then', 'type', 'where',
+  ],
+
+  // The reserved operators, which read as syntax rather than as a
+  // function you could have defined yourself.
+  operators: ['::', '->', '<-', '=>', '=', '|', '\\', '@', '~', '..', ':'],
+
+  symbols: /[!#$%&*+./<=>?@\\^|\-~:]+/,
+
+  // Numeric and \^X control escapes, plus the named ASCII ones (NUL,
+  // ESC, DEL and friends) matched generically rather than enumerated:
+  // getting that list subtly wrong is worse than matching it loosely.
+  escapes: /\\(?:[abfnrtv\\"'0&]|x[0-9A-Fa-f]+|o[0-7]+|\d+|\^[A-Z@[\]\\^_]|[A-Z]{2,3})/,
+
+  tokenizer: {
+    root: [
+      [/\{-#/, { token: 'metatag', next: '@pragma' }],
+      [/\{-/, { token: 'comment', next: '@comment' }],
+      // Two or more dashes start a comment only when what follows is
+      // not another symbol character: --> and --| are operators.
+      [/--+(?![!#$%&*+./<=>?@\\^|~:]).*$/, 'comment'],
+
+      [/"/, { token: 'string.quote', next: '@string' }],
+      [/'(?:[^\\']|@escapes)'/, 'string'],
+
+      [/0[xX][0-9a-fA-F_]+/, 'number.hex'],
+      [/0[oO][0-7_]+/, 'number.octal'],
+      [/0[bB][01_]+/, 'number.binary'],
+      [/\d+(\.\d+)?([eE][-+]?\d+)?/, 'number'],
+
+      // Constructors, type names and module qualifiers are all the
+      // capitalised half of Haskell's naming rule, and all read the
+      // same way at a glance.
+      [/[A-Z][\w']*/, 'type.identifier'],
+
+      [/[a-z_][\w']*/, { cases: { '@keywords': 'keyword', '@default': 'identifier' } }],
+
+      [/[()[\]{}]/, '@brackets'],
+      [/[,;`]/, 'delimiter'],
+
+      [/@symbols/, { cases: { '@operators': 'keyword.operator', '@default': 'operator' } }],
+
+      [/[ \t\r\n]+/, ''],
+    ],
+
+    // Haskell's block comments nest, unlike C's.
+    comment: [
+      [/[^{-]+/, 'comment'],
+      [/\{-/, 'comment', '@push'],
+      [/-\}/, 'comment', '@pop'],
+      [/[{-]/, 'comment'],
+    ],
+
+    pragma: [
+      [/#-\}/, { token: 'metatag', next: '@pop' }],
+      [/[^#]+/, 'metatag'],
+      [/#/, 'metatag'],
+    ],
+
+    string: [
+      [/[^\\"]+/, 'string'],
+      [/@escapes/, 'string.escape'],
+      [/\\./, 'string.escape.invalid'],
+      [/"/, { token: 'string.quote', next: '@pop' }],
+    ],
+  },
+});
 
 type MonacoWorkerEnvironment = {
   getWorker: (_moduleId: string, label: string) => Worker;
@@ -234,9 +379,9 @@ function applyFontSize(size: number) {
       if (s.mode === 'ssh' && s.backendId) App.ResizeSSH(s.backendId, s.term.cols, s.term.rows);
     }
   }
-  // SPE-78: editor shares the same font size setting as the terminal,
+  // SPE-78: editors share the same font size setting as the terminal,
   // confirmed choice, not an independent editor-specific size.
-  editor.updateOptions({ fontSize: clamped });
+  updateAllEditors({ fontSize: clamped });
   const fontSizeSelect = document.getElementById('font-size-select') as HTMLSelectElement;
   fontSizeSelect.value = String(clamped);
   App.SaveSettings(appSettings);
@@ -264,6 +409,9 @@ function applyFont(fontId: string) {
   for (const tab of tabs.values()) {
     if (tab.term) tab.term.options.fontFamily = stack;
   }
+  // SPE-103: editor sessions share the terminal's coding font, the same
+  // reasoning as the shared font size.
+  updateAllEditors({ fontFamily: stack });
   refitActiveTerminal();
 }
 
@@ -391,11 +539,11 @@ async function loadSettingsAndApply() {
   for (const tab of tabs.values()) {
     if (tab.term) tab.term.options.fontFamily = stack;
   }
-  // Same race-condition reasoning for font SIZE: the editor was created
-  // synchronously at module load, before this async settings load
-  // resolved, and terminal tabs may exist too if one connected fast.
+  // Same race-condition reasoning for font SIZE: an editor pane or a
+  // terminal tab may already exist by the time this async settings load
+  // resolves, if one was opened or connected fast enough.
   const savedFontSize = appSettings.fontSize || FONT_SIZE_DEFAULT;
-  editor.updateOptions({ fontSize: savedFontSize });
+  updateAllEditors({ fontSize: savedFontSize });
   for (const tab of tabs.values()) {
     if (tab.term) tab.term.options.fontSize = savedFontSize;
   }
@@ -413,9 +561,9 @@ function applyTheme(name: ThemeName) {
   }
   refreshAllTerminalThemes();
 
-  if (typeof monaco !== 'undefined' && editor) {
-    monaco.editor.setTheme(MONACO_THEMES[name]);
-  }
+  // Monaco's theme is global rather than per-instance, so this covers
+  // every open editor pane in one call.
+  monaco.editor.setTheme(MONACO_THEMES[name]);
 }
 
 function refitActiveTerminal() {
@@ -459,7 +607,7 @@ const platformPromise = App.GetPlatform();
 // or local terminal ID). 'pending' tabs show the connect form instead of a
 // live terminal, until Connect/StartLocalTerminal resolves them.
 
-type TabMode = 'pending' | 'local' | 'ssh' | 'serial';
+type TabMode = 'pending' | 'local' | 'ssh' | 'serial' | 'editor';
 type TabStatus = 'connecting' | 'connected' | 'disconnected';
 
 // SPE-92: Session describes everything a single live terminal needs.
@@ -499,6 +647,12 @@ interface Session {
   // Output can split ANSI sequences or highlightable tokens across backend
   // events. Keep only that incomplete tail until the next chunk arrives.
   highlightCarry: string;
+  // SPE-104: opens a second, independent terminal on the same target,
+  // into whichever pane it's handed. null for a session that never
+  // connected, for editors, and for serial, where the port can only be
+  // opened once. Distinct from reconnect above, which re-dials this
+  // same Session in place.
+  duplicate: ((target: Pane) => Promise<void>) | null;
   // SPE-100: the saved SessionProfile this terminal was launched from,
   // null for ad-hoc connects that were never saved. Lets the sidebar
   // show which saved sessions are live right now and jump to the tab
@@ -527,6 +681,12 @@ interface Tab extends Session {
   // identical to a plain block container, so this exists even for
   // 'single' tabs, one uniform code path rather than two.
   paneGrid: HTMLDivElement | null;
+  // SPE-105: where the split sits, as a fraction of the grid. One
+  // vertical and one horizontal value covers every layout here: the
+  // 2x2 grid splits its columns once and its rows once, so there are
+  // never more than two of these to keep track of.
+  splitX: number;
+  splitY: number;
   isHome: boolean;
 }
 
@@ -555,6 +715,7 @@ function createPendingTab(): Tab {
     stopped: false,
     overlay: null,
     reconnect: null,
+    duplicate: null,
     ownerTabId: id,
     highlightCarry: '',
     sessionProfileId: null,
@@ -562,6 +723,8 @@ function createPendingTab(): Tab {
     extraPanes: [],
     focusedPaneIndex: 0,
     paneGrid: null,
+    splitX: 0.5,
+    splitY: 0.5,
     isHome: false,
   };
   tabs.set(tab.id, tab);
@@ -640,16 +803,16 @@ function renderTabBar() {
 
     // SPE-99: Home has no connection to report, and a red
     // 'disconnected' dot on it reads as something being wrong with the
-    // one tab that is always fine. Same isHome exemption the close
-    // button below already uses.
-    if (!tab.isHome) {
+    // one tab that is always fine. SPE-103: an editor session has no
+    // connection to report either, same reasoning.
+    if (!tab.isHome && tab.mode !== 'editor') {
       const dot = document.createElement('span');
       dot.className = 'status-dot ' + tab.status;
       el.appendChild(dot);
     }
 
     const label = document.createElement('span');
-      label.textContent = tab.isHome ? '⌂ Home' : (tab.mode === 'local' ? '💻 ' : tab.mode === 'ssh' ? '🌐 ' : tab.mode === 'serial' ? '🔌 ' : '') + tab.label;
+      label.textContent = tab.isHome ? '⌂ Home' : tab.mode === 'editor' ? editorTabLabel(tab) : (tab.mode === 'local' ? '💻 ' : tab.mode === 'ssh' ? '🌐 ' : tab.mode === 'serial' ? '🔌 ' : '') + tab.label + editorDirtyMarker(tab);
     el.appendChild(label);
 
       if (!tab.isHome) {
@@ -671,6 +834,12 @@ function renderTabBar() {
     switchToTab(tab.id);
   };
   bar.appendChild(addBtn);
+
+  // SPE-104: splitting only means something once the tab holds
+  // something to split away from.
+  const activeForSplit = activeTabId ? tabs.get(activeTabId) : null;
+  document.getElementById('tab-split-btn')!.style.display =
+    activeForSplit && !activeForSplit.isHome && activeForSplit.mode !== 'pending' ? 'flex' : 'none';
 
   syncSidebarLiveState();
 
@@ -740,6 +909,7 @@ function switchToTab(id: string) {
     tab.paneGrid.style.display = 'grid';
     for (const s of allSessions(tab)) {
       s.fitAddon?.fit();
+      editorPanes.get(s.id)?.editor.layout();
       if (s.mode === 'ssh' && s.backendId && s.term) App.ResizeSSH(s.backendId, s.term.cols, s.term.rows);
       if (s.mode === 'local' && s.backendId && s.term) App.ResizeLocalTerminal(s.backendId, s.term.cols, s.term.rows);
     }
@@ -758,6 +928,7 @@ function switchToTab(id: string) {
 // (closes just one split pane, leaving the tab and its other panes
 // open).
 async function closeSessionBackend(s: Session) {
+  if (s.mode === 'editor') disposeEditorPane(s);
   if (s.mode === 'ssh' && s.backendId) {
     await App.CloseSSH(s.backendId);
     runtime.EventsOff('ssh:data:' + s.backendId, 'ssh:closed:' + s.backendId);
@@ -780,6 +951,14 @@ async function closeTab(id: string) {
   const tab = tabs.get(id);
   if (!tab) return;
   if (tab.isHome) return;
+
+  // SPE-103: an editor pane has no connection to lose, it has unsaved
+  // buffers instead. Asked about before the connection prompt below,
+  // since either answer can still call the whole close off.
+  for (const session of allSessions(tab)) {
+    if (session.mode !== 'editor') continue;
+    if (!(await confirmCloseEditorSession(session))) return;
+  }
 
   // SPE-81: only prompt if something in this tab is genuinely live, not
   // the disconnect panel's own "exit tab" action, and not a
@@ -819,7 +998,9 @@ async function closePane(tab: Tab, paneIndex: number) {
   }
   const pane = tab.extraPanes[paneIndex - 1];
   if (!pane) return;
-  if (pane.status === 'connected' && !pane.stopped) {
+  if (pane.mode === 'editor') {
+    if (!(await confirmCloseEditorSession(pane))) return;
+  } else if (pane.status === 'connected' && !pane.stopped) {
     const proceed = confirm(`Close this pane? The session is still connected (${pane.label}).`);
     if (!proceed) return;
   }
@@ -857,6 +1038,7 @@ function createEmptyPane(tab: Tab): Pane {
     stopped: false,
     overlay: null,
     reconnect: null,
+    duplicate: null,
     ownerTabId: tab.id,
     highlightCarry: '',
     sessionProfileId: null,
@@ -872,10 +1054,86 @@ function ensurePaneGrid(tab: Tab) {
   tab.paneGrid = grid;
 }
 
+// SPE-105: a pane's wrapper is a focus target and a drop target for
+// another pane being dragged onto it. Shared, because a wrapper gets
+// built in three places (empty pane, terminal, editor) and only one of
+// them existed when the mousedown handler was first written.
+const PANE_DRAG_TYPE = 'text/specter-pane-id';
+
+function preparePaneWrapper(wrapper: HTMLDivElement, session: Session, tab: Tab) {
+  wrapper.addEventListener('mousedown', () => focusPane(tab, paneIndexOf(tab, session)));
+  wrapper.addEventListener('dragover', (event) => {
+    if (!event.dataTransfer?.types.includes(PANE_DRAG_TYPE)) return;
+    // Stopped as well as prevented: a Monaco editor in this pane would
+    // otherwise read the drag as text being dropped into the buffer.
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'move';
+    wrapper.classList.add('drop-target');
+  });
+  wrapper.addEventListener('dragleave', () => wrapper.classList.remove('drop-target'));
+  wrapper.addEventListener('drop', (event) => {
+    if (!event.dataTransfer?.types.includes(PANE_DRAG_TYPE)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    wrapper.classList.remove('drop-target');
+    const draggedId = event.dataTransfer.getData(PANE_DRAG_TYPE);
+    if (draggedId && draggedId !== session.id) swapPanes(tab, draggedId, session.id);
+  });
+}
+
+// Swaps two panes by reordering their wrappers in the grid, leaving
+// every Session object where it is. Moving the objects instead would
+// mean moving a Tab's own primary session out of the Tab, which it
+// structurally cannot be: a Tab *is* its first session.
+function swapPanes(tab: Tab, draggedId: string, targetId: string) {
+  const grid = tab.paneGrid;
+  const sessions = allSessions(tab);
+  const dragged = sessions.find((s) => s.id === draggedId);
+  const target = sessions.find((s) => s.id === targetId);
+  if (!grid || !dragged?.container || !target?.container) return;
+  const draggedNext = dragged.container.nextSibling;
+  const targetNext = target.container.nextSibling;
+  if (draggedNext === target.container) {
+    grid.insertBefore(target.container, dragged.container);
+  } else if (targetNext === dragged.container) {
+    grid.insertBefore(dragged.container, target.container);
+  } else {
+    grid.insertBefore(dragged.container, targetNext);
+    grid.insertBefore(target.container, draggedNext);
+  }
+  applyPaneGridLayout(tab);
+}
+
+// Panes in the order they actually appear on screen, which stops
+// matching their index order the moment two of them are swapped.
+function visualPaneOrder(tab: Tab): Session[] {
+  const sessions = allSessions(tab);
+  if (!tab.paneGrid) return sessions;
+  return Array.from(tab.paneGrid.children)
+    .map((child) => sessions.find((s) => s.container === child))
+    .filter((s): s is Session => !!s);
+}
+
 function buildPaneHeader(session: Session, tab: Tab): HTMLDivElement {
   const header = document.createElement('div');
   header.className = 'pane-header';
   header.style.display = tab.layout === 'single' ? 'none' : 'flex';
+  // SPE-105: the header is the grab handle for moving this pane
+  // elsewhere in the grid. Deliberately the header and not the pane
+  // body, which belongs to a live terminal or an editor and has its own
+  // ideas about dragging.
+  header.draggable = true;
+  header.addEventListener('dragstart', (event) => {
+    event.dataTransfer?.setData(PANE_DRAG_TYPE, session.id);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+    session.container?.classList.add('pane-dragging');
+  });
+  header.addEventListener('dragend', () => {
+    session.container?.classList.remove('pane-dragging');
+    tab.paneGrid?.querySelectorAll('.pane-wrapper.drop-target')
+      .forEach((el) => el.classList.remove('drop-target'));
+  });
   const labelEl = document.createElement('span');
   labelEl.className = 'pane-header-label';
   labelEl.textContent = session.label;
@@ -917,7 +1175,7 @@ function createPaneShell(pane: Pane, tab: Tab) {
   // placeholder above (both flex:1, both visible at once) for the same
   // space. createTerminalForSession creates the real term-host once a
   // session is actually chosen, removing this landing div then.
-  wrapper.addEventListener('mousedown', () => focusPane(tab, paneIndexOf(tab, pane)));
+  preparePaneWrapper(wrapper, pane, tab);
   tab.paneGrid!.appendChild(wrapper);
   pane.container = wrapper;
 }
@@ -931,19 +1189,105 @@ function focusPane(tab: Tab, paneIndex: number) {
 // Pure layout-geometry update for a tab's paneGrid CSS grid-template.
 // Never touches any session's term/container/backend, safe to call any
 // time the layout or pane count changes.
+// Matches the gap in .tab-pane-grid: the dividers straddle that gap, so
+// they need to know how wide it is to sit centred on it.
+const PANE_GRID_GAP = 2;
+
+function paneGridTracks(tab: Tab) {
+  return {
+    columns: tab.layout === '2v' || tab.layout === '4' ? `${tab.splitX}fr ${1 - tab.splitX}fr` : '1fr',
+    rows: tab.layout === '2h' || tab.layout === '4' ? `${tab.splitY}fr ${1 - tab.splitY}fr` : '1fr',
+  };
+}
+
+// Where a divider sits: the fraction, less the share of the gap the
+// first track gives up, plus half the gap to land on its centre.
+function dividerOffset(fraction: number): string {
+  return `calc(${(fraction * 100).toFixed(4)}% - ${(fraction * PANE_GRID_GAP).toFixed(3)}px + ${PANE_GRID_GAP / 2}px)`;
+}
+
 function applyPaneGridLayout(tab: Tab) {
   if (!tab.paneGrid) return;
-  const cols = tab.layout === '2v' || tab.layout === '4' ? '1fr 1fr' : '1fr';
-  const rows = tab.layout === '2h' || tab.layout === '4' ? '1fr 1fr' : '1fr';
-  tab.paneGrid.style.gridTemplateColumns = cols;
-  tab.paneGrid.style.gridTemplateRows = rows;
+  const tracks = paneGridTracks(tab);
+  tab.paneGrid.style.gridTemplateColumns = tracks.columns;
+  tab.paneGrid.style.gridTemplateRows = tracks.rows;
   for (const s of allSessions(tab)) {
     const header = s.container?.querySelector('.pane-header') as HTMLElement | null;
     if (header) header.style.display = tab.layout === 'single' ? 'none' : 'flex';
     const landing = s.container?.querySelector('.pane-landing') as HTMLElement | null;
     if (landing) landing.style.display = tab.layout === 'single' ? 'none' : 'flex';
+    editorPanes.get(s.id)?.editor.layout();
   }
+  renderPaneDividers(tab);
   if (activeTabId === tab.id) refitActiveTerminal();
+}
+
+// SPE-105: rebuilt rather than repositioned, so the divider count
+// always matches the layout and appending them last keeps swapPanes'
+// sibling arithmetic looking only at pane wrappers.
+function renderPaneDividers(tab: Tab) {
+  const grid = tab.paneGrid;
+  if (!grid) return;
+  grid.querySelectorAll('.pane-divider').forEach((el) => el.remove());
+  if (tab.layout === '2v' || tab.layout === '4') grid.appendChild(buildPaneDivider(tab, 'vertical'));
+  if (tab.layout === '2h' || tab.layout === '4') grid.appendChild(buildPaneDivider(tab, 'horizontal'));
+}
+
+function buildPaneDivider(tab: Tab, axis: 'vertical' | 'horizontal'): HTMLDivElement {
+  const divider = document.createElement('div');
+  divider.className = `pane-divider ${axis}`;
+  divider.title = 'Drag to resize, double-click to even out';
+  const place = (fraction: number) => {
+    if (axis === 'vertical') divider.style.left = dividerOffset(fraction);
+    else divider.style.top = dividerOffset(fraction);
+  };
+  place(axis === 'vertical' ? tab.splitX : tab.splitY);
+
+  divider.addEventListener('dblclick', () => {
+    if (axis === 'vertical') tab.splitX = 0.5;
+    else tab.splitY = 0.5;
+    applyPaneGridLayout(tab);
+  });
+
+  divider.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    const grid = tab.paneGrid;
+    if (!grid) return;
+    const rect = grid.getBoundingClientRect();
+    divider.classList.add('dragging');
+    divider.setPointerCapture(e.pointerId);
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const raw = axis === 'vertical'
+        ? (moveEvent.clientX - rect.left) / rect.width
+        : (moveEvent.clientY - rect.top) / rect.height;
+      // A pane narrower than this has no usable terminal in it anyway.
+      const fraction = Math.min(0.85, Math.max(0.15, raw));
+      if (axis === 'vertical') tab.splitX = fraction;
+      else tab.splitY = fraction;
+      // Geometry only while dragging: re-fitting every xterm on each
+      // pointer move is far too expensive, and they catch up on
+      // release, which is the only moment the size is final anyway.
+      const tracks = paneGridTracks(tab);
+      grid.style.gridTemplateColumns = tracks.columns;
+      grid.style.gridTemplateRows = tracks.rows;
+      place(fraction);
+    };
+
+    const finishResize = () => {
+      divider.classList.remove('dragging');
+      divider.removeEventListener('pointermove', onPointerMove);
+      divider.removeEventListener('pointerup', finishResize);
+      divider.removeEventListener('pointercancel', finishResize);
+      if (divider.hasPointerCapture(e.pointerId)) divider.releasePointerCapture(e.pointerId);
+      applyPaneGridLayout(tab);
+    };
+    divider.addEventListener('pointermove', onPointerMove);
+    divider.addEventListener('pointerup', finishResize);
+    divider.addEventListener('pointercancel', finishResize);
+  });
+
+  return divider;
 }
 
 // Switches a tab to a fixed target layout (SPE-92: single / 2 vertical
@@ -970,6 +1314,10 @@ async function setTabLayout(tab: Tab, layout: Layout) {
 
   if (targetCount < currentCount) {
     const removing = tab.extraPanes.slice(targetCount - 1);
+    for (const pane of removing) {
+      if (pane.mode !== 'editor') continue;
+      if (!(await confirmCloseEditorSession(pane))) return;
+    }
     const anyConnected = removing.some((p) => p.status === 'connected' && !p.stopped);
     if (anyConnected) {
       const proceed = confirm(`Switch layout? ${removing.length} connected pane(s) will be closed.`);
@@ -1146,7 +1494,7 @@ function createTerminalForSession(session: Session, tab: Tab) {
     wrapper = document.createElement('div');
     wrapper.className = 'pane-wrapper';
     wrapper.appendChild(buildPaneHeader(session, tab));
-    wrapper.addEventListener('mousedown', () => focusPane(tab, paneIndexOf(tab, session)));
+    preparePaneWrapper(wrapper, session, tab);
     tab.paneGrid!.appendChild(wrapper);
   }
 
@@ -1305,9 +1653,12 @@ function createTerminalForSession(session: Session, tab: Tab) {
 // direction. With at most 4 panes in a fixed 2x2 grid, a simple
 // left/right/up/down split on the current index covers every case,
 // no real geometry needed.
+// SPE-105: works in visual order rather than pane-index order, which
+// stop being the same thing as soon as two panes are swapped.
 function focusAdjacentPane(tab: Tab, key: 'ArrowLeft' | 'ArrowRight' | 'ArrowUp' | 'ArrowDown') {
-  const count = 1 + tab.extraPanes.length;
-  const i = tab.focusedPaneIndex;
+  const order = visualPaneOrder(tab);
+  const i = order.indexOf(focusedSession(tab));
+  if (i < 0) return;
   let next = i;
   if (tab.layout === '2v') {
     if (key === 'ArrowLeft' || key === 'ArrowRight') next = i === 0 ? 1 : 0;
@@ -1320,7 +1671,8 @@ function focusAdjacentPane(tab: Tab, key: 'ArrowLeft' | 'ArrowRight' | 'ArrowUp'
     if (key === 'ArrowUp') next = i >= 2 ? i - 2 : i;
     if (key === 'ArrowDown') next = i < 2 ? i + 2 : i;
   }
-  if (next >= 0 && next < count) focusPane(tab, next);
+  const target = order[next];
+  if (target) focusPane(tab, paneIndexOf(tab, target));
 }
 
 let resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1338,172 +1690,1828 @@ window.addEventListener('resize', () => {
   }, 100);
 });
 
-// --- Editor setup (shared across all tabs, VS Code-style) ---
+// --- Text editor sessions (SPE-103) ---
+// The editor used to be a fixed right-hand pane holding exactly one
+// file for the whole app: it competed with the terminal for width, it
+// could not hold two files at once, and closing it was the only way to
+// get that width back. It's a session kind now, living in the same pane
+// grid as terminals. So an editor can be a whole tab, or one pane of a
+// split sitting next to a live shell, and it gets a real editing
+// surface either way (document tabs, quick open, command palette,
+// status bar) instead of a viewer bolted onto the side.
 
-const editor = monaco.editor.create(document.getElementById('editor')!, {
-  value: '',
-  language: 'plaintext',
-  theme: MONACO_THEMES[currentTheme()],
-  automaticLayout: true,
-  // SPE-78: shares appSettings.fontSize with the terminal (confirmed
-  // choice), appSettings isn't populated yet at this point in module
-  // load order (loadSettingsAndApply is async), loadSettingsAndApply
-  // re-applies the real value once it resolves, same race-condition
-  // pattern already used for the terminal's own font-family sync.
-  fontSize: appSettings.fontSize || FONT_SIZE_DEFAULT,
-});
-
-function toggleEditorPane() {
-  const app = document.getElementById('app')!;
-  app.style.gridTemplateColumns = '';
-  const collapsed = app.classList.toggle('editor-collapsed');
-  app.style.setProperty('--ew', collapsed ? '0px' : (editorWidth ? `${editorWidth}px` : '1fr'));
-  app.style.setProperty('--rew', collapsed ? '0px' : '5px');
-  document.getElementById('editor-expand-btn')!.style.display = collapsed ? 'flex' : 'none';
-  refitActiveTerminal();
+interface EditorDoc {
+  id: string;
+  // What the document tab shows: the file's basename, or "Untitled-N"
+  // for a buffer that has never been written anywhere.
+  title: string;
+  path: string | null;
+  // false means the file lives on the host behind remoteSessionId and
+  // saving goes back out over SFTP.
+  isLocal: boolean;
+  remoteSessionId: string | null;
+  model: monaco.editor.ITextModel;
+  viewState: monaco.editor.ICodeEditorViewState | null;
+  // model.getAlternativeVersionId() as of the last open or save. Monaco
+  // walks this value back on undo, so undoing every edit clears the
+  // dirty marker rather than leaving it stuck on forever.
+  savedVersionId: number;
+  // Cached isDocDirty() result: the content listener fires on every
+  // keystroke and only a flip is worth a re-render.
+  dirty: boolean;
+  // The editor pane holding this document, by its Session id.
+  ownerPaneId: string;
 }
 
-document.getElementById('editor-close')!.addEventListener('click', toggleEditorPane);
-document.getElementById('editor-expand-btn')!.addEventListener('click', toggleEditorPane);
+// One live editor surface. Each gets its own Monaco instance rather
+// than sharing one and swapping models: two editor panes can be on
+// screen at the same time now, which a single instance can't do.
+interface EditorPane {
+  session: Session;
+  editor: monaco.editor.IStandaloneCodeEditor;
+  docIds: string[];
+  activeDocId: string | null;
+  root: HTMLDivElement;
+  docBar: HTMLDivElement;
+  // SPE-105: the folder opened as this pane's workspace, and the tree
+  // showing it. null when the pane is just holding loose files.
+  folder: string | null;
+  tree: HTMLDivElement;
+  expanded: Set<string>;
+  // One listing per directory, so collapsing and re-expanding a folder
+  // doesn't go back to disk. Dropped wholesale by the refresh action.
+  treeCache: Map<string, LocalFile[]>;
+  recentBox: HTMLDivElement;
+  statusBar: HTMLDivElement;
+  // The cursor readout inside statusBar, rewritten in place as you
+  // type rather than rebuilding the whole bar.
+  positionEl: HTMLElement | null;
+}
 
-document.getElementById('menu-toggle-editor')!.addEventListener('click', () => {
-  closeAllMenus();
-  toggleEditorPane();
-});
+const editorPanes = new Map<string, EditorPane>();
+const editorDocs = new Map<string, EditorDoc>();
+let editorDocCounter = 0;
+let untitledCounter = 0;
+// Where an "open this file" action lands when nothing in the active tab
+// is an editor: the editor pane used last, so opening file after file
+// from the remote browser keeps filling the same one instead of
+// spraying new tabs across the bar.
+let lastEditorPaneId: string | null = null;
 
+// Editor preferences are per-person, not per-document, and live in
+// localStorage alongside the other frontend-only toggles (highlighting,
+// copy-on-select) rather than in backend settings.json, which is for
+// things the Go side also reads.
+type EditorPrefs = {
+  wordWrap: boolean;
+  minimap: boolean;
+  whitespace: boolean;
+  tabSize: number;
+  insertSpaces: boolean;
+};
 
-let openFilePath: string | null = null;
-let openFileSessionId: string | null = null;
-// SPE-78: local file support alongside the existing remote (SSH) editing.
-// openFileSessionId stays null for both "nothing open" and "a local file
-// is open", this flag is what actually distinguishes the two.
-let openFileIsLocal = false;
+const DEFAULT_EDITOR_PREFS: EditorPrefs = {
+  wordWrap: false,
+  minimap: true,
+  whitespace: false,
+  tabSize: 4,
+  insertSpaces: true,
+};
 
-let editorStatusTimer: ReturnType<typeof setTimeout> | null = null;
-function flashEditorStatus(msg: string, isError = false) {
-  const el = document.getElementById('editor-status')!;
-  el.textContent = msg;
+function loadEditorPrefs(): EditorPrefs {
+  try {
+    return { ...DEFAULT_EDITOR_PREFS, ...JSON.parse(localStorage.getItem('specter-editor-prefs') || '{}') };
+  } catch {
+    return { ...DEFAULT_EDITOR_PREFS };
+  }
+}
+
+const editorPrefs = loadEditorPrefs();
+
+function saveEditorPrefs() {
+  localStorage.setItem('specter-editor-prefs', JSON.stringify(editorPrefs));
+}
+
+// Applies whatever the preference toggles changed to every open editor,
+// the same way refreshAllTerminalThemes fans a change out to every live
+// terminal.
+function updateAllEditors(options: monaco.editor.IEditorOptions) {
+  for (const pane of editorPanes.values()) pane.editor.updateOptions(options);
+}
+
+// Recently opened local files, most recent first. Remote files are
+// deliberately not remembered: reopening one needs the SSH session it
+// came from to still be up, and a list of paths that mostly fail to
+// open is worse than no list at all.
+const RECENT_FILES_LIMIT = 12;
+
+function loadRecentFiles(): string[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('specter-editor-recent') || '[]');
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry): entry is string => typeof entry === 'string');
+  } catch {
+    return [];
+  }
+}
+
+function rememberRecentFile(path: string) {
+  const next = [path, ...loadRecentFiles().filter((entry) => entry !== path)].slice(0, RECENT_FILES_LIMIT);
+  localStorage.setItem('specter-editor-recent', JSON.stringify(next));
+}
+
+// Handles both separators deliberately: local paths are Windows-shaped
+// on Windows, remote paths are always POSIX, and both land here.
+function baseName(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
+function dirName(path: string): string {
+  const parts = path.split(/[\\/]/);
+  parts.pop();
+  return parts.join('/') || '.';
+}
+
+// Monaco already ships an extension and filename table for every
+// language it bundles, so ask it rather than maintaining a hand-written
+// map that quietly falls back to plaintext for whatever nobody
+// remembered to add. The map this replaces covered six extensions.
+function languageForPath(path: string | null): string {
+  if (!path) return 'plaintext';
+  const name = baseName(path).toLowerCase();
+  const languages = monaco.languages.getLanguages();
+  for (const lang of languages) {
+    if (lang.filenames?.some((filename) => filename.toLowerCase() === name)) return lang.id;
+  }
+  if (!name.includes('.')) return 'plaintext';
+  const ext = name.slice(name.lastIndexOf('.'));
+  for (const lang of languages) {
+    if (lang.extensions?.some((entry) => entry.toLowerCase() === ext)) return lang.id;
+  }
+  return 'plaintext';
+}
+
+function languageLabel(id: string): string {
+  return monaco.languages.getLanguages().find((lang) => lang.id === id)?.aliases?.[0] || id;
+}
+
+// Transient message in the app's own status bar. The remote file
+// browser reports through this too, and it can fire before any editor
+// exists, so it deliberately lives outside the editor surface.
+let statusFlashTimer: ReturnType<typeof setTimeout> | null = null;
+function flashStatus(message: string, isError = false) {
+  const el = document.getElementById('statusbar')!;
+  el.textContent = message;
   el.style.color = isError ? 'var(--danger)' : 'var(--success)';
-  el.style.opacity = '1';
-  if (editorStatusTimer) clearTimeout(editorStatusTimer);
-  editorStatusTimer = setTimeout(() => { el.style.opacity = '0'; }, 2000);
+  if (statusFlashTimer) clearTimeout(statusFlashTimer);
+  statusFlashTimer = setTimeout(() => {
+    el.textContent = 'Specter';
+    el.style.color = '';
+  }, 2600);
 }
 
-// Shared tail end of opening a file, whether local or remote:
-// language detection, showing/expanding the pane, loading content.
-function finishOpeningFile(path: string, content: string) {
-  document.getElementById('editor-path')!.textContent = path;
-  document.getElementById('editor-close')!.style.display = 'inline';
-  // The editor pane defaults to collapsed (nothing to show until a
-  // file's actually open), opening one needs to explicitly restore it,
-  // otherwise the content loads into Monaco invisibly behind a hidden
-  // pane.
-  const app = document.getElementById('app')!;
-  app.classList.remove('editor-collapsed');
-  app.style.setProperty('--ew', editorWidth ? `${editorWidth}px` : '1fr');
-  app.style.setProperty('--rew', '5px');
-  document.getElementById('editor-expand-btn')!.style.display = 'none';
-  refitActiveTerminal();
-  const ext = path.split('.').pop() ?? '';
-  const langMap: Record<string, string> = {
-    go: 'go', hs: 'haskell', js: 'javascript', ts: 'typescript', json: 'json', md: 'markdown',
+// --- Editor pane lifecycle ---
+
+// The editor counterpart of createTerminalForSession: turns one Session
+// (a whole tab's primary session, or a split pane) into a live editor,
+// reusing the wrapper and header a split pane already has.
+function createEditorForSession(session: Session, tab: Tab) {
+  ensurePaneGrid(tab);
+
+  let wrapper = session.container;
+  if (wrapper) {
+    wrapper.querySelector('.pane-landing')?.remove();
+  } else {
+    wrapper = document.createElement('div');
+    wrapper.className = 'pane-wrapper';
+    wrapper.appendChild(buildPaneHeader(session, tab));
+    preparePaneWrapper(wrapper, session, tab);
+    tab.paneGrid!.appendChild(wrapper);
+  }
+
+  const root = document.createElement('div');
+  root.className = 'editor-view empty';
+
+  const docBar = document.createElement('div');
+  docBar.className = 'editor-doc-bar';
+
+  const body = document.createElement('div');
+  body.className = 'editor-body';
+  const host = document.createElement('div');
+  host.className = 'editor-host';
+  const empty = document.createElement('div');
+  empty.className = 'editor-empty';
+  const blurb = document.createElement('div');
+  const heading = document.createElement('h2');
+  heading.textContent = 'Text editor';
+  const sub = document.createElement('p');
+  sub.textContent = 'Edit files on this machine, or on any host you have connected.';
+  blurb.append(heading, sub);
+  const actions = document.createElement('div');
+  actions.className = 'editor-empty-actions';
+  const newBtn = document.createElement('button');
+  newBtn.type = 'button';
+  newBtn.textContent = 'New File';
+  const openBtn = document.createElement('button');
+  openBtn.type = 'button';
+  openBtn.className = 'secondary';
+  openBtn.textContent = 'Open File…';
+  const folderBtn = document.createElement('button');
+  folderBtn.type = 'button';
+  folderBtn.className = 'secondary';
+  folderBtn.textContent = 'Open Folder…';
+  actions.append(newBtn, openBtn, folderBtn);
+  const recentBox = document.createElement('div');
+  recentBox.className = 'editor-recent';
+  empty.append(blurb, actions, recentBox);
+  body.append(host, empty);
+
+  // SPE-105: the workspace tree lives beside the buffer, inside the
+  // pane, so a split can hold a folder on one side and a shell on the
+  // other without either borrowing space from the app chrome.
+  const tree = document.createElement('div');
+  tree.className = 'editor-tree';
+  const main = document.createElement('div');
+  main.className = 'editor-main';
+  main.append(tree, body);
+
+  const statusBar = document.createElement('div');
+  statusBar.className = 'editor-statusbar';
+
+  root.append(docBar, main, statusBar);
+  wrapper.appendChild(root);
+
+  const instance = monaco.editor.create(host, {
+    // No model until a document is actually opened. The empty state
+    // covers that case; a blank untitled buffer conjured up front would
+    // sit in every new editor whether or not it was wanted.
+    model: null,
+    theme: MONACO_THEMES[currentTheme()],
+    automaticLayout: true,
+    // SPE-78: shares appSettings.fontSize with the terminal, a
+    // confirmed choice rather than an independent editor font size.
+    fontSize: appSettings.fontSize || FONT_SIZE_DEFAULT,
+    fontFamily: fontStack(appSettings.fontFamily || FONT_OPTIONS[0].value),
+    fontLigatures: true,
+    minimap: { enabled: editorPrefs.minimap },
+    wordWrap: editorPrefs.wordWrap ? 'on' : 'off',
+    renderWhitespace: editorPrefs.whitespace ? 'all' : 'selection',
+    tabSize: editorPrefs.tabSize,
+    insertSpaces: editorPrefs.insertSpaces,
+    // A file that already uses a different indent style keeps it,
+    // rather than the preference silently reformatting somebody else's
+    // config the first time you press Tab in it.
+    detectIndentation: true,
+    scrollBeyondLastLine: false,
+    smoothScrolling: true,
+    cursorBlinking: 'smooth',
+    cursorSmoothCaretAnimation: 'on',
+    multiCursorModifier: 'alt',
+    renderLineHighlight: 'all',
+    bracketPairColorization: { enabled: true },
+    guides: { bracketPairs: true, indentation: true },
+    stickyScroll: { enabled: true },
+    linkedEditing: true,
+    padding: { top: 6, bottom: 6 },
+    scrollbar: { verticalScrollbarSize: 11, horizontalScrollbarSize: 11, useShadows: false },
+    find: { addExtraSpaceOnTop: false, seedSearchStringFromSelection: 'selection' },
+  });
+
+  const pane: EditorPane = {
+    session,
+    editor: instance,
+    docIds: [],
+    activeDocId: null,
+    root,
+    docBar,
+    folder: null,
+    tree,
+    expanded: new Set<string>(),
+    treeCache: new Map<string, LocalFile[]>(),
+    recentBox,
+    statusBar,
+    positionEl: null,
   };
-  monaco.editor.setModelLanguage(editor.getModel()!, langMap[ext] ?? 'plaintext');
-  editor.setValue(content);
+  editorPanes.set(session.id, pane);
+
+  session.mode = 'editor';
+  session.label = 'Editor';
+  session.container = wrapper;
+  if (session === tab) tab.label = 'Editor';
+
+  newBtn.onclick = () => { newUntitledDoc(pane); };
+  openBtn.onclick = () => { void openLocalFile(undefined, pane); };
+  folderBtn.onclick = () => { void chooseFolder(pane); };
+
+  instance.onDidChangeCursorPosition(() => updateStatusPosition(pane));
+  instance.onDidChangeCursorSelection(() => updateStatusPosition(pane));
+  instance.onDidChangeModelLanguage(() => renderEditorStatusBar(pane));
+  instance.onDidChangeModelOptions(() => renderEditorStatusBar(pane));
+  instance.onDidFocusEditorText(() => {
+    lastEditorPaneId = session.id;
+    const owner = tabs.get(session.ownerTabId);
+    if (owner) focusPane(owner, paneIndexOf(owner, session));
+  });
+  registerEditorKeybindings(pane);
+
+  renderDocBar(pane);
+  applyActiveDoc(pane);
+  renderTabBar();
+}
+
+// Called from closeSessionBackend, which already handles every other
+// session kind's teardown.
+function disposeEditorPane(session: Session) {
+  const pane = editorPanes.get(session.id);
+  if (!pane) return;
+  pane.editor.setModel(null);
+  for (const docId of pane.docIds) {
+    const doc = editorDocs.get(docId);
+    if (!doc) continue;
+    editorDocs.delete(docId);
+    doc.model.dispose();
+  }
+  pane.editor.dispose();
+  editorPanes.delete(session.id);
+  if (lastEditorPaneId === session.id) lastEditorPaneId = null;
+}
+
+// Every unsaved buffer in one editor pane, asked about one at a time.
+// Returns false the moment one is cancelled, leaving the pane and
+// everything in it exactly as it was.
+async function confirmCloseEditorSession(session: Session): Promise<boolean> {
+  const pane = editorPanes.get(session.id);
+  if (!pane) return true;
+  for (const docId of [...pane.docIds]) {
+    const doc = editorDocs.get(docId);
+    if (!doc || !doc.dirty) continue;
+    setActiveDoc(pane, doc.id);
+    const answer = await confirmDiscard(doc);
+    if (answer === 'cancel') return false;
+    if (answer === 'save' && !(await saveDoc(doc))) return false;
+  }
+  return true;
+}
+
+// The editor a keyboard command or the quick pick acts on: the focused
+// pane of the active tab, when that pane happens to be an editor.
+function focusedEditorPane(): EditorPane | null {
+  const tab = activeTabId ? tabs.get(activeTabId) : null;
+  if (!tab) return null;
+  return editorPanes.get(focusedSession(tab).id) ?? null;
+}
+
+
+function isDocDirty(doc: EditorDoc): boolean {
+  return doc.model.getAlternativeVersionId() !== doc.savedVersionId;
+}
+
+// A dirty buffer anywhere in a tab is worth a marker on the tab itself,
+// including when the editor is one pane of a split next to a shell and
+// its own pane header is off screen behind another tab.
+function editorDirtyMarker(tab: Tab): string {
+  const dirty = allSessions(tab).some((session) => {
+    const pane = editorPanes.get(session.id);
+    return !!pane && pane.docIds.some((docId) => editorDocs.get(docId)?.dirty);
+  });
+  return dirty ? ' •' : '';
+}
+
+function editorTabLabel(tab: Tab): string {
+  return `\u{1F4DD} ${tab.label}`;
+}
+
+function revealEditorPane(pane: EditorPane) {
+  const tab = tabs.get(pane.session.ownerTabId);
+  if (!tab) return;
+  switchToTab(tab.id);
+  focusPane(tab, paneIndexOf(tab, pane.session));
+  pane.editor.focus();
+}
+
+// A whole tab that is an editor, reusing the blank tab a New Session
+// flow just created rather than leaving an empty "New Tab" beside it.
+function newEditorTabPane(): EditorPane {
+  const current = activeTabId ? tabs.get(activeTabId) : null;
+  const tab = current && current.mode === 'pending' && !current.isHome && current.extraPanes.length === 0
+    ? current
+    : createPendingTab();
+  switchToTab(tab.id);
+  createEditorForSession(tab, tab);
+  switchToTab(tab.id);
+  return editorPanes.get(tab.id)!;
+}
+
+// Where an open-file action should land.
+function editorPaneForOpening(): EditorPane {
+  const focused = focusedEditorPane();
+  if (focused) return focused;
+  const last = lastEditorPaneId ? editorPanes.get(lastEditorPaneId) : null;
+  if (last) {
+    revealEditorPane(last);
+    return last;
+  }
+  for (const pane of editorPanes.values()) {
+    revealEditorPane(pane);
+    return pane;
+  }
+  return newEditorTabPane();
+}
+
+// --- Documents ---
+
+function createDoc(pane: EditorPane, opts: {
+  title: string;
+  path: string | null;
+  isLocal: boolean;
+  remoteSessionId: string | null;
+  content: string;
+}): EditorDoc {
+  editorDocCounter += 1;
+  const model = monaco.editor.createModel(opts.content, languageForPath(opts.path));
+  const doc: EditorDoc = {
+    id: `doc-${editorDocCounter}`,
+    title: opts.title,
+    path: opts.path,
+    isLocal: opts.isLocal,
+    remoteSessionId: opts.remoteSessionId,
+    model,
+    viewState: null,
+    savedVersionId: model.getAlternativeVersionId(),
+    dirty: false,
+    ownerPaneId: pane.session.id,
+  };
+  editorDocs.set(doc.id, doc);
+  pane.docIds.push(doc.id);
+  model.onDidChangeContent(() => {
+    // Fires on every keystroke, so only a genuine flip between clean
+    // and dirty is worth the re-renders below.
+    const dirty = isDocDirty(doc);
+    if (dirty === doc.dirty) return;
+    doc.dirty = dirty;
+    renderDocBar(pane);
+    renderEditorStatusBar(pane);
+    renderTabBar();
+  });
+  return doc;
+}
+
+// Parks the outgoing document's cursor and scroll position so coming
+// back to it lands where you left it rather than at line 1.
+function stashViewState(pane: EditorPane) {
+  const previous = pane.activeDocId ? editorDocs.get(pane.activeDocId) : null;
+  if (previous && pane.editor.getModel() === previous.model) previous.viewState = pane.editor.saveViewState();
+}
+
+function setActiveDoc(pane: EditorPane, docId: string | null) {
+  if (pane.activeDocId === docId) {
+    pane.editor.focus();
+    return;
+  }
+  stashViewState(pane);
+  pane.activeDocId = docId;
+  applyActiveDoc(pane);
+  renderDocBar(pane);
+  renderTabBar();
+}
+
+function applyActiveDoc(pane: EditorPane) {
+  const doc = pane.activeDocId ? editorDocs.get(pane.activeDocId) : null;
+  pane.root.classList.toggle('empty', !doc);
+  if (doc) {
+    pane.editor.setModel(doc.model);
+    if (doc.viewState) pane.editor.restoreViewState(doc.viewState);
+  } else {
+    pane.editor.setModel(null);
+    renderRecentFiles(pane);
+  }
+  // Drives both the pane header and, for a whole editor tab, the tab
+  // bar entry, so the filename is visible wherever the editor is.
+  pane.session.label = doc ? doc.title : 'Editor';
+  const tab = tabs.get(pane.session.ownerTabId);
+  if (tab && pane.session === tab) tab.label = pane.session.label;
+  renderEditorStatusBar(pane);
+}
+
+function findOpenDoc(path: string, isLocal: boolean, remoteSessionId: string | null): EditorDoc | null {
+  for (const doc of editorDocs.values()) {
+    if (doc.path !== path || doc.isLocal !== isLocal) continue;
+    if (!isLocal && doc.remoteSessionId !== remoteSessionId) continue;
+    return doc;
+  }
+  return null;
+}
+
+// A file is only ever open in one place: opening one that's already
+// open reveals it rather than building a second model for the same
+// path, which would let two panes silently diverge and race on save.
+function revealDoc(doc: EditorDoc) {
+  const pane = editorPanes.get(doc.ownerPaneId);
+  if (!pane) return;
+  revealEditorPane(pane);
+  setActiveDoc(pane, doc.id);
+}
+
+function newUntitledDoc(pane: EditorPane): EditorDoc {
+  untitledCounter += 1;
+  const doc = createDoc(pane, {
+    title: `Untitled-${untitledCounter}`,
+    path: null,
+    isLocal: true,
+    remoteSessionId: null,
+    content: '',
+  });
+  setActiveDoc(pane, doc.id);
+  return doc;
+}
+
+async function openLocalFile(path?: string, into?: EditorPane) {
+  // Opens in the workspace when there is one, so Open File inside a
+  // folder doesn't start wherever the OS dialog was last.
+  const startIn = into?.folder ?? focusedEditorPane()?.folder ?? '';
+  const target = path ?? await App.SelectFileIn(startIn);
+  if (!target) return; // cancelled
+  const already = findOpenDoc(target, true, null);
+  if (already) {
+    revealDoc(already);
+    return;
+  }
+  let content: string;
+  try {
+    content = await App.ReadLocalFile(target);
+  } catch (err) {
+    flashStatus(`Open failed: ${err}`, true);
+    return;
+  }
+  const pane = into ?? editorPaneForOpening();
+  const doc = createDoc(pane, {
+    title: baseName(target),
+    path: target,
+    isLocal: true,
+    remoteSessionId: null,
+    content,
+  });
+  rememberRecentFile(target);
+  setActiveDoc(pane, doc.id);
 }
 
 async function openRemoteFile(sessionId: string, path: string) {
-  const content = await App.ReadRemoteFile(sessionId, path);
-  openFilePath = path;
-  openFileSessionId = sessionId;
-  openFileIsLocal = false;
-  finishOpeningFile(path, content);
-}
-
-async function openLocalFile() {
-  const path = await App.SelectAnyFile();
-  if (!path) return; // cancelled
-  const content = await App.ReadLocalFile(path);
-  openFilePath = path;
-  openFileSessionId = null;
-  openFileIsLocal = true;
-  finishOpeningFile(path, content);
-}
-
-async function saveCurrentFile() {
-  if (!openFilePath) {
-    // Nothing open yet (Untitled), Save behaves like Save As rather
-    // than silently doing nothing, matching most editors' convention.
-    return saveAsLocal();
-  }
-  try {
-    if (openFileIsLocal) {
-      await App.WriteLocalFile(openFilePath, editor.getValue());
-    } else if (openFileSessionId) {
-      await App.WriteRemoteFile(openFileSessionId, openFilePath, editor.getValue());
-    }
-    flashEditorStatus('Saved');
-  } catch (err) {
-    flashEditorStatus(`Save failed: ${err}`, true);
-  }
-}
-
-async function saveAsLocal() {
-  const defaultName = openFilePath ? openFilePath.split(/[\\/]/).pop()! : 'Untitled.txt';
-  const path = await App.SaveTextFile(defaultName, editor.getValue());
-  if (!path) return; // cancelled
-  openFilePath = path;
-  openFileSessionId = null;
-  openFileIsLocal = true;
-  document.getElementById('editor-path')!.textContent = path;
-  document.getElementById('editor-close')!.style.display = 'inline';
-  flashEditorStatus('Saved');
-}
-
-async function saveAsRemote() {
-  const activeTab = activeTabId ? tabs.get(activeTabId) : null;
-  const sessionId = openFileSessionId ?? (activeTab ? focusedSession(activeTab).backendId : null);
-  if (!sessionId) {
-    alert('No active SSH session to save to. Open or switch to an SSH tab first.');
+  const already = findOpenDoc(path, false, sessionId);
+  if (already) {
+    revealDoc(already);
     return;
   }
-  const defaultPath = openFilePath && !openFileIsLocal
-    ? openFilePath
-    : (currentRemotePath === '.' ? 'untitled.txt' : `${currentRemotePath}/untitled.txt`);
-  const newPath = prompt('Save to remote path:', defaultPath);
-  if (!newPath) return; // cancelled
+  const content = await App.ReadRemoteFile(sessionId, path);
+  const pane = editorPaneForOpening();
+  const doc = createDoc(pane, {
+    title: baseName(path),
+    path,
+    isLocal: false,
+    remoteSessionId: sessionId,
+    content,
+  });
+  setActiveDoc(pane, doc.id);
+}
+
+function markDocSaved(doc: EditorDoc) {
+  doc.savedVersionId = doc.model.getAlternativeVersionId();
+  doc.dirty = false;
+  const pane = editorPanes.get(doc.ownerPaneId);
+  if (pane) {
+    renderDocBar(pane);
+    renderEditorStatusBar(pane);
+  }
+  renderTabBar();
+}
+
+// Points a document at a new home after Save As. Both callers have
+// already written the bytes by the time they get here.
+function retargetDoc(doc: EditorDoc, to: { path: string; isLocal: boolean; remoteSessionId: string | null }) {
+  doc.path = to.path;
+  doc.isLocal = to.isLocal;
+  doc.remoteSessionId = to.remoteSessionId;
+  doc.title = baseName(to.path);
+  monaco.editor.setModelLanguage(doc.model, languageForPath(to.path));
+  markDocSaved(doc);
+  const pane = editorPanes.get(doc.ownerPaneId);
+  if (pane && pane.activeDocId === doc.id) applyActiveDoc(pane);
+}
+
+async function saveDoc(doc: EditorDoc): Promise<boolean> {
+  // Nothing written anywhere yet (Untitled), so Save behaves like Save
+  // As rather than silently doing nothing, matching every editor's
+  // convention.
+  if (!doc.path) return saveDocAs(doc);
   try {
-    await App.WriteRemoteFile(sessionId, newPath, editor.getValue());
-    openFilePath = newPath;
-    openFileSessionId = sessionId;
-    openFileIsLocal = false;
-    document.getElementById('editor-path')!.textContent = newPath;
-    document.getElementById('editor-close')!.style.display = 'inline';
-    flashEditorStatus('Saved');
+    if (doc.isLocal) await App.WriteLocalFile(doc.path, doc.model.getValue());
+    else if (doc.remoteSessionId) await App.WriteRemoteFile(doc.remoteSessionId, doc.path, doc.model.getValue());
+    else return saveDocAs(doc);
   } catch (err) {
-    flashEditorStatus(`Save failed: ${err}`, true);
+    flashStatus(`Save failed: ${err}`, true);
+    return false;
+  }
+  markDocSaved(doc);
+  flashStatus(`Saved ${doc.title}`);
+  return true;
+}
+
+async function saveDocAs(doc: EditorDoc): Promise<boolean> {
+  const pane = editorPanes.get(doc.ownerPaneId);
+  const suggested = doc.path ? baseName(doc.path) : (doc.title.includes('.') ? doc.title : `${doc.title}.txt`);
+  // The pane's workspace first, then wherever this file already lives,
+  // then the OS default. Saving into the folder you have open is what
+  // Save As is for most of the time.
+  const startIn = pane?.folder ?? (doc.path && doc.isLocal ? dirName(doc.path) : '');
+  const path = await App.SaveTextFileIn(startIn, suggested, doc.model.getValue());
+  if (!path) return false; // cancelled
+  retargetDoc(doc, { path, isLocal: true, remoteSessionId: null });
+  rememberRecentFile(path);
+  flashStatus(`Saved ${doc.title}`);
+  return true;
+}
+
+// Save As, but onto a host: the replacement for the old editor pane's
+// "Save As -> Remote path" menu, now a command like everything else.
+async function saveDocToRemote(doc: EditorDoc): Promise<boolean> {
+  const sessionId = doc.remoteSessionId ?? remoteTargetSessionId();
+  if (!sessionId) {
+    alert('No connected SSH session to save to. Connect one first, then try again.');
+    return false;
+  }
+  const suggested = doc.path && !doc.isLocal
+    ? doc.path
+    : (currentRemotePath === '.' ? doc.title : `${currentRemotePath}/${doc.title}`);
+  const path = prompt('Save to remote path:', suggested);
+  if (!path) return false; // cancelled
+  try {
+    await App.WriteRemoteFile(sessionId, path, doc.model.getValue());
+  } catch (err) {
+    flashStatus(`Save failed: ${err}`, true);
+    return false;
+  }
+  retargetDoc(doc, { path, isLocal: false, remoteSessionId: sessionId });
+  flashStatus(`Saved ${doc.title}`);
+  return true;
+}
+
+// Whichever host the file browser is currently pointed at, else any
+// live SSH session, so "save to remote" from a scratch buffer still has
+// somewhere obvious to go.
+function remoteTargetSessionId(): string | null {
+  if (currentRemoteSessionId) return currentRemoteSessionId;
+  for (const tab of tabs.values()) {
+    for (const session of allSessions(tab)) {
+      if (session.mode !== 'ssh' || session.status !== 'connected' || session.stopped) continue;
+      if (session.backendId) return session.backendId;
+    }
+  }
+  return null;
+}
+
+async function reloadDoc(doc: EditorDoc) {
+  if (!doc.path) return;
+  if (!doc.isLocal && !doc.remoteSessionId) return;
+  if (doc.dirty && !confirm(`Reload ${doc.title} from disk? Unsaved changes will be lost.`)) return;
+  try {
+    const content = doc.isLocal
+      ? await App.ReadLocalFile(doc.path)
+      : await App.ReadRemoteFile(doc.remoteSessionId!, doc.path);
+    // Through the model rather than the editor, so this lands on the
+    // right document even when it isn't the one on screen.
+    doc.model.setValue(content);
+    markDocSaved(doc);
+    flashStatus(`Reloaded ${doc.title}`);
+  } catch (err) {
+    flashStatus(`Reload failed: ${err}`, true);
   }
 }
 
-document.getElementById('editor-open-btn')!.addEventListener('click', () => { openLocalFile(); });
-document.getElementById('editor-save-btn')!.addEventListener('click', () => { saveCurrentFile(); });
+// Three-way, the way every editor asks: save and close, discard and
+// close, or don't close at all. confirm() only offers two of those, and
+// the missing third is the one that protects the work.
+function confirmDiscard(doc: EditorDoc): Promise<'save' | 'discard' | 'cancel'> {
+  return new Promise((resolve) => {
+    buildDialog({
+      title: 'Unsaved changes',
+      tone: 'warning',
+      onDismiss: () => resolve('cancel'),
+      fill: (body) => {
+        dialogText(body, `${doc.title} has changes that have not been saved.`);
+        if (doc.path) dialogField(body, doc.isLocal ? 'File' : 'Remote file', doc.path);
+      },
+      actions: [
+        { label: 'Discard', kind: 'danger', run: () => resolve('discard') },
+        { label: 'Cancel', kind: 'secondary', run: () => resolve('cancel') },
+        { label: 'Save', run: () => resolve('save') },
+      ],
+    });
+  });
+}
 
-const saveAsMenu = document.getElementById('editor-saveas-menu')!;
-document.getElementById('editor-saveas-btn')!.addEventListener('click', (e) => {
-  e.stopPropagation();
-  saveAsMenu.style.display = saveAsMenu.style.display === 'block' ? 'none' : 'block';
-});
-document.getElementById('editor-saveas-local')!.addEventListener('click', () => {
-  saveAsMenu.style.display = 'none';
-  saveAsLocal();
-});
-document.getElementById('editor-saveas-remote')!.addEventListener('click', () => {
-  saveAsMenu.style.display = 'none';
-  saveAsRemote();
-});
-document.addEventListener('click', () => { saveAsMenu.style.display = 'none'; });
+async function closeDoc(doc: EditorDoc): Promise<boolean> {
+  if (doc.dirty) {
+    const answer = await confirmDiscard(doc);
+    if (answer === 'cancel') return false;
+    if (answer === 'save' && !(await saveDoc(doc))) return false;
+  }
+  discardDoc(doc);
+  return true;
+}
 
-editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => { saveCurrentFile(); });
+// Removes a document with no prompting: used once closeDoc has settled
+// the unsaved-changes question.
+function discardDoc(doc: EditorDoc) {
+  const pane = editorPanes.get(doc.ownerPaneId);
+  editorDocs.delete(doc.id);
+  if (pane) {
+    const index = pane.docIds.indexOf(doc.id);
+    if (index >= 0) pane.docIds.splice(index, 1);
+    if (pane.activeDocId === doc.id) {
+      // Whatever slid into its place, else the one before it, which is
+      // what every editor does when you close the rightmost tab.
+      pane.activeDocId = pane.docIds[Math.min(index, pane.docIds.length - 1)] ?? null;
+      applyActiveDoc(pane);
+    }
+  }
+  // Disposed only after the editor has been pointed somewhere else:
+  // disposing a model that's still attached leaves Monaco holding a
+  // dead reference.
+  doc.model.dispose();
+  if (!pane) return;
+  renderDocBar(pane);
+  renderTabBar();
+}
+
+function cycleDoc(pane: EditorPane, delta: number) {
+  if (pane.docIds.length < 2) return;
+  const current = pane.activeDocId ? pane.docIds.indexOf(pane.activeDocId) : -1;
+  const next = (current + delta + pane.docIds.length) % pane.docIds.length;
+  setActiveDoc(pane, pane.docIds[next]);
+}
+
+function reorderDocs(pane: EditorPane, draggedId: string, targetId: string) {
+  const from = pane.docIds.indexOf(draggedId);
+  if (from < 0 || !pane.docIds.includes(targetId)) return;
+  pane.docIds.splice(from, 1);
+  pane.docIds.splice(pane.docIds.indexOf(targetId), 0, draggedId);
+  renderDocBar(pane);
+}
+
+// --- Editor pane rendering ---
+
+function renderDocBar(pane: EditorPane) {
+  pane.docBar.innerHTML = '';
+  pane.docBar.appendChild(buildFolderButton(pane));
+  for (const docId of pane.docIds) {
+    const doc = editorDocs.get(docId);
+    if (!doc) continue;
+    pane.docBar.appendChild(buildDocTab(pane, doc, docId === pane.activeDocId));
+  }
+  const add = document.createElement('div');
+  add.className = 'doc-add';
+  add.textContent = '+';
+  add.title = 'New file (Ctrl+N)';
+  add.onclick = () => { newUntitledDoc(pane); };
+  pane.docBar.appendChild(add);
+  refreshTreeHighlights(pane);
+}
+
+function buildDocTab(pane: EditorPane, doc: EditorDoc, isActive: boolean): HTMLDivElement {
+  const el = document.createElement('div');
+  el.className = 'doc-tab' + (isActive ? ' active' : '') + (doc.dirty ? ' dirty' : '');
+  el.draggable = true;
+  el.title = doc.path ?? `${doc.title} (never saved)`;
+  el.onclick = () => setActiveDoc(pane, doc.id);
+  // Middle-click closes, the same gesture the remote file list already
+  // uses for its own secondary action.
+  el.onauxclick = (e) => {
+    if (e.button !== 1) return;
+    e.preventDefault();
+    void closeDoc(doc);
+  };
+  el.addEventListener('dragstart', (event) => {
+    event.dataTransfer?.setData('text/specter-doc-id', doc.id);
+    el.classList.add('dragging');
+  });
+  el.addEventListener('dragend', () => {
+    el.classList.remove('dragging');
+    pane.docBar.querySelectorAll('.drop-target').forEach((item) => item.classList.remove('drop-target'));
+  });
+  el.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    el.classList.add('drop-target');
+  });
+  el.addEventListener('dragleave', () => el.classList.remove('drop-target'));
+  el.addEventListener('drop', (event) => {
+    event.preventDefault();
+    el.classList.remove('drop-target');
+    const draggedId = event.dataTransfer?.getData('text/specter-doc-id');
+    if (draggedId && draggedId !== doc.id) reorderDocs(pane, draggedId, doc.id);
+  });
+
+  if (!doc.isLocal) {
+    const remote = document.createElement('span');
+    remote.className = 'doc-remote';
+    remote.textContent = '\u{1F310}';
+    remote.title = 'On a remote host';
+    el.appendChild(remote);
+  }
+
+  const name = document.createElement('span');
+  name.className = 'doc-name';
+  name.textContent = doc.title;
+  el.appendChild(name);
+
+  const dot = document.createElement('span');
+  dot.className = 'doc-dot';
+  dot.textContent = '•';
+  el.appendChild(dot);
+
+  const close = document.createElement('span');
+  close.className = 'doc-close';
+  close.textContent = '✕';
+  close.title = 'Close file (Ctrl+W)';
+  close.onclick = (e) => {
+    e.stopPropagation();
+    void closeDoc(doc);
+  };
+  el.appendChild(close);
+  return el;
+}
+
+function renderRecentFiles(pane: EditorPane) {
+  pane.recentBox.innerHTML = '';
+  const folders = loadRecentFolders().filter((folder) => folder !== pane.folder);
+  if (folders.length > 0) {
+    pane.recentBox.appendChild(recentHead('Recent folders', false));
+    for (const folder of folders) {
+      pane.recentBox.appendChild(recentRow(folder, '\u{1F4C1}', () => { void openFolder(pane, folder); }));
+    }
+  }
+  const recent = loadRecentFiles();
+  if (recent.length === 0) return;
+  pane.recentBox.appendChild(recentHead('Recent files', folders.length > 0));
+  for (const path of recent) {
+    pane.recentBox.appendChild(recentRow(path, '', () => { void openLocalFile(path, pane); }));
+  }
+}
+
+function recentHead(text: string, spaced: boolean): HTMLDivElement {
+  const head = document.createElement('div');
+  head.className = 'editor-recent-head';
+  if (spaced) head.style.marginTop = '12px';
+  head.textContent = text;
+  return head;
+}
+
+function recentRow(path: string, glyph: string, run: () => void): HTMLDivElement {
+  const row = document.createElement('div');
+  row.className = 'editor-recent-row';
+  row.title = path;
+  const name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = glyph ? `${glyph} ${baseName(path)}` : baseName(path);
+  const dir = document.createElement('span');
+  dir.className = 'dir';
+  dir.textContent = dirName(path);
+  row.append(name, dir);
+  row.onclick = run;
+  return row;
+}
+
+// The status bar is the discoverable half of the editor: every readout
+// on it is also the control that changes what it reports.
+function renderEditorStatusBar(pane: EditorPane) {
+  pane.statusBar.innerHTML = '';
+  pane.positionEl = null;
+  const doc = pane.activeDocId ? editorDocs.get(pane.activeDocId) : null;
+
+  const path = document.createElement('span');
+  path.className = 'es-path';
+  if (!doc) path.textContent = 'No file open';
+  else if (!doc.path) path.textContent = `${doc.title} — not saved yet`;
+  else path.textContent = doc.isLocal ? doc.path : `remote: ${doc.path}`;
+  path.title = path.textContent;
+  if (doc?.dirty) {
+    const marker = document.createElement('span');
+    marker.className = 'es-dirty';
+    marker.textContent = ' • unsaved';
+    path.appendChild(marker);
+  }
+  pane.statusBar.appendChild(path);
+  if (!doc) return;
+
+  pane.positionEl = statusItem(pane, '', 'Go to line (Ctrl+G)', () => runEditorAction(pane, 'editor.action.gotoLine'));
+  updateStatusPosition(pane);
+  statusItem(pane, indentLabel(doc), 'Change indentation', () => chooseIndentation(pane));
+  statusItem(pane, doc.model.getEOL() === '\r\n' ? 'CRLF' : 'LF', 'Change line endings', () => chooseLineEndings(pane));
+  statusItem(pane, languageLabel(doc.model.getLanguageId()), 'Change language', () => chooseLanguage(pane));
+  statusItem(pane, editorPrefs.wordWrap ? 'Wrap' : 'No wrap', 'Toggle word wrap (Alt+Z)', toggleWordWrap);
+}
+
+function statusItem(pane: EditorPane, text: string, title: string, run: () => void): HTMLElement {
+  const el = document.createElement('span');
+  el.className = 'es-item';
+  el.textContent = text;
+  el.title = title;
+  el.onclick = run;
+  pane.statusBar.appendChild(el);
+  return el;
+}
+
+function indentLabel(doc: EditorDoc): string {
+  const options = doc.model.getOptions();
+  return options.insertSpaces ? `Spaces: ${options.tabSize}` : `Tab width: ${options.tabSize}`;
+}
+
+// Only the cursor readout changes as you type, so it's written in place
+// rather than rebuilding the whole bar on every keystroke.
+function updateStatusPosition(pane: EditorPane) {
+  if (!pane.positionEl) return;
+  const position = pane.editor.getPosition();
+  if (!position) {
+    pane.positionEl.textContent = '';
+    return;
+  }
+  const selection = pane.editor.getSelection();
+  const model = pane.editor.getModel();
+  const selected = selection && model && !selection.isEmpty()
+    ? model.getValueInRange(selection).length
+    : 0;
+  pane.positionEl.textContent = `Ln ${position.lineNumber}, Col ${position.column}`
+    + (selected ? ` (${selected} selected)` : '');
+}
+
+// --- Editor workspaces (SPE-105) ---
+// A folder opened inside one editor pane, with a tree beside the
+// buffer. Open File and Save As start there, and Go to File reaches
+// anything the tree has already listed.
+
+const RECENT_FOLDERS_LIMIT = 8;
+
+function loadRecentFolders(): string[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('specter-editor-recent-folders') || '[]');
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry): entry is string => typeof entry === 'string');
+  } catch {
+    return [];
+  }
+}
+
+function rememberRecentFolder(folder: string) {
+  const next = [folder, ...loadRecentFolders().filter((entry) => entry !== folder)].slice(0, RECENT_FOLDERS_LIMIT);
+  localStorage.setItem('specter-editor-recent-folders', JSON.stringify(next));
+}
+
+async function chooseFolder(pane: EditorPane) {
+  const folder = await App.SelectFolder();
+  if (!folder) return; // cancelled
+  await openFolder(pane, folder);
+}
+
+async function openFolder(pane: EditorPane, folder: string) {
+  pane.folder = folder;
+  pane.expanded = new Set([folder]);
+  pane.treeCache.clear();
+  pane.root.classList.add('has-folder');
+  rememberRecentFolder(folder);
+  renderRecentFiles(pane);
+  renderDocBar(pane);
+  renderFolderList();
+  await renderEditorTree(pane);
+  pane.editor.layout();
+}
+
+function closeFolder(pane: EditorPane) {
+  pane.folder = null;
+  pane.expanded.clear();
+  pane.treeCache.clear();
+  pane.root.classList.remove('has-folder');
+  pane.tree.innerHTML = '';
+  renderRecentFiles(pane);
+  renderDocBar(pane);
+  renderFolderList();
+  pane.editor.layout();
+}
+
+async function refreshFolder(pane: EditorPane) {
+  pane.treeCache.clear();
+  await renderEditorTree(pane);
+}
+
+async function renderEditorTree(pane: EditorPane) {
+  pane.tree.innerHTML = '';
+  const folder = pane.folder;
+  if (!folder) return;
+
+  const head = document.createElement('div');
+  head.className = 'editor-tree-head';
+  const name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = baseName(folder);
+  name.title = folder;
+  head.appendChild(name);
+  head.appendChild(treeAction('⟳', 'Reread this folder from disk', () => { void refreshFolder(pane); }));
+  head.appendChild(treeAction('\u{1F4C1}', 'Open a different folder', () => { void chooseFolder(pane); }));
+  head.appendChild(treeAction('✕', 'Close this folder', () => closeFolder(pane)));
+  pane.tree.appendChild(head);
+
+  const body = document.createElement('div');
+  pane.tree.appendChild(body);
+  await appendTreeLevel(pane, body, folder, 0);
+}
+
+function treeAction(glyph: string, title: string, run: () => void): HTMLSpanElement {
+  const el = document.createElement('span');
+  el.className = 'act';
+  el.textContent = glyph;
+  el.title = title;
+  el.onclick = run;
+  return el;
+}
+
+function treeNote(text: string, depth: number): HTMLDivElement {
+  const note = document.createElement('div');
+  note.className = 'editor-tree-note';
+  note.style.paddingLeft = `${12 + depth * 12}px`;
+  note.textContent = text;
+  return note;
+}
+
+async function appendTreeLevel(pane: EditorPane, parent: HTMLElement, dir: string, depth: number) {
+  let entries = pane.treeCache.get(dir);
+  if (!entries) {
+    try {
+      entries = await App.ListLocalDir(dir);
+    } catch (err) {
+      // A folder that can't be read is worth saying so in place, rather
+      // than an empty level that looks like an empty directory.
+      parent.appendChild(treeNote(String(err), depth));
+      return;
+    }
+    pane.treeCache.set(dir, entries);
+  }
+  if (entries.length === 0) {
+    parent.appendChild(treeNote('empty', depth));
+    return;
+  }
+  const openPaths = new Set(Array.from(editorDocs.values(), (doc) => doc.path));
+  for (const entry of entries) {
+    const row = document.createElement('div');
+    row.className = 'tree-row' + (!entry.isDir && openPaths.has(entry.path) ? ' open' : '');
+    row.style.paddingLeft = `${8 + depth * 12}px`;
+    row.title = entry.path;
+    const chev = document.createElement('span');
+    chev.className = 'chev';
+    chev.textContent = entry.isDir ? (pane.expanded.has(entry.path) ? '▾' : '▸') : '';
+    const label = document.createElement('span');
+    label.className = 'name';
+    label.textContent = entry.name;
+    row.append(chev, label);
+    row.onclick = () => {
+      if (!entry.isDir) {
+        void openLocalFile(entry.path, pane);
+        return;
+      }
+      if (pane.expanded.has(entry.path)) pane.expanded.delete(entry.path);
+      else pane.expanded.add(entry.path);
+      void renderEditorTree(pane);
+    };
+    parent.appendChild(row);
+    if (entry.isDir && pane.expanded.has(entry.path)) {
+      const child = document.createElement('div');
+      parent.appendChild(child);
+      await appendTreeLevel(pane, child, entry.path, depth + 1);
+    }
+  }
+}
+
+// Which tree rows are currently open as documents. Toggled in place
+// rather than through a full re-render, since this runs every time a
+// document is opened, closed or switched.
+function refreshTreeHighlights(pane: EditorPane) {
+  if (!pane.folder) return;
+  const openPaths = new Set(Array.from(editorDocs.values(), (doc) => doc.path));
+  pane.tree.querySelectorAll('.tree-row').forEach((row) => {
+    const rowPath = (row as HTMLElement).title;
+    row.classList.toggle('open', !!rowPath && openPaths.has(rowPath));
+  });
+}
+
+// SPE-106: folders pinned to the sidebar are the editor's counterpart
+// to saved sessions, so the two reach each other: pinning one opens it,
+// and the editor's own folder menu lists them.
+
+function folderLabel(folder: Folder): string {
+  return folder.name || baseName(folder.path);
+}
+
+async function renderFolderList() {
+  let folders: Folder[];
+  try {
+    folders = await App.ListFolders();
+  } catch {
+    return;
+  }
+  const list = document.getElementById('folder-list')!;
+  list.innerHTML = '';
+
+  // The filter field covers the whole panel, not just the Sessions
+  // section, same as the local shells list above.
+  const query = sessionSearchQuery.trim().toLowerCase();
+  const visible = query
+    ? folders.filter((f) => folderLabel(f).toLowerCase().includes(query) || f.path.toLowerCase().includes(query))
+    : folders;
+
+  document.getElementById('folders-count')!.textContent = String(folders.length);
+
+  if (visible.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'side-empty';
+    empty.textContent = query ? 'No folders match.' : 'No folders pinned yet.';
+    list.appendChild(empty);
+    return;
+  }
+
+  const openFolders = new Set(Array.from(editorPanes.values(), (pane) => pane.folder));
+  for (const folder of visible) {
+    list.appendChild(buildFolderRow(folder, openFolders.has(folder.path)));
+  }
+}
+
+function buildFolderRow(folder: Folder, isOpen: boolean): HTMLDivElement {
+  const row = document.createElement('div');
+  row.className = 'side-row' + (isOpen ? ' folder-open' : '');
+  row.tabIndex = -1;
+  row.title = isOpen ? `${folder.path} — open in an editor` : folder.path;
+
+  const icon = document.createElement('span');
+  icon.className = 'side-dot';
+  icon.style.cssText = 'box-shadow:none;background:transparent;width:auto;height:auto;font-size:10px;line-height:1;';
+  icon.textContent = '\u{1F4C1}';
+  row.appendChild(icon);
+
+  const name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = folderLabel(folder);
+  row.appendChild(name);
+
+  const rename = document.createElement('span');
+  rename.className = 'act neutral';
+  rename.textContent = '✎';
+  rename.title = 'Rename';
+  rename.onclick = async (e) => {
+    e.stopPropagation();
+    const next = prompt('Name for this folder:', folderLabel(folder));
+    if (next === null) return; // cancelled
+    await App.SaveFolder({ ...folder, name: next.trim() });
+    renderFolderList();
+  };
+  row.appendChild(rename);
+
+  const unpin = document.createElement('span');
+  unpin.className = 'act';
+  unpin.textContent = '✕';
+  // No confirmation: this is a bookmark, the folder itself is untouched
+  // and re-pinning it is one click away.
+  unpin.title = 'Unpin (the folder itself is left alone)';
+  unpin.onclick = async (e) => {
+    e.stopPropagation();
+    await App.DeleteFolder(folder.id);
+    renderFolderList();
+  };
+  row.appendChild(unpin);
+
+  row.onclick = () => { void openFolderInEditor(folder.path); };
+  return row;
+}
+
+// Opens a folder in whichever editor has focus, else the last one used,
+// else a new editor session: the same way opening a file picks where it
+// lands.
+async function openFolderInEditor(path: string) {
+  await openFolder(editorPaneForOpening(), path);
+}
+
+async function pinFolder() {
+  const path = await App.SelectFolder();
+  if (!path) return; // cancelled
+  const existing = (await App.ListFolders()).find((folder) => folder.path === path);
+  if (!existing) await App.SaveFolder({ id: '', path });
+  await renderFolderList();
+  await openFolderInEditor(path);
+}
+
+function buildFolderButton(pane: EditorPane): HTMLDivElement {
+  const button = document.createElement('div');
+  button.className = 'doc-folder' + (pane.folder ? ' active' : '');
+  const glyph = document.createElement('span');
+  glyph.textContent = '\u{1F4C1}';
+  const label = document.createElement('span');
+  label.textContent = pane.folder ? baseName(pane.folder) : 'Open Folder';
+  const caret = document.createElement('span');
+  caret.className = 'caret';
+  caret.textContent = '▾';
+  button.append(glyph, label, caret);
+  button.title = pane.folder ?? 'Open a folder in this editor';
+  button.onclick = (e) => {
+    e.stopPropagation();
+    void openFolderMenu(pane, button);
+  };
+  return button;
+}
+
+async function openFolderMenu(pane: EditorPane, anchor: HTMLElement) {
+  document.getElementById('folder-menu')?.remove();
+  // Fetched before the menu is built rather than after, so pinned
+  // folders don't pop in underneath a menu that's already on screen.
+  let pinned: Folder[] = [];
+  try {
+    pinned = await App.ListFolders();
+  } catch {
+    // The menu's own actions work with or without the pinned list.
+  }
+
+  const menu = document.createElement('div');
+  menu.id = 'folder-menu';
+  menu.className = 'popup-menu';
+  const rect = anchor.getBoundingClientRect();
+  menu.style.top = `${rect.bottom + 2}px`;
+  menu.style.left = `${rect.left}px`;
+
+  popupMenuItem(menu, '\u{1F4C1}', 'Open Folder…', () => { void chooseFolder(pane); });
+  if (pane.folder) {
+    popupMenuItem(menu, '⟳', 'Refresh folder', () => { void refreshFolder(pane); });
+    popupMenuItem(menu, '\u{1F4CC}', 'Pin this folder to the sidebar', () => { void pinCurrentFolder(pane); });
+    popupMenuItem(menu, '✕', 'Close folder', () => closeFolder(pane));
+  }
+
+  const others = pinned.filter((folder) => folder.path !== pane.folder);
+  if (others.length > 0) {
+    const separator = document.createElement('div');
+    separator.className = 'separator';
+    menu.appendChild(separator);
+    for (const folder of others) {
+      popupMenuItem(menu, '\u{1F4C1}', folderLabel(folder), () => { void openFolder(pane, folder.path); });
+    }
+  }
+
+  document.body.appendChild(menu);
+  attachMenuAutoClose(menu);
+}
+
+async function pinCurrentFolder(pane: EditorPane) {
+  const folder = pane.folder;
+  if (!folder) return;
+  const existing = (await App.ListFolders()).find((entry) => entry.path === folder);
+  if (!existing) await App.SaveFolder({ id: '', path: folder });
+  await renderFolderList();
+  flashStatus(`Pinned ${baseName(folder)}`);
+}
+
+// --- Quick pick (SPE-103) ---
+// One filtered list widget behind Go to File, the command palette and
+// the language picker. Three near-copies of the same list is how they
+// end up behaving differently from each other.
+
+type QuickPickItem = {
+  label: string;
+  detail?: string;
+  hint?: string;
+  run: () => void;
+};
+
+let quickPickItems: QuickPickItem[] = [];
+let quickPickMatches: QuickPickItem[] = [];
+let quickPickSelected = 0;
+// Focus goes back where it came from when the list is dismissed rather
+// than acted on.
+let quickPickReturnPane: EditorPane | null = null;
+
+// Subsequence match with a bonus for consecutive characters and for
+// matches at a word boundary, so "mts" finds "main.ts" and typing the
+// start of a name still beats an incidental match buried in the middle
+// of a longer one. -1 means no match at all.
+function fuzzyScore(text: string, query: string): number {
+  if (!query) return 0;
+  const haystack = text.toLowerCase();
+  let score = 0;
+  let from = 0;
+  let previous = -2;
+  for (const char of query.toLowerCase()) {
+    const at = haystack.indexOf(char, from);
+    if (at < 0) return -1;
+    if (at === previous + 1) score += 5;
+    if (at === 0 || /[^a-z0-9]/.test(haystack[at - 1])) score += 3;
+    score += 1;
+    previous = at;
+    from = at + 1;
+  }
+  return score;
+}
+
+function quickPickIsOpen(): boolean {
+  return document.getElementById('quickpick-overlay')!.classList.contains('open');
+}
+
+function openQuickPick(placeholder: string, items: QuickPickItem[]) {
+  quickPickItems = items;
+  quickPickSelected = 0;
+  quickPickReturnPane = focusedEditorPane();
+  const input = document.getElementById('quickpick-input') as HTMLInputElement;
+  input.value = '';
+  input.placeholder = placeholder;
+  document.getElementById('quickpick-overlay')!.classList.add('open');
+  renderQuickPick();
+  input.focus();
+}
+
+function closeQuickPick(restoreFocus: boolean) {
+  document.getElementById('quickpick-overlay')!.classList.remove('open');
+  quickPickItems = [];
+  quickPickMatches = [];
+  const pane = quickPickReturnPane;
+  quickPickReturnPane = null;
+  if (restoreFocus && pane && editorPanes.has(pane.session.id)) pane.editor.focus();
+}
+
+function renderQuickPick() {
+  const query = (document.getElementById('quickpick-input') as HTMLInputElement).value.trim();
+  quickPickMatches = query
+    ? quickPickItems
+      .map((item) => ({ item, score: Math.max(fuzzyScore(item.label, query), fuzzyScore(item.detail ?? '', query) - 2) }))
+      .filter((scored) => scored.score >= 0)
+      .sort((a, b) => b.score - a.score)
+      .map((scored) => scored.item)
+    : quickPickItems.slice();
+  if (quickPickSelected >= quickPickMatches.length) quickPickSelected = Math.max(0, quickPickMatches.length - 1);
+
+  const list = document.getElementById('quickpick-list')!;
+  list.innerHTML = '';
+  if (quickPickMatches.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'qp-empty';
+    empty.textContent = 'No matches';
+    list.appendChild(empty);
+    return;
+  }
+  quickPickMatches.forEach((item, index) => {
+    const row = document.createElement('div');
+    row.className = 'qp-row' + (index === quickPickSelected ? ' selected' : '');
+    const label = document.createElement('span');
+    label.className = 'qp-label';
+    label.textContent = item.label;
+    row.appendChild(label);
+    if (item.detail) {
+      const detail = document.createElement('span');
+      detail.className = 'qp-detail';
+      detail.textContent = item.detail;
+      row.appendChild(detail);
+    }
+    if (item.hint) {
+      const hint = document.createElement('span');
+      hint.className = 'qp-hint';
+      hint.textContent = item.hint;
+      row.appendChild(hint);
+    }
+    // mousedown, not click: the input would lose focus first and the
+    // overlay's own dismiss handler would race the selection.
+    row.onmousedown = (e) => {
+      e.preventDefault();
+      runQuickPick(index);
+    };
+    list.appendChild(row);
+  });
+  list.querySelector('.qp-row.selected')?.scrollIntoView({ block: 'nearest' });
+}
+
+function runQuickPick(index: number) {
+  const item = quickPickMatches[index];
+  closeQuickPick(false);
+  item?.run();
+}
+
+(() => {
+  const input = document.getElementById('quickpick-input') as HTMLInputElement;
+  input.addEventListener('input', () => {
+    quickPickSelected = 0;
+    renderQuickPick();
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeQuickPick(true);
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      runQuickPick(quickPickSelected);
+      return;
+    }
+    const step = e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0;
+    if (step === 0 || quickPickMatches.length === 0) return;
+    e.preventDefault();
+    quickPickSelected = (quickPickSelected + step + quickPickMatches.length) % quickPickMatches.length;
+    renderQuickPick();
+  });
+  const overlay = document.getElementById('quickpick-overlay')!;
+  overlay.addEventListener('mousedown', (e) => {
+    if (e.target !== overlay) return;
+    closeQuickPick(true);
+  });
+})();
+
+// --- Editor commands (SPE-103) ---
+
+function runEditorAction(pane: EditorPane, id: string) {
+  pane.editor.focus();
+  void pane.editor.getAction(id)?.run();
+}
+
+function toggleWordWrap() {
+  editorPrefs.wordWrap = !editorPrefs.wordWrap;
+  saveEditorPrefs();
+  updateAllEditors({ wordWrap: editorPrefs.wordWrap ? 'on' : 'off' });
+  for (const pane of editorPanes.values()) renderEditorStatusBar(pane);
+}
+
+function toggleMinimap() {
+  editorPrefs.minimap = !editorPrefs.minimap;
+  saveEditorPrefs();
+  updateAllEditors({ minimap: { enabled: editorPrefs.minimap } });
+}
+
+function toggleWhitespace() {
+  editorPrefs.whitespace = !editorPrefs.whitespace;
+  saveEditorPrefs();
+  updateAllEditors({ renderWhitespace: editorPrefs.whitespace ? 'all' : 'selection' });
+}
+
+function chooseIndentation(pane: EditorPane) {
+  const doc = pane.activeDocId ? editorDocs.get(pane.activeDocId) : null;
+  if (!doc) return;
+  const items: QuickPickItem[] = [];
+  for (const insertSpaces of [true, false]) {
+    for (const size of [2, 4, 8]) {
+      items.push({
+        label: insertSpaces ? `Spaces: ${size}` : `Tab width: ${size}`,
+        run: () => {
+          doc.model.updateOptions({ insertSpaces, tabSize: size });
+          editorPrefs.insertSpaces = insertSpaces;
+          editorPrefs.tabSize = size;
+          saveEditorPrefs();
+          renderEditorStatusBar(pane);
+        },
+      });
+    }
+  }
+  items.push(
+    { label: 'Convert existing indentation to spaces', run: () => runEditorAction(pane, 'editor.action.indentationToSpaces') },
+    { label: 'Convert existing indentation to tabs', run: () => runEditorAction(pane, 'editor.action.indentationToTabs') },
+    { label: 'Detect indentation from the file', run: () => runEditorAction(pane, 'editor.action.detectIndentation') },
+  );
+  openQuickPick('Indentation', items);
+}
+
+function chooseLineEndings(pane: EditorPane) {
+  const doc = pane.activeDocId ? editorDocs.get(pane.activeDocId) : null;
+  if (!doc) return;
+  openQuickPick('Line endings', [
+    {
+      label: 'LF',
+      detail: 'Unix, and what a Linux host expects',
+      run: () => {
+        doc.model.pushEOL(monaco.editor.EndOfLineSequence.LF);
+        renderEditorStatusBar(pane);
+      },
+    },
+    {
+      label: 'CRLF',
+      detail: 'Windows',
+      run: () => {
+        doc.model.pushEOL(monaco.editor.EndOfLineSequence.CRLF);
+        renderEditorStatusBar(pane);
+      },
+    },
+  ]);
+}
+
+function chooseLanguage(pane: EditorPane) {
+  const doc = pane.activeDocId ? editorDocs.get(pane.activeDocId) : null;
+  if (!doc) return;
+  const items = monaco.languages.getLanguages()
+    .map((lang) => ({
+      label: lang.aliases?.[0] || lang.id,
+      detail: (lang.extensions ?? []).slice(0, 4).join(' '),
+      run: () => {
+        monaco.editor.setModelLanguage(doc.model, lang.id);
+        renderEditorStatusBar(pane);
+      },
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+  openQuickPick('Select a language', items);
+}
+
+function openGoToFile(pane: EditorPane) {
+  const items: QuickPickItem[] = [];
+  for (const docId of pane.docIds) {
+    const doc = editorDocs.get(docId);
+    if (!doc) continue;
+    items.push({
+      label: doc.title,
+      detail: doc.path ? dirName(doc.path) : 'not saved yet',
+      hint: doc.dirty ? 'unsaved' : 'open',
+      run: () => setActiveDoc(pane, doc.id),
+    });
+  }
+  const openPaths = new Set(Array.from(editorDocs.values(), (doc) => doc.path));
+  // Everything the workspace tree has listed so far, so Go to File
+  // reaches the folder you opened and not only what you've had open.
+  const offered = new Set<string>();
+  for (const entries of pane.treeCache.values()) {
+    for (const entry of entries) {
+      if (entry.isDir || openPaths.has(entry.path) || offered.has(entry.path)) continue;
+      offered.add(entry.path);
+      items.push({
+        label: entry.name,
+        detail: dirName(entry.path),
+        hint: 'folder',
+        run: () => { void openLocalFile(entry.path, pane); },
+      });
+    }
+  }
+  for (const path of loadRecentFiles()) {
+    if (openPaths.has(path) || offered.has(path)) continue;
+    items.push({
+      label: baseName(path),
+      detail: dirName(path),
+      hint: 'recent',
+      run: () => { void openLocalFile(path, pane); },
+    });
+  }
+  items.push({ label: 'Open File…', hint: 'Ctrl+O', run: () => { void openLocalFile(undefined, pane); } });
+  openQuickPick('Go to file', items);
+}
+
+function openCommandPalette(pane: EditorPane) {
+  const doc = pane.activeDocId ? editorDocs.get(pane.activeDocId) : null;
+  const items: QuickPickItem[] = [
+    { label: 'New File', hint: 'Ctrl+N', run: () => { newUntitledDoc(pane); } },
+    { label: 'Open File…', hint: 'Ctrl+O', run: () => { void openLocalFile(undefined, pane); } },
+    { label: 'Go to File…', hint: 'Ctrl+P', run: () => openGoToFile(pane) },
+    { label: 'Open Folder…', detail: pane.folder ?? 'no folder open in this pane', run: () => { void chooseFolder(pane); } },
+  ];
+  if (pane.folder) {
+    items.push(
+      { label: 'Refresh Folder', detail: pane.folder, run: () => { void refreshFolder(pane); } },
+      { label: 'Close Folder', detail: pane.folder, run: () => closeFolder(pane) },
+    );
+  }
+  if (doc) {
+    items.push(
+      { label: 'Save', hint: 'Ctrl+S', run: () => { void saveDoc(doc); } },
+      { label: 'Save As…', hint: 'Ctrl+Shift+S', run: () => { void saveDocAs(doc); } },
+      { label: 'Save to Remote Host…', detail: 'write this buffer over SFTP', run: () => { void saveDocToRemote(doc); } },
+      { label: 'Reload From Disk', detail: doc.path ?? 'nothing to reload from', run: () => { void reloadDoc(doc); } },
+      { label: 'Close File', hint: 'Ctrl+W', run: () => { void closeDoc(doc); } },
+      { label: 'Copy File Path', run: () => { if (doc.path) void navigator.clipboard.writeText(doc.path); } },
+      { label: 'Find', hint: 'Ctrl+F', run: () => runEditorAction(pane, 'actions.find') },
+      { label: 'Replace', hint: 'Ctrl+H', run: () => runEditorAction(pane, 'editor.action.startFindReplaceAction') },
+      { label: 'Go to Line…', hint: 'Ctrl+G', run: () => runEditorAction(pane, 'editor.action.gotoLine') },
+      { label: 'Go to Symbol…', run: () => runEditorAction(pane, 'editor.action.quickOutline') },
+      { label: 'Format Document', hint: 'Shift+Alt+F', run: () => runEditorAction(pane, 'editor.action.formatDocument') },
+      { label: 'Toggle Line Comment', hint: 'Ctrl+/', run: () => runEditorAction(pane, 'editor.action.commentLine') },
+      { label: 'Trim Trailing Whitespace', run: () => trimTrailingWhitespace(pane, doc) },
+      { label: 'Sort Lines Ascending', run: () => runEditorAction(pane, 'editor.action.sortLinesAscending') },
+      { label: 'Sort Lines Descending', run: () => runEditorAction(pane, 'editor.action.sortLinesDescending') },
+      { label: 'Transform to Uppercase', run: () => runEditorAction(pane, 'editor.action.transformToUppercase') },
+      { label: 'Transform to Lowercase', run: () => runEditorAction(pane, 'editor.action.transformToLowercase') },
+      { label: 'Fold All', run: () => runEditorAction(pane, 'editor.foldAll') },
+      { label: 'Unfold All', run: () => runEditorAction(pane, 'editor.unfoldAll') },
+      { label: 'Set Language…', detail: languageLabel(doc.model.getLanguageId()), run: () => chooseLanguage(pane) },
+      { label: 'Set Indentation…', detail: indentLabel(doc), run: () => chooseIndentation(pane) },
+      { label: 'Set Line Endings…', detail: doc.model.getEOL() === '\r\n' ? 'CRLF' : 'LF', run: () => chooseLineEndings(pane) },
+    );
+  }
+  items.push(
+    { label: `Word Wrap: ${editorPrefs.wordWrap ? 'on' : 'off'}`, hint: 'Alt+Z', run: toggleWordWrap },
+    { label: `Minimap: ${editorPrefs.minimap ? 'on' : 'off'}`, run: toggleMinimap },
+    { label: `Render Whitespace: ${editorPrefs.whitespace ? 'always' : 'in selection'}`, run: toggleWhitespace },
+    { label: 'All Editor Commands…', detail: "Monaco's own palette, everything not listed here", hint: 'F1', run: () => runEditorAction(pane, 'editor.action.quickCommand') },
+  );
+  openQuickPick('Editor command', items);
+}
+
+// Monaco has no built-in action for this, and it's the one cleanup that
+// actually matters when writing a config file straight onto a host.
+function trimTrailingWhitespace(pane: EditorPane, doc: EditorDoc) {
+  const model = doc.model;
+  const edits: monaco.editor.IIdentifiedSingleEditOperation[] = [];
+  for (let line = 1; line <= model.getLineCount(); line += 1) {
+    const text = model.getLineContent(line);
+    const trimmed = text.replace(/[ \t]+$/, '');
+    if (trimmed.length === text.length) continue;
+    edits.push({ range: new monaco.Range(line, trimmed.length + 1, line, text.length + 1), text: '' });
+  }
+  if (edits.length === 0) {
+    flashStatus('No trailing whitespace');
+    return;
+  }
+  model.pushEditOperations(null, edits, () => null);
+  pane.editor.focus();
+  flashStatus(`Trimmed ${edits.length} line${edits.length === 1 ? '' : 's'}`);
+}
+
+// Registered per editor instance rather than on the document, so they
+// only fire while that editor genuinely has focus. The document-level
+// fallback below covers the document strip and the empty state, where
+// nothing in Monaco is focused.
+function registerEditorKeybindings(pane: EditorPane) {
+  const withDoc = (run: (doc: EditorDoc) => void) => () => {
+    const doc = pane.activeDocId ? editorDocs.get(pane.activeDocId) : null;
+    if (doc) run(doc);
+  };
+  pane.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, withDoc((doc) => { void saveDoc(doc); }));
+  pane.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyS, withDoc((doc) => { void saveDocAs(doc); }));
+  pane.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyW, withDoc((doc) => { void closeDoc(doc); }));
+  pane.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyN, () => { newUntitledDoc(pane); });
+  pane.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyO, () => { void openLocalFile(undefined, pane); });
+  pane.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyP, () => openGoToFile(pane));
+  pane.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyP, () => openCommandPalette(pane));
+  pane.editor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.KeyZ, toggleWordWrap);
+  pane.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.PageDown, () => cycleDoc(pane, 1));
+  pane.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.PageUp, () => cycleDoc(pane, -1));
+}
+
+// Fallback for when an editor pane is focused but Monaco itself is not
+// (the document strip, the empty state's buttons). Deliberately narrow:
+// anything typed into a field elsewhere in the app, and anything at all
+// while the quick pick is open, is none of the editor's business.
+document.addEventListener('keydown', (e) => {
+  const pane = focusedEditorPane();
+  if (!pane || quickPickIsOpen() || pane.editor.hasTextFocus()) return;
+  const target = e.target as HTMLElement | null;
+  if (target && target !== document.body && !pane.root.contains(target)) return;
+  if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+  const doc = pane.activeDocId ? editorDocs.get(pane.activeDocId) : null;
+  const key = e.key.toLowerCase();
+  if (e.shiftKey) {
+    if (key === 's' && doc) { e.preventDefault(); void saveDocAs(doc); }
+    else if (key === 'p') { e.preventDefault(); openCommandPalette(pane); }
+    return;
+  }
+  if (key === 's' && doc) { e.preventDefault(); void saveDoc(doc); }
+  else if (key === 'n') { e.preventDefault(); newUntitledDoc(pane); }
+  else if (key === 'o') { e.preventDefault(); void openLocalFile(undefined, pane); }
+  else if (key === 'w' && doc) { e.preventDefault(); void closeDoc(doc); }
+  else if (key === 'p') { e.preventDefault(); openGoToFile(pane); }
+});
+
+// Sessions menu and the New Session picker. From the split-pane picker
+// this fills that pane, so an editor can sit beside a live shell;
+// otherwise it becomes a whole editor tab.
+function newEditorSession() {
+  const target = pendingPaneTarget;
+  if (!target) {
+    newUntitledDoc(newEditorTabPane());
+    return;
+  }
+  pendingPaneTarget = null;
+  const tab = tabs.get(target.ownerTabId);
+  if (!tab) return;
+  createEditorForSession(target, tab);
+  focusPane(tab, paneIndexOf(tab, target));
+  switchToTab(tab.id);
+  newUntitledDoc(editorPanes.get(target.id)!);
+}
+
+// Tools -> Text Editor: adds a file to the editor you already have
+// rather than stacking up another one on every click.
+function newFileInEditor() {
+  newUntitledDoc(editorPaneForOpening());
+}
+
+// --- Splitting a tab into another terminal or an editor (SPE-104) ---
+// Opening a second shell beside the one you're already in used to mean
+// the whole New Session picker, or the View menu's layout commands
+// followed by a picker inside the new pane. This is the one control
+// that does the common cases directly, and it's also how an editor
+// ends up next to a live terminal rather than in a tab of its own.
+
+type SplitDirection = 'right' | 'below';
+
+// Where a new terminal or editor should go: an empty pane the person
+// already made if there is one (filling that beats growing the grid
+// again beside it), otherwise one more cell.
+async function claimSplitPane(tab: Tab, direction: SplitDirection): Promise<Pane | null> {
+  const existing = tab.extraPanes.find((pane) => pane.mode === 'pending');
+  if (existing) return existing;
+  if (tab.layout === '4') {
+    alert('This tab is already split four ways. Close a pane first, or use another tab.');
+    return null;
+  }
+  await setTabLayout(tab, tab.layout === 'single' ? (direction === 'right' ? '2v' : '2h') : '4');
+  return tab.extraPanes.find((pane) => pane.mode === 'pending') ?? null;
+}
+
+async function splitWithLocalShell(tab: Tab, direction: SplitDirection) {
+  const pane = await claimSplitPane(tab, direction);
+  if (!pane) return;
+  // startLocalShellInActiveTab reads pendingPaneTarget synchronously
+  // before its first await, so restoring it afterwards is safe.
+  const previous = pendingPaneTarget;
+  pendingPaneTarget = pane;
+  try {
+    await startLocalShellInActiveTab('', 'Local shell');
+  } finally {
+    pendingPaneTarget = previous;
+  }
+}
+
+async function splitWithDuplicate(tab: Tab, direction: SplitDirection) {
+  const source = focusedSession(tab);
+  if (!source.duplicate) return;
+  const pane = await claimSplitPane(tab, direction);
+  if (!pane) return;
+  await source.duplicate(pane);
+}
+
+async function splitWithEditor(tab: Tab, direction: SplitDirection) {
+  const pane = await claimSplitPane(tab, direction);
+  if (!pane) return;
+  createEditorForSession(pane, tab);
+  focusPane(tab, paneIndexOf(tab, pane));
+  switchToTab(tab.id);
+  newUntitledDoc(editorPanes.get(pane.id)!);
+}
+
+async function splitWithPicker(tab: Tab, direction: SplitDirection) {
+  const pane = await claimSplitPane(tab, direction);
+  if (!pane) return;
+  openSplitPanePicker(pane);
+}
+
+function popupMenuItem(menu: HTMLElement, glyph: string, label: string, run: () => void) {
+  const item = document.createElement('div');
+  item.className = 'item';
+  const icon = document.createElement('span');
+  icon.className = 'glyph';
+  icon.textContent = glyph;
+  const text = document.createElement('span');
+  text.textContent = label;
+  item.append(icon, text);
+  item.onclick = () => {
+    menu.remove();
+    run();
+  };
+  menu.appendChild(item);
+}
+
+function openSplitMenu(anchor: HTMLElement) {
+  document.getElementById('split-menu')?.remove();
+  const tab = activeTabId ? tabs.get(activeTabId) : null;
+  if (!tab || tab.isHome || tab.mode === 'pending') return;
+
+  const menu = document.createElement('div');
+  menu.id = 'split-menu';
+  menu.className = 'popup-menu';
+  const rect = anchor.getBoundingClientRect();
+  menu.style.top = `${rect.bottom + 2}px`;
+  menu.style.right = `${Math.max(4, window.innerWidth - rect.right)}px`;
+
+  // A second connection to the same host is the single most common
+  // reason to want another terminal, so it goes first when the focused
+  // pane is something that can actually be dialled twice.
+  const focused = focusedSession(tab);
+  if (focused.duplicate) {
+    popupMenuItem(menu, '⧉', 'Duplicate this session', () => { void splitWithDuplicate(tab, 'right'); });
+  }
+  popupMenuItem(menu, '❯', 'New local shell', () => { void splitWithLocalShell(tab, 'right'); });
+  popupMenuItem(menu, '\u{1F310}', 'New session…', () => { void splitWithPicker(tab, 'right'); });
+  popupMenuItem(menu, '\u{1F4DD}', 'Text editor', () => { void splitWithEditor(tab, 'right'); });
+
+  const separator = document.createElement('div');
+  separator.className = 'separator';
+  menu.appendChild(separator);
+
+  // The empty splits, for when you want the arrangement first and will
+  // fill the pane from its own placeholder.
+  popupMenuItem(menu, '▥', 'Split right (empty)', () => { void setTabLayout(tab, tab.layout === '2h' ? '4' : '2v'); });
+  popupMenuItem(menu, '▤', 'Split below (empty)', () => { void setTabLayout(tab, tab.layout === '2v' ? '4' : '2h'); });
+
+  document.body.appendChild(menu);
+  attachMenuAutoClose(menu);
+}
+
+(() => {
+  const button = document.getElementById('tab-split-btn')!;
+  button.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openSplitMenu(button);
+  });
+})();
 
 // --- File browser (scoped to whichever SSH tab is active) ---
 
@@ -1547,19 +3555,19 @@ async function refreshFileList(path = '.', sessionId?: string) {
       div.onauxclick = (event) => {
         if (event.button === 1) {
           void App.OpenRemoteFile(id, e.path).catch((err) => {
-            flashEditorStatus(`External open failed: ${err}`, true);
+            flashStatus(`External open failed: ${err}`, true);
           });
         }
       };
       div.onclick = (event) => {
         if (event instanceof MouseEvent && event.shiftKey) {
           void App.OpenRemoteFile(id, e.path).catch((err) => {
-            flashEditorStatus(`External open failed: ${err}`, true);
+            flashStatus(`External open failed: ${err}`, true);
           });
           return;
         }
         void openRemoteFile(id, e.path).catch((err) => {
-          flashEditorStatus(`Open failed: ${err}`, true);
+          flashStatus(`Open failed: ${err}`, true);
         });
       };
     }
@@ -2576,6 +4584,7 @@ async function renderSessionList() {
       for (const s of visibleSessions) list.appendChild(renderSessionRow(s, 0, live));
     }
     renderLocalShellProfileList();
+    renderFolderList();
     if (homeIsActive()) renderHomeView().catch(() => {});
     return;
   }
@@ -2662,6 +4671,7 @@ async function renderSessionList() {
   }
 
   renderLocalShellProfileList();
+  renderFolderList();
 
   // Home shows the same session data from a different angle, so keep it
   // in step with every mutation that already funnels through here
@@ -2713,6 +4723,10 @@ const HOME_QC_LIMIT = 8;
 // keystroke-to-keystroke instead of a Wails round trip per character.
 // Refreshed by renderHomeView, which runs on every switch to Home and
 // on every session mutation.
+// Deliberately shorter than the session lists: this is a reminder of
+// what you were editing, not a file manager.
+const HOME_EDITOR_LIMIT = 5;
+
 let homeSessions: SessionProfile[] = [];
 let homeQuickQuery = '';
 let homeQcActions: (() => void)[] = [];
@@ -2875,6 +4889,28 @@ function homeCard(s: SessionProfile): HTMLElement {
     }
   };
   return card;
+}
+
+// One recent folder or file, styled as a saved-session row so the
+// editor's half of Home doesn't look like a different product.
+function homeEditorRow(glyph: string, path: string, kind: string, run: () => void): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'home-saved-row';
+  row.tabIndex = 0;
+  row.title = path;
+  const name = document.createElement('span');
+  name.textContent = `${glyph} ${baseName(path)}`;
+  const sub = document.createElement('span');
+  sub.className = 'sub';
+  sub.textContent = kind === 'folder' ? dirName(path) : `${dirName(path)} · file`;
+  row.append(name, sub);
+  row.onclick = run;
+  row.onkeydown = (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    run();
+  };
+  return row;
 }
 
 function homeSavedRow(s: SessionProfile): HTMLElement {
@@ -3086,6 +5122,27 @@ async function renderHomeView() {
     }
     const inGroup = byGroup.get(key)!.slice().sort((a, b) => a.name.localeCompare(b.name));
     for (const s of inGroup) savedList.appendChild(homeSavedRow(s));
+  }
+
+  // SPE-105: the editor belongs on Home for the same reason sessions
+  // do. Picking up the folder or file you had open yesterday is the
+  // editor's version of reopening a connection, so it reads as one row
+  // list rather than a button that starts from nothing.
+  const editorFolders = loadRecentFolders();
+  const editorFiles = loadRecentFiles();
+  const editorList = document.getElementById('home-editor-list')!;
+  editorList.innerHTML = '';
+  document.getElementById('home-editor-section')!.style.display =
+    editorFolders.length > 0 || editorFiles.length > 0 ? 'block' : 'none';
+  for (const folder of editorFolders.slice(0, HOME_EDITOR_LIMIT)) {
+    editorList.appendChild(homeEditorRow('\u{1F4C1}', folder, 'folder', () => {
+      void openFolder(newEditorTabPane(), folder);
+    }));
+  }
+  for (const path of editorFiles.slice(0, HOME_EDITOR_LIMIT)) {
+    editorList.appendChild(homeEditorRow('\u{1F4C4}', path, 'file', () => {
+      void openLocalFile(path, newEditorTabPane());
+    }));
   }
 
   const chips = document.getElementById('home-shell-chips')!;
@@ -3520,6 +5577,20 @@ async function connectActiveTab(req: ConnectRequest) {
     target.status = 'connected';
     createTerminalForSession(target, ownerTab);
     wireSSHEvents(target, result.sessionId, req);
+    // SPE-104: a second, independent connection to the same target for
+    // the split menu's "Duplicate this session". Deliberately re-runs
+    // Connect rather than opening another channel on this session, so
+    // one dying doesn't take the other down with it.
+    target.duplicate = async (pane) => {
+      const previous = pendingPaneTarget;
+      pendingPaneTarget = pane;
+      skipSavePrompt = true;
+      try {
+        await connectActiveTab(req);
+      } finally {
+        pendingPaneTarget = previous;
+      }
+    };
     if (result.connectDurationMs) {
       target.term?.write(`\r\n\x1b[90mSSH connected in ${result.connectDurationMs} ms.\x1b[0m\r\n`);
     }
@@ -3630,6 +5701,16 @@ async function startLocalShellInActiveTab(shell: string, label: string, dir = ''
 
   target.backendId = id;
   target.status = 'connected';
+  // SPE-104: same shell, same starting directory, its own process.
+  target.duplicate = async (pane) => {
+    const previous = pendingPaneTarget;
+    pendingPaneTarget = pane;
+    try {
+      await startLocalShellInActiveTab(shell, label, dir);
+    } finally {
+      pendingPaneTarget = previous;
+    }
+  };
   renderTabBar();
   runtime.EventsOn('local:data:' + id, (data: unknown) => writeToTerminal(target, data as string));
 }
@@ -3840,12 +5921,10 @@ authRadios.forEach((radio) => {
 
 // --- Init: start with one pending tab, or a local shell rooted at the
 // launch directory (SPE-86: Windows Explorer's "Open in Specter") ---
-document.getElementById('app')!.classList.add('editor-collapsed');
-document.getElementById('editor-expand-btn')!.style.display = 'flex';
 // SPE-100: all three sidebar sections collapse the same way and
 // remember their state, replacing the one-off Remote-files toggle that
 // hand-edited its own label text.
-type SidebarSection = 'sessions' | 'shells' | 'files';
+type SidebarSection = 'sessions' | 'shells' | 'folders' | 'files';
 
 function loadCollapsedSections(): Set<SidebarSection> {
   try {
@@ -3896,6 +5975,7 @@ wireSidebarHeaderAction('sidebar-new-session', () => {
   openSessionPicker();
 });
 wireSidebarHeaderAction('sidebar-new-folder', () => { createNewFolder(); });
+wireSidebarHeaderAction('folder-add-btn', () => { void pinFolder(); });
 wireSidebarHeaderAction('sidebar-collapse-btn', toggleSidebar);
 
 applySidebarSections();
@@ -4432,8 +6512,25 @@ document.getElementById('win-maximize')!.addEventListener('click', () => {
   runtime.WindowToggleMaximise();
 });
 document.getElementById('win-close')!.addEventListener('click', () => {
-  runtime.Quit();
+  void quitWithUnsavedCheck();
 });
+
+// SPE-103: closing the window bypasses closeTab entirely, so it asks
+// about every unsaved buffer itself. Silent when there are none, which
+// is the ordinary case.
+async function quitWithUnsavedCheck() {
+  for (const tab of tabs.values()) {
+    for (const session of allSessions(tab)) {
+      const pane = editorPanes.get(session.id);
+      if (!pane?.docIds.some((docId) => editorDocs.get(docId)?.dirty)) continue;
+      // Only surfaced for an editor that actually has something to
+      // lose: quitting a clean one should not tab-hop on the way out.
+      switchToTab(tab.id);
+      if (!(await confirmCloseEditorSession(session))) return;
+    }
+  }
+  runtime.Quit();
+}
 document.getElementById('titlebar-spacer')!.addEventListener('dblclick', () => {
   runtime.WindowToggleMaximise();
 });
@@ -4441,6 +6538,14 @@ document.getElementById('titlebar-spacer')!.addEventListener('dblclick', () => {
 document.addEventListener('click', () => closeAllMenus());
 
 // Terminal menu
+document.getElementById('menu-new-window')!.addEventListener('click', async () => {
+  closeAllMenus();
+  try {
+    await App.OpenNewWindow();
+  } catch (err) {
+    alert(`Could not open a new window: ${err}`);
+  }
+});
 document.getElementById('menu-new-tab')!.addEventListener('click', () => {
   closeAllMenus();
   const tab = createPendingTab();
@@ -4520,7 +6625,7 @@ function resetPickerView() {
 // only applies while the picker is actually open, and skipped once a
 // protocol has been chosen and its fields are showing, where digits
 // belong to whatever field has focus.
-const PICKER_ITEM_IDS = ['picker-ssh', 'picker-shell', 'picker-serial', 'picker-telnet'];
+const PICKER_ITEM_IDS = ['picker-ssh', 'picker-shell', 'picker-serial', 'picker-telnet', 'picker-editor'];
 
 function pickerGridVisible(): boolean {
   const overlay = document.getElementById('session-picker-overlay')!;
@@ -4617,6 +6722,13 @@ document.getElementById('menu-new-session')!.addEventListener('click', () => {
   ensurePendingTab();
   openSessionPicker();
 });
+document.getElementById('home-new-editor-top')!.addEventListener('click', () => {
+  newEditorSession();
+});
+document.getElementById('menu-new-editor')!.addEventListener('click', () => {
+  closeAllMenus();
+  newEditorSession();
+});
 document.getElementById('new-session-btn')!.addEventListener('click', () => {
   ensurePendingTab();
   openSessionPicker();
@@ -4636,6 +6748,10 @@ document.getElementById('picker-serial')!.addEventListener('click', () => {
 document.getElementById('picker-telnet')!.addEventListener('click', () => {
   closeSessionPicker();
   newTelnetSession();
+});
+document.getElementById('picker-editor')!.addEventListener('click', () => {
+  closeSessionPicker();
+  newEditorSession();
 });
 document.getElementById('serial-connect')!.addEventListener('click', async () => {
   const portName = (document.getElementById('serial-port') as HTMLInputElement).value;
@@ -4752,6 +6868,22 @@ const SHORTCUT_GROUPS: { title: string; items: [ShortcutId | null, string][] }[]
       ['splitVertical', 'Split vertical / 4-pane grid'],
       ['splitHorizontal', 'Split horizontal / 4-pane grid'],
       ['closePane', 'Close active pane'],
+    ],
+  },
+  {
+    title: 'Text editor session',
+    items: [
+      [null, `New file (${SHORTCUT_MOD}+N)`],
+      [null, `Open file (${SHORTCUT_MOD}+O)`],
+      [null, `Save (${SHORTCUT_MOD}+S)`],
+      [null, `Save as (${SHORTCUT_MOD}+Shift+S)`],
+      [null, `Close file (${SHORTCUT_MOD}+W)`],
+      [null, `Go to file (${SHORTCUT_MOD}+P)`],
+      [null, `Command palette (${SHORTCUT_MOD}+Shift+P)`],
+      [null, `Find / replace (${SHORTCUT_MOD}+F / ${SHORTCUT_MOD}+H)`],
+      [null, `Go to line (${SHORTCUT_MOD}+G)`],
+      [null, `Next / previous file (${SHORTCUT_MOD}+PageDown / PageUp)`],
+      [null, 'Toggle word wrap (Alt+Z)'],
     ],
   },
   {
@@ -5023,42 +7155,28 @@ document.getElementById('menu-tool-powershell')!.addEventListener('click', () =>
 });
 document.getElementById('menu-tool-text-editor')!.addEventListener('click', () => {
   closeAllMenus();
-  const app = document.getElementById('app')!;
-  app.classList.remove('editor-collapsed');
-  app.style.setProperty('--ew', editorWidth ? `${editorWidth}px` : '1fr');
-  app.style.setProperty('--rew', '5px');
-  document.getElementById('editor-expand-btn')!.style.display = 'none';
-  openFilePath = null;
-  openFileSessionId = null;
-  document.getElementById('editor-path')!.textContent = 'Untitled';
-  editor.setValue('');
-  monaco.editor.setModelLanguage(editor.getModel()!, 'plaintext');
+  newFileInEditor();
 });
 
 renderSessionList();
 
 let sidebarWidth: number | null = null;
-let editorWidth: number | null = null;
 
-function setupPaneResize(handleId: string, columnIndex: number, minWidth: number) {
-  const handle = document.getElementById(handleId)!;
+// SPE-103: the sidebar is the only resizable pane now, the editor's old
+// right-hand column having become a session tab.
+function setupSidebarResize(minWidth: number) {
+  const handle = document.getElementById('resize-sidebar')!;
   handle.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     const app = document.getElementById('app')!;
     const startX = e.clientX;
-    const variableName = columnIndex === 0 ? '--sw' : '--ew';
-    const widthDirection = columnIndex === 0 ? 1 : -1;
-    const paneId = columnIndex === 0 ? 'sidebar' : 'editor-pane';
-    const startWidth = document.getElementById(paneId)!.getBoundingClientRect().width;
+    const startWidth = document.getElementById('sidebar')!.getBoundingClientRect().width;
     handle.classList.add('dragging');
     handle.setPointerCapture(e.pointerId);
 
     const onPointerMove = (moveEvent: PointerEvent) => {
-      const delta = moveEvent.clientX - startX;
-      const newWidth = Math.max(minWidth, startWidth + widthDirection * delta);
-      app.style.setProperty(variableName, `${newWidth}px`);
-      if (columnIndex === 0) sidebarWidth = newWidth;
-      else editorWidth = newWidth;
+      sidebarWidth = Math.max(minWidth, startWidth + moveEvent.clientX - startX);
+      app.style.setProperty('--sw', `${sidebarWidth}px`);
     };
 
     const finishResize = () => {
@@ -5075,9 +7193,9 @@ function setupPaneResize(handleId: string, columnIndex: number, minWidth: number
   });
 }
 
-setupPaneResize('resize-sidebar', 0, 150);
-setupPaneResize('resize-editor', 4, 200);
+setupSidebarResize(150);
 
 renderSessionList();renderSessionList();
 renderLocalShellProfileList();
+renderFolderList();
 renderLocalShellProfilesMenu();

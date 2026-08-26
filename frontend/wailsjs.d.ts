@@ -64,6 +64,14 @@ export interface SessionGroup {
   name: string;
   parentId?: string;
 }
+// SPE-106: a folder pinned to the sidebar, the editor's counterpart to
+// a saved session. Stored with the rest of the configuration rather
+// than in browser storage, so it exports, imports and backs up.
+export interface Folder {
+  id: string;
+  path: string;
+  name?: string;
+}
 // SPE-102: saved, reusable local shell profile (Windows Terminal-style).
 // Distinct from SessionProfile, which covers SSH/serial.
 export interface LocalShellProfile {
@@ -74,6 +82,14 @@ export interface LocalShellProfile {
   // '' (generic terminal, default), 'powershell', 'cmd', or 'wsl'.
   icon?: string;
   tabTitle?: string;
+}
+// SPE-105: the editor's folder/workspace tree. Same shape as
+// RemoteFile below so both trees render through the same code.
+export interface LocalFile {
+  name: string;
+  path: string;
+  isDir: boolean;
+  size: number;
 }
 export interface RemoteFile {
   name: string;
@@ -130,8 +146,15 @@ export interface AppBindings {
   SaveTextFile(defaultFilename: string, content: string): Promise<string>;
   SelectAnyFile(): Promise<string>;
   SelectDirectory(): Promise<string>;
+  SelectFolder(): Promise<string>;
+  SelectFileIn(defaultDir: string): Promise<string>;
+  SaveTextFileIn(defaultDir: string, defaultFilename: string, content: string): Promise<string>;
+  ListLocalDir(dir: string): Promise<LocalFile[]>;
   ReadLocalFile(path: string): Promise<string>;
   WriteLocalFile(path: string, content: string): Promise<void>;
+  // SPE-105: starts a second Specter process; Wails v2 is one window
+  // per process, so this is the only shape a "new window" can take.
+  OpenNewWindow(): Promise<void>;
   AppendSessionLog(directory: string, sessionId: string, label: string, content: string): Promise<void>;
   GetSettings(): Promise<Settings>;
   SaveSettings(settings: Settings): Promise<void>;
@@ -155,6 +178,9 @@ export interface AppBindings {
   WriteSerial(id: string, data: string): Promise<void>;
   CloseSerial(id: string): Promise<void>;
   ListSerialPorts(): Promise<string[]>;
+  ListFolders(): Promise<Folder[]>;
+  SaveFolder(folder: Folder): Promise<void>;
+  DeleteFolder(id: string): Promise<void>;
   ListLocalShellProfiles(): Promise<LocalShellProfile[]>;
   SaveLocalShellProfile(profile: LocalShellProfile): Promise<void>;
   DeleteLocalShellProfile(id: string): Promise<void>;

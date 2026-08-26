@@ -14,8 +14,10 @@ import (
 	"mime"
 	"net"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -353,6 +355,30 @@ func (a *App) GetStartupDir() string {
 	return a.startupDir
 }
 
+// OpenNewWindow launches a second Specter (SPE-105). Wails v2 is one
+// window per process, so this genuinely starts another process rather
+// than opening a second window on this one. Both read and write the
+// same config files, which is exactly why this is a deliberate menu
+// action and not something the app ever does on its own.
+//
+// Launched with no arguments on purpose: the startup-directory argument
+// (SPE-86, Explorer's "Open in Specter") belongs to the invocation that
+// carried it, not to every window opened from it afterwards.
+func (a *App) OpenNewWindow() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(exe)
+	cmd.Dir = filepath.Dir(exe)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// Nothing here ever waits on the child, and an un-released process
+	// handle lingers as a zombie on Unix once it exits.
+	return cmd.Process.Release()
+}
+
 // GetClipboardText reads the OS clipboard via Wails' native runtime,
 // bypassing the browser Clipboard API entirely. Some WebKitGTK builds
 // deny navigator.clipboard.readText() when triggered from a contextmenu
@@ -417,6 +443,27 @@ func (a *App) SelectDirectory() (string, error) {
 	})
 }
 
+// SelectFolder prompts for a folder to open in the editor as a
+// workspace (SPE-105). Distinct from SelectDirectory above only in its
+// title: that one asks where a shell should start, this one asks what
+// the editor's file tree should show.
+func (a *App) SelectFolder() (string, error) {
+	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Open Folder",
+	})
+}
+
+// SelectFileIn is SelectAnyFile with a starting directory, so Open File
+// from inside an editor workspace lands in that workspace rather than
+// wherever the OS dialog happened to be last. An empty defaultDir is
+// the OS default, same as SelectAnyFile.
+func (a *App) SelectFileIn(defaultDir string) (string, error) {
+	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title:            "Open File",
+		DefaultDirectory: defaultDir,
+	})
+}
+
 // ReadLocalFile and WriteLocalFile (SPE-78) round out local file
 // support in the editor pane, alongside the existing remote
 // (ReadRemoteFile/WriteRemoteFile) and SaveTextFile (used here for
@@ -431,6 +478,50 @@ func (a *App) ReadLocalFile(path string) (string, error) {
 
 func (a *App) WriteLocalFile(path string, content string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+// LocalFile mirrors RemoteFile for the local filesystem, so the
+// editor's workspace tree and the SFTP browser are the same shape on
+// the frontend.
+type LocalFile struct {
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	IsDir bool   `json:"isDir"`
+	Size  int64  `json:"size"`
+}
+
+// ListLocalDir backs the editor's folder tree (SPE-105). Directories
+// sort ahead of files and then by name, case-insensitively: the order a
+// file tree is expected to be in, decided here rather than in the
+// frontend so the remote browser can adopt the same ordering later
+// without a second implementation of it.
+func (a *App) ListLocalDir(dir string) ([]LocalFile, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]LocalFile, 0, len(entries))
+	for _, entry := range entries {
+		var size int64
+		// A file that vanished between ReadDir and Info is worth
+		// listing without a size, not worth failing the whole listing.
+		if info, err := entry.Info(); err == nil {
+			size = info.Size()
+		}
+		files = append(files, LocalFile{
+			Name:  entry.Name(),
+			Path:  filepath.Join(dir, entry.Name()),
+			IsDir: entry.IsDir(),
+			Size:  size,
+		})
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].IsDir != files[j].IsDir {
+			return files[i].IsDir
+		}
+		return strings.ToLower(files[i].Name) < strings.ToLower(files[j].Name)
+	})
+	return files, nil
 }
 
 // AppendSessionLog appends raw terminal output to one file per session.
@@ -508,6 +599,29 @@ func (a *App) SaveTextFile(defaultFilename string, content string) (string, erro
 	return path, nil
 }
 
+// SaveTextFileIn is SaveTextFile with a starting directory and a title
+// that fits an editor (SPE-105), so Save As inside a workspace opens in
+// that workspace instead of wherever the last "Save Terminal Output"
+// went. Kept separate rather than widening SaveTextFile, which the
+// session-output save still uses with its own title.
+func (a *App) SaveTextFileIn(defaultDir string, defaultFilename string, content string) (string, error) {
+	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:            "Save File",
+		DefaultDirectory: defaultDir,
+		DefaultFilename:  defaultFilename,
+	})
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", nil
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 // --- Terminal personalization (SPE-61) ---
 
 func (a *App) GetSettings() (config.Settings, error) {
@@ -570,6 +684,35 @@ func (a *App) DeleteLocalShellProfile(id string) error {
 		return err
 	}
 	return config.SaveLocalShellProfiles(config.RemoveByID(profiles, id, localShellProfileID))
+}
+
+// --- Pinned folders (SPE-106) ---
+// Same shape as the local shell profiles above: a list the sidebar
+// renders, added to and removed from one entry at a time.
+
+func (a *App) ListFolders() ([]config.Folder, error) {
+	return config.LoadFolders()
+}
+
+func folderID(f config.Folder) string { return f.ID }
+
+func (a *App) SaveFolder(folder config.Folder) error {
+	folders, err := config.LoadFolders()
+	if err != nil {
+		return err
+	}
+	if folder.ID == "" {
+		folder.ID = idgen.New()
+	}
+	return config.SaveFolders(config.UpsertByID(folders, folder, folderID))
+}
+
+func (a *App) DeleteFolder(id string) error {
+	folders, err := config.LoadFolders()
+	if err != nil {
+		return err
+	}
+	return config.SaveFolders(config.RemoveByID(folders, id, folderID))
 }
 
 // --- Session groups (folders) ---
