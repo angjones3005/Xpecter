@@ -46,7 +46,18 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config
 
       - name: Install Wails CLI
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+        run: |
+          for attempt in 1 2 3; do
+            if go install github.com/wailsapp/wails/v2/cmd/wails@latest; then
+              exit 0
+            fi
+            echo "go install failed (attempt $attempt/3), retrying..."
+            if [ "$attempt" -lt 3 ]; then
+              sleep 5
+            fi
+          done
+          echo "go install failed after 3 attempts"
+          exit 1
 
       # NSIS ships pre-installed on windows-latest runners, but versions
       # drift over time and we've seen reports of that breaking `wails
