@@ -283,7 +283,7 @@ func Dial(cfg Config) (*Session, error) {
 
 	var authMethods []ssh.AuthMethod
 	if cfg.InternalAgent && cfg.KeyPath == "" {
-		return nil, fmt.Errorf("Specter internal SSH agent requires a private key path")
+		return nil, fmt.Errorf("specter internal SSH agent requires a private key path")
 	}
 	if cfg.KeyPath != "" {
 		if !cfg.IgnoreKeyPermWarning {
