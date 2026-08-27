@@ -793,6 +793,119 @@ registerLanguage({
   },
 });
 
+// --- Skald (SPE-120) ---
+// A local DSL for switch configuration, so nothing ships with it and
+// there is no upstream grammar to borrow. Every keyword below is one
+// the parser actually accepts: they came from the `symbol` and `string`
+// literals in haskell-dsl/src/Parser.hs rather than from the example
+// files, so a keyword the language has but no example uses still
+// highlights.
+
+// The nine resource blocks a document is built from, and the three
+// words that say how one of them meets the device. They are the
+// skeleton you scan for when reading a policy, so they read differently
+// from the settings inside them.
+const SKALD_BLOCKS = [
+  'interface', 'management', 'policy', 'port-mode', 'root-eligibility',
+  'stp-guard', 'system', 'users', 'vlan-database',
+  'augment', 'replace', 'within',
+];
+
+// Everything else the grammar names: statement heads, the settings they
+// carry, and the bare flags that are a whole statement on their own.
+const SKALD_SETTINGS = [
+  'access', 'alerts', 'all', 'any-port', 'archive', 'attempts',
+  'block-for', 'bpduguard', 'buffered', 'candidate', 'client', 'console',
+  'contact', 'critical', 'debugging', 'delay', 'description',
+  'domain-name', 'emergencies', 'enable-secret', 'env', 'errors',
+  'exec-timeout', 'facility', 'from', 'guard', 'host', 'hostname',
+  'http', 'https', 'informational', 'line', 'location', 'log-config',
+  'log-on-failure', 'log-on-success', 'logging-synchronous', 'login',
+  'loop', 'name', 'native', 'negotiable', 'never', 'no-bpduguard',
+  'no-description', 'no-http', 'no-https', 'no-logging-synchronous',
+  'no-pad', 'no-password-encryption', 'no-portfast',
+  'no-timestamps-datetime', 'none', 'nonegotiable', 'notifications',
+  'off', 'origin-id', 'pad', 'password-encryption', 'port', 'portfast',
+  'privilege', 'root', 'secret', 'server', 'session-timeout', 'shutdown',
+  'size', 'snmp', 'ssh', 'static-arp', 'syslog', 'telnet', 'timeout',
+  'timestamps-datetime', 'transparent', 'transport-input',
+  'transport-output', 'trunk', 'up', 'user', 'vlan', 'vlans', 'vtp',
+  'vty', 'warnings',
+];
+
+registerLanguage({
+  id: 'skald',
+  extensions: ['.skald'],
+  aliases: ['Skald', 'skald'],
+  configuration: {
+    // Line comments only, and no bracket but the brace: the language
+    // has no block comment, and no list or call syntax to pair up.
+    comments: { lineComment: '--' },
+    brackets: [['{', '}']],
+    autoClosingPairs: [{ open: '{', close: '}' }, { open: '"', close: '"' }],
+    surroundingPairs: [{ open: '{', close: '}' }, { open: '"', close: '"' }],
+    // Hyphens and slashes are inside words here rather than between
+    // them: no-portfast is one keyword and gi1/0/1 is one port. Monaco's
+    // default pattern splits both, so double-click and word-wise motion
+    // would select fragments that mean nothing on their own.
+    wordPattern: /[A-Za-z0-9_][-A-Za-z0-9_/]*/,
+  },
+  tokenizer: {
+    defaultToken: '',
+    tokenPostfix: '.skald',
+    blocks: SKALD_BLOCKS,
+    settings: SKALD_SETTINGS,
+    tokenizer: {
+      root: [
+        // These three take the rest of the line VERBATIM, so a '--' in
+        // one is data rather than a comment, and quotes are part of the
+        // value rather than delimiters around it. Parser.hs is explicit
+        // about why: IOS stores a description exactly as typed, and a
+        // quote-delimited literal would round-trip half of a real
+        // switch's descriptions wrongly. Ahead of the comment rule so
+        // the text keeps its colour all the way to end of line.
+        [/(description|location|contact)([ \t]+)([^\n]*)/, ['type', '', 'string']],
+
+        [/--.*$/, 'comment'],
+        [/"/, { token: 'string.quote', next: '@string' }],
+
+        // Addresses before numbers, or an IP tokenises as four separate
+        // ones with stray dots left between them.
+        [/[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}/, 'number.hex'],
+        [/\d{1,3}(?:\.\d{1,3}){3}/, 'number.float'],
+
+        // Ports, spelled the way IOS spells them, in the range forms the
+        // parser accepts: gi1/0/1, te1/0/1-2, gi1/0/2-gi1/0/8. They are
+        // the subject of most statements in the language, so they read
+        // as their own thing rather than as identifiers.
+        [/[A-Za-z]+\d+(?:\/\d+)+(?:-(?:[A-Za-z]+\d+(?:\/\d+)+|\d+))?/, 'variable'],
+
+        // A VLAN or line range is one value: within 10-30, line vty 0-15.
+        [/\d+(?:-\d+)?/, 'number'],
+
+        [/[{}]/, '@brackets'],
+        [/->/, 'operator'],
+        [/,/, 'delimiter'],
+
+        // Hyphens are word characters here: root-eligibility is one
+        // keyword, and no-portfast is not a negated portfast.
+        [/[A-Za-z_][\w-]*/, {
+          cases: { '@blocks': 'keyword', '@settings': 'type', '@default': 'identifier' },
+        }],
+
+        [/[ \t\r\n]+/, ''],
+      ],
+
+      // No escape sequences: a quoted value is bytes on their way to a
+      // switch, and the parser reads it exactly as written.
+      string: [
+        [/[^"]+/, 'string'],
+        [/"/, { token: 'string.quote', next: '@pop' }],
+      ],
+    },
+  },
+});
+
 type MonacoWorkerEnvironment = {
   getWorker: (_moduleId: string, label: string) => Worker;
 };
@@ -1414,11 +1527,14 @@ function switchToTab(id: string) {
   }
 
   const focused = focusedSession(tab);
-  if (focused.mode === 'ssh' && focused.backendId) {
+  if (focused?.mode === 'ssh' && focused.backendId) {
     refreshFileList('.', focused.backendId);
   }
 
   renderTabBar();
+  // So Ctrl+S works the moment you land on an editor tab, rather than
+  // only after clicking into the buffer.
+  focusPaneContents(tab);
 }
 
 // Shared backend-close + local cleanup for one Session, used by both
@@ -1679,9 +1795,50 @@ function createPaneShell(pane: Pane, tab: Tab) {
 }
 
 function focusPane(tab: Tab, paneIndex: number) {
-  if (tab.focusedPaneIndex === paneIndex) return;
+  const changed = tab.focusedPaneIndex !== paneIndex;
   tab.focusedPaneIndex = paneIndex;
-  renderTabBar();
+  // Which pane is focused and where the keyboard actually points have
+  // to move together. They used to not: this only repainted the focus
+  // ring, so clicking an editor pane's header left the caret in the
+  // terminal you clicked away from, and the Ctrl+S you meant for the
+  // buffer reached that shell's PTY as XOFF and froze it.
+  focusPaneContents(tab);
+  if (changed) renderTabBar();
+}
+
+// Puts real DOM focus inside a tab's focused pane (SPE-119): the buffer for an
+// editor, the terminal for a shell. Deferred a frame because the usual
+// caller is a mousedown handler and the browser's own focus handling
+// for that click runs after it, undoing anything set here first.
+// Idempotent, so the extra call a click straight into Monaco or a
+// terminal triggers costs nothing.
+let paneFocusFrame: number | null = null;
+function focusPaneContents(tab: Tab) {
+  if (paneFocusFrame !== null) cancelAnimationFrame(paneFocusFrame);
+  paneFocusFrame = requestAnimationFrame(() => {
+    paneFocusFrame = null;
+    if (activeTabId !== tab.id || tab.isHome) return;
+    // A dialog, the quick pick or the session picker owns the keyboard
+    // while it is up, and a pane grabbing it back would break them.
+    if (document.querySelector('[id$="-overlay"].open, .dialog-overlay.open')) return;
+    const session = focusedSession(tab);
+    if (!session?.container) return;
+    const active = document.activeElement as HTMLElement | null;
+    // Already in the right pane, including its own chrome.
+    if (active && session.container.contains(active)) return;
+    // Somebody is typing in app chrome (the sidebar filter, a form
+    // field). A pane only ever reclaims focus from another pane or from
+    // nowhere at all. xterm's and Monaco's own hidden textareas sit
+    // inside a pane wrapper, so they don't read as chrome here.
+    if (active && active !== document.body && !active.closest('.pane-wrapper') && isTextEntry(active)) return;
+    const pane = editorPanes.get(session.id);
+    if (pane) pane.editor.focus();
+    else session.term?.focus();
+  });
+}
+
+function isTextEntry(el: HTMLElement): boolean {
+  return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable;
 }
 
 // Pure layout-geometry update for a tab's paneGrid CSS grid-template.
@@ -2050,6 +2207,19 @@ function createTerminalForSession(session: Session, tab: Tab) {
   // SPE-92: split/close/focus-pane shortcuts, checked against every
   // existing binding (Ctrl+Shift+X/B/V, Ctrl+/-/0, F11), no collisions.
   term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+    // Belt to focusPaneContents' braces: once logical focus has moved
+    // to another pane this terminal must not act on the keystroke, even
+    // if it somehow still holds DOM focus. Ctrl+S is the one that
+    // hurts, reaching the PTY as XOFF and freezing the shell, but the
+    // disconnected-panel keys below are just as wrong to fire here.
+    // The existence check matters: a pane index left pointing at
+    // nothing during a close must not turn into a terminal that
+    // swallows every key you type into it.
+    const focusedPane = focusedSession(tab);
+    if (e.type === 'keydown' && focusedPane && focusedPane !== session) {
+      focusPaneContents(tab);
+      return false;
+    }
     if (session.stopped) {
       if (e.type === 'keydown') {
         const key = e.key.toLowerCase();
@@ -2555,8 +2725,11 @@ async function confirmCloseEditorSession(session: Session): Promise<boolean> {
 // pane of the active tab, when that pane happens to be an editor.
 function focusedEditorPane(): EditorPane | null {
   const tab = activeTabId ? tabs.get(activeTabId) : null;
-  if (!tab) return null;
-  return editorPanes.get(focusedSession(tab).id) ?? null;
+  // focusedPaneIndex can outlive the pane it points at for a tick while
+  // one is closing, and this runs from a document-wide keydown
+  // listener, where a throw would take every editor shortcut with it.
+  const session = tab ? focusedSession(tab) : null;
+  return session ? editorPanes.get(session.id) ?? null : null;
 }
 
 
@@ -3199,6 +3372,38 @@ async function refreshFolder(pane: EditorPane) {
   await renderEditorTree(pane);
 }
 
+// Creating from the tree is how a folder you already have open grows.
+// Every other local write path starts at an OS dialog, which answers
+// "where should this buffer go" rather than "add a file to the folder I
+// am working in", and a workspace needs the second one.
+//
+// The directory is a parameter rather than an assumption: the tree head
+// creates at the workspace root, a folder row creates inside itself.
+async function createInTree(pane: EditorPane, dir: string, kind: 'file' | 'folder') {
+  const name = prompt(`New ${kind} in ${baseName(dir)}:`);
+  if (name === null) return; // cancelled
+  let path: string;
+  try {
+    path = kind === 'file'
+      ? await App.CreateLocalFile(dir, name)
+      : await App.CreateLocalDir(dir, name);
+  } catch (err) {
+    // The backend's own refusals arrive here alongside real IO errors:
+    // a name already taken, or a name that is really a path. Both say
+    // something worth reading, so neither is reworded.
+    flashStatus(String(err), true);
+    return;
+  }
+  // The new entry has to actually show up: its level is cached, and the
+  // folder it landed in may have been collapsed.
+  pane.expanded.add(dir);
+  if (kind === 'folder') pane.expanded.add(path);
+  await refreshFolder(pane);
+  flashStatus(`Created ${baseName(path)}`);
+  // A new file opens, because creating one is how you start writing it.
+  if (kind === 'file') await openLocalFile(path, pane);
+}
+
 async function renderEditorTree(pane: EditorPane) {
   pane.tree.innerHTML = '';
   const folder = pane.folder;
@@ -3211,6 +3416,8 @@ async function renderEditorTree(pane: EditorPane) {
   name.textContent = baseName(folder);
   name.title = folder;
   head.appendChild(name);
+  head.appendChild(treeAction('＋', `New file in ${baseName(folder)}`, () => { void createInTree(pane, folder, 'file'); }));
+  head.appendChild(treeAction('⊞', `New folder in ${baseName(folder)}`, () => { void createInTree(pane, folder, 'folder'); }));
   head.appendChild(treeAction('⟳', 'Reread this folder from disk', () => { void refreshFolder(pane); }));
   head.appendChild(treeAction('\u{1F4C1}', 'Open a different folder', () => { void chooseFolder(pane); }));
   head.appendChild(treeAction('✕', 'Close this folder', () => closeFolder(pane)));
@@ -3226,7 +3433,9 @@ function treeAction(glyph: string, title: string, run: () => void): HTMLSpanElem
   el.className = 'act';
   el.textContent = glyph;
   el.title = title;
-  el.onclick = run;
+  // Stopped as well as run: on a folder row this click would otherwise
+  // reach the row and toggle it open or shut under the new entry.
+  el.onclick = (e) => { e.stopPropagation(); run(); };
   return el;
 }
 
@@ -3268,6 +3477,12 @@ async function appendTreeLevel(pane: EditorPane, parent: HTMLElement, dir: strin
     label.className = 'name';
     label.textContent = entry.name;
     row.append(chev, label);
+    // So a subfolder can be created in without first making it the
+    // workspace root. Folders only: a file has nothing to create inside.
+    if (entry.isDir) {
+      row.appendChild(treeAction('＋', `New file in ${entry.name}`, () => { void createInTree(pane, entry.path, 'file'); }));
+      row.appendChild(treeAction('⊞', `New folder in ${entry.name}`, () => { void createInTree(pane, entry.path, 'folder'); }));
+    }
     row.onclick = () => {
       if (!entry.isDir) {
         void openLocalFile(entry.path, pane);
@@ -3826,21 +4041,40 @@ function trimTrailingWhitespace(pane: EditorPane, doc: EditorDoc) {
 // only fire while that editor genuinely has focus. The document-level
 // fallback below covers the document strip and the empty state, where
 // nothing in Monaco is focused.
+let editorScopeSeq = 0;
 function registerEditorKeybindings(pane: EditorPane) {
-  const withDoc = (run: (doc: EditorDoc) => void) => () => {
-    const doc = pane.activeDocId ? editorDocs.get(pane.activeDocId) : null;
+  // editor.addCommand reads as "bind this key on this editor", but it
+  // registers on a keybinding service the whole page shares, and the
+  // handler it stores closes over whichever pane bound it last. Two
+  // editor panes open meant Ctrl+S saved the pane created second no
+  // matter which one held the caret. Monaco's own answer is a context
+  // key: createContextKey writes into this editor's scoped context
+  // service, so the expression is only true while this editor has
+  // focus, and the shared service resolves the key to the right pane.
+  const scope = `specterEditorPane${editorScopeSeq += 1}`;
+  pane.editor.createContextKey(scope, true);
+  // Belt to that brace. The pane is resolved when the key is pressed
+  // rather than when it is bound, so a registration that resolves to
+  // the wrong pane, or outlives the pane it came from (addCommand
+  // drops the disposable, so a closed pane's bindings stay registered),
+  // still acts on the editor the caret is actually in.
+  const bind = (keybinding: number, handler: (active: EditorPane) => void) => {
+    pane.editor.addCommand(keybinding, () => handler(focusedEditorPane() ?? pane), scope);
+  };
+  const withDoc = (run: (doc: EditorDoc) => void) => (active: EditorPane) => {
+    const doc = active.activeDocId ? editorDocs.get(active.activeDocId) : null;
     if (doc) run(doc);
   };
-  pane.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, withDoc((doc) => { void saveDoc(doc); }));
-  pane.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyS, withDoc((doc) => { void saveDocAs(doc); }));
-  pane.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyW, withDoc((doc) => { void closeDoc(doc); }));
-  pane.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyN, () => { newUntitledDoc(pane); });
-  pane.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyO, () => { void openLocalFile(undefined, pane); });
-  pane.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyP, () => openGoToFile(pane));
-  pane.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyP, () => openCommandPalette(pane));
-  pane.editor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.KeyZ, toggleWordWrap);
-  pane.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.PageDown, () => cycleDoc(pane, 1));
-  pane.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.PageUp, () => cycleDoc(pane, -1));
+  bind(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, withDoc((doc) => { void saveDoc(doc); }));
+  bind(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyS, withDoc((doc) => { void saveDocAs(doc); }));
+  bind(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyW, withDoc((doc) => { void closeDoc(doc); }));
+  bind(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyN, (active) => { newUntitledDoc(active); });
+  bind(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyO, (active) => { void openLocalFile(undefined, active); });
+  bind(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyP, (active) => openGoToFile(active));
+  bind(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyP, (active) => openCommandPalette(active));
+  bind(monaco.KeyMod.Alt | monaco.KeyCode.KeyZ, toggleWordWrap);
+  bind(monaco.KeyMod.CtrlCmd | monaco.KeyCode.PageDown, (active) => cycleDoc(active, 1));
+  bind(monaco.KeyMod.CtrlCmd | monaco.KeyCode.PageUp, (active) => cycleDoc(active, -1));
 }
 
 // Fallback for when an editor pane is focused but Monaco itself is not
@@ -3850,8 +4084,12 @@ function registerEditorKeybindings(pane: EditorPane) {
 document.addEventListener('keydown', (e) => {
   const pane = focusedEditorPane();
   if (!pane || quickPickIsOpen() || pane.editor.hasTextFocus()) return;
+  // The pane wrapper rather than pane.root: the pane header sits
+  // outside the editor view, and Ctrl+S pressed with the header focused
+  // is still aimed at this pane's buffer.
+  const scope = pane.session.container ?? pane.root;
   const target = e.target as HTMLElement | null;
-  if (target && target !== document.body && !pane.root.contains(target)) return;
+  if (target && target !== document.body && !scope.contains(target)) return;
   if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
   const doc = pane.activeDocId ? editorDocs.get(pane.activeDocId) : null;
   const key = e.key.toLowerCase();
@@ -4361,10 +4599,17 @@ function renderSessionRow(s: SessionProfile, depth: number, live: Map<string, Se
   name.textContent = s.name;
   row.appendChild(name);
 
-  const host = document.createElement('span');
-  host.className = 'host';
-  host.textContent = sidebarSessionHost(s);
-  row.appendChild(host);
+  // The address is the sidebar's biggest source of clutter and its
+  // least used column: you pick a session by the name you gave it, and
+  // the tooltip below still carries the address for when you don't. The
+  // one time it earns the space is while filtering, where the query may
+  // have matched on the host and nothing else on the row would say so.
+  if (sessionSearchQuery.trim()) {
+    const host = document.createElement('span');
+    host.className = 'host';
+    host.textContent = sidebarSessionHost(s);
+    row.appendChild(host);
+  }
 
   row.title = running
     ? `${s.name} — ${sidebarSessionHost(s)} (running, click to switch to its tab)`
@@ -5014,13 +5259,22 @@ function highlightPalette(): Record<HighlightCategory, string> {
   return codes;
 }
 
-// Matches existing ANSI/OSC escape sequences so they can be preserved
-// untouched. Covers CSI (colors, cursor movement: \x1b[...m etc.), OSC
-// (window title: \x1b]...BEL or \x1b]...ST), and simple single-char
-// escapes. Highlighting must never modify bytes inside these, doing so
-// previously corrupted real prompts that use ANSI color codes (SPE-45).
-// eslint-disable-next-line no-control-regex -- intentional: matching real ANSI/OSC escape sequences requires literal control chars
-const ANSI_SEQUENCE_RE = /\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-9;?]*[a-zA-Z]|[a-zA-Z0-9])/g;
+// Matches existing escape sequences so they can be preserved untouched.
+// Highlighting must never modify bytes inside these: doing so previously
+// corrupted real prompts that use ANSI color codes (SPE-45).
+//
+// The byte ranges below are ECMA-48's, rather than a list of the finals we
+// happen to have seen. CSI used to end at [a-zA-Z], which left out the
+// insert-character sequence \x1b[1@ that readline sends for every keystroke
+// typed into the middle of a recalled command line. The bare-number rule
+// coloured the "1" inside it, the inserted colour broke the sequence in
+// half, and the terminal drew a literal "1@" for every key pressed.
+//   CSI:    \x1b[ then params 0x30-0x3f, intermediates 0x20-0x2f, final 0x40-0x7e
+//   String: OSC, DCS, SOS, PM and APC, each running on to a BEL or an ST
+//   Other:  \x1b, any intermediates, one final byte, and never an introducer
+//           that the two cases above already own
+// eslint-disable-next-line no-control-regex -- intentional: matching real escape sequences requires literal control chars
+const ANSI_SEQUENCE_RE = /\x1b(?:[\]P^_X][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|(?![[\]P^_X])[ -/]*[0-~])/g;
 
 function highlightPlainText(text: string): string {
   const palette = highlightPalette();
@@ -5054,40 +5308,61 @@ function sgrLeavesColorActive(sequence: string, current: boolean): boolean {
   return active;
 }
 
+// Text the far end already coloured is left exactly as it sent it.
+// Recolouring inside a coloured run is how a highlighter breaks somebody's
+// prompt, their pager, or vim. A run that still holds an ESC is left alone
+// for the same reason: that ESC belongs to a sequence the match above did
+// not recognise, and a colour inserted inside one is what puts the
+// sequence's own parameters on the screen as text.
+function highlightRun(run: string, colorActive: boolean): string {
+  if (colorActive || run.includes('\x1b')) return run;
+  return highlightPlainText(run);
+}
+
 function applyOutputHighlighting(text: string): string {
   if (!highlightEnabled) return text;
   let result = '';
   let lastIndex = 0;
-  // Text the far end already coloured is left exactly as it sent it.
-  // Recolouring inside a coloured run is how a highlighter breaks
-  // somebody's prompt, their pager, or vim.
   let colorActive = false;
   for (const match of text.matchAll(ANSI_SEQUENCE_RE)) {
     const idx = match.index!;
-    const plain = text.slice(lastIndex, idx);
-    result += colorActive ? plain : highlightPlainText(plain);
+    result += highlightRun(text.slice(lastIndex, idx), colorActive);
     result += match[0]; // pass existing escape sequences through untouched
     colorActive = sgrLeavesColorActive(match[0], colorActive);
     lastIndex = idx + match[0].length;
   }
-  const tail = text.slice(lastIndex);
-  result += colorActive ? tail : highlightPlainText(tail);
-  return result;
+  return result + highlightRun(text.slice(lastIndex), colorActive);
 }
+
+// The introducers whose sequence runs on until a terminator arrives,
+// rather than ending at the next byte: OSC, DCS, SOS, PM and APC.
+const STRING_SEQUENCE_INTRODUCERS = ']P^_X';
+
+// A sequence is complete when its final byte has arrived, and still
+// growing while only the bytes that legally precede one have.
+// eslint-disable-next-line no-control-regex -- ANSI escape detection requires the literal ESC byte
+const COMPLETE_CSI_RE = /^\x1b\[[0-?]*[ -/]*[@-~]/;
+// eslint-disable-next-line no-control-regex -- ANSI escape detection requires the literal ESC byte
+const PARTIAL_CSI_RE = /^\x1b\[[0-?]*[ -/]*$/;
+// eslint-disable-next-line no-control-regex -- ANSI escape detection requires the literal ESC byte
+const COMPLETE_ESCAPE_RE = /^\x1b[ -/]*[0-~]/;
+// eslint-disable-next-line no-control-regex -- ANSI escape detection requires the literal ESC byte
+const PARTIAL_ESCAPE_RE = /^\x1b[ -/]*$/;
 
 function incompleteAnsiStart(text: string): number | null {
   const esc = text.lastIndexOf('\x1b');
   if (esc < 0) return null;
   const tail = text.slice(esc);
   if (tail.length === 1) return esc;
-  if (tail[1] === ']') {
+  if (STRING_SEQUENCE_INTRODUCERS.includes(tail[1])) {
     return tail.includes('\x07') || tail.includes('\x1b\\') ? null : esc;
   }
-  if (tail[1] === '[') {
-    // eslint-disable-next-line no-control-regex -- ANSI escape detection requires the literal ESC byte
-    return /^\x1b\[[0-9;?]*[A-Za-z]/.test(tail) ? null : esc;
-  }
-  return null;
+  const isCsi = tail[1] === '[';
+  if ((isCsi ? COMPLETE_CSI_RE : COMPLETE_ESCAPE_RE).test(tail)) return null;
+  // Held back only while the sequence could still grow into a real one. A
+  // byte that cannot appear in an escape at all is not worth waiting on,
+  // and waiting on one would hold the rest of the line back with it.
+  return (isCsi ? PARTIAL_CSI_RE : PARTIAL_ESCAPE_RE).test(tail) ? esc : null;
 }
 
 // Every prefix of every word the rules can match. A token split across

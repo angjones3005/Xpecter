@@ -480,6 +480,67 @@ func (a *App) WriteLocalFile(path string, content string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
 }
 
+// CreateLocalFile and CreateLocalDir back New File and New Folder in
+// the editor's workspace tree (SPE-121). The existing local write paths
+// both start from an OS dialog, which answers "where should this buffer
+// go"; neither answers "add something to the folder I already have
+// open", and that is the whole of what a tree needs.
+//
+// Both take the parent and the new name separately rather than one
+// joined path, so the name can be checked as a name.
+func validLocalName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", errors.New("name cannot be empty")
+	}
+	if name == "." || name == ".." {
+		return "", fmt.Errorf("%q is not a name", name)
+	}
+	// A separator would let a name typed into a tree rooted at one
+	// folder create something outside it, and neither caller has any
+	// reason to. Both separators are rejected on every platform:
+	// Windows accepts either, and a name carrying the other one is a
+	// mistake wherever it was typed.
+	if strings.ContainsAny(name, `/\`) {
+		return "", errors.New("a name cannot contain a path separator: create the folder first, then create inside it")
+	}
+	return name, nil
+}
+
+func (a *App) CreateLocalFile(dir string, name string) (string, error) {
+	name, err := validLocalName(name)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, name)
+	// O_EXCL: a name already taken is an error the user should see, not
+	// a file silently truncated to nothing. This is "add a file", and
+	// it is never allowed to become "replace one".
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func (a *App) CreateLocalDir(dir string, name string) (string, error) {
+	name, err := validLocalName(name)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, name)
+	// Mkdir rather than MkdirAll: MkdirAll succeeds silently on a
+	// directory that already exists, and New Folder appearing to do
+	// nothing reads as a bug rather than as a name already taken.
+	if err := os.Mkdir(path, 0o755); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 // LocalFile mirrors RemoteFile for the local filesystem, so the
 // editor's workspace tree and the SFTP browser are the same shape on
 // the frontend.

@@ -152,6 +152,8 @@ export interface AppBindings {
   ListLocalDir(dir: string): Promise<LocalFile[]>;
   ReadLocalFile(path: string): Promise<string>;
   WriteLocalFile(path: string, content: string): Promise<void>;
+  CreateLocalFile(dir: string, name: string): Promise<string>;
+  CreateLocalDir(dir: string, name: string): Promise<string>;
   // SPE-105: starts a second Specter process; Wails v2 is one window
   // per process, so this is the only shape a "new window" can take.
   OpenNewWindow(): Promise<void>;
