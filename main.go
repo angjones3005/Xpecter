@@ -13,8 +13,8 @@ import (
 var assets embed.FS
 
 // startupDirFromArgs looks for a directory path among the launch
-// arguments (SPE-86): Windows Explorer's "Open in Specter" context
-// menu invokes the exe as `specter.exe "C:\the\clicked\folder"`, one
+// arguments (SPE-86): Windows Explorer's "Open in Xpecter" context
+// menu invokes the exe as `xpecter.exe "C:\the\clicked\folder"`, one
 // quoted path argument, no flags. Checked against the real filesystem
 // (os.Stat + IsDir) rather than assumed, so a future flag/argument
 // added for something else doesn't get misread as a directory to open.
@@ -33,7 +33,7 @@ func main() {
 	app := NewApp(startupDirFromArgs(os.Args[1:]))
 
 	err := wails.Run(&options.App{
-		Title:  "Specter",
+		Title:  "Xpecter",
 		Width:  1280,
 		Height: 800,
 		// Frameless: no OS window decorations, #menubar in index.html

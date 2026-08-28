@@ -23,12 +23,12 @@ import (
 	"sync"
 	"time"
 
-	"specter/backend/config"
-	"specter/backend/idgen"
-	"specter/backend/pty"
-	"specter/backend/serialclient"
-	"specter/backend/sftpclient"
-	"specter/backend/sshclient"
+	"xpecter/backend/config"
+	"xpecter/backend/idgen"
+	"xpecter/backend/pty"
+	"xpecter/backend/serialclient"
+	"xpecter/backend/sftpclient"
+	"xpecter/backend/sshclient"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"golang.org/x/crypto/pbkdf2"
@@ -41,9 +41,9 @@ type App struct {
 	serials  map[string]*serialclient.Session
 	forwards map[string]net.Listener
 	// startupDir (SPE-86): a directory passed on the command line at
-	// launch, from Windows Explorer's "Open in Specter" context menu.
+	// launch, from Windows Explorer's "Open in Xpecter" context menu.
 	// Read once by the frontend via GetStartupDir() during its own
-	// startup sequence, empty when Specter was launched normally.
+	// startup sequence, empty when Xpecter was launched normally.
 	startupDir string
 	logMu      sync.Mutex
 }
@@ -77,7 +77,10 @@ func cleanupStaleRemoteFiles() {
 	}
 	cutoff := time.Now().Add(-24 * time.Hour)
 	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "specter-remote-file-") {
+		name := entry.Name()
+		// Both prefixes: a temp dir left behind by a pre-rename build
+		// would otherwise never be swept up by anything.
+		if !entry.IsDir() || (!strings.HasPrefix(name, "xpecter-remote-file-") && !strings.HasPrefix(name, "specter-remote-file-")) {
 			continue
 		}
 		info, err := entry.Info()
@@ -236,7 +239,7 @@ type ConnectResult struct {
 	KeyPermMode         string `json:"keyPermMode,omitempty"`
 	// LegacyCompat (SPE-99): true if this connection only succeeded by
 	// automatically falling back to the widened algorithm set, an older
-	// device that doesn't support Specter's normal secure defaults. Not
+	// device that doesn't support Xpecter's normal secure defaults. Not
 	// something the person requests, an honest after-the-fact notice
 	// about reduced security for this specific connection.
 	LegacyCompat bool `json:"legacyCompat,omitempty"`
@@ -345,8 +348,8 @@ func (a *App) GetPlatform() string {
 	return runtime.Environment(a.ctx).Platform
 }
 
-// GetStartupDir returns the directory Specter was launched with (SPE-86,
-// Windows Explorer's "Open in Specter" context menu), or "" for a normal
+// GetStartupDir returns the directory Xpecter was launched with (SPE-86,
+// Windows Explorer's "Open in Xpecter" context menu), or "" for a normal
 // launch. The frontend calls this once during its own startup sequence
 // and opens a local shell tab rooted there when non-empty. Consumed
 // exactly once per launch; the value doesn't change during the session,
@@ -355,14 +358,14 @@ func (a *App) GetStartupDir() string {
 	return a.startupDir
 }
 
-// OpenNewWindow launches a second Specter (SPE-105). Wails v2 is one
+// OpenNewWindow launches a second Xpecter (SPE-105). Wails v2 is one
 // window per process, so this genuinely starts another process rather
 // than opening a second window on this one. Both read and write the
 // same config files, which is exactly why this is a deliberate menu
 // action and not something the app ever does on its own.
 //
 // Launched with no arguments on purpose: the startup-directory argument
-// (SPE-86, Explorer's "Open in Specter") belongs to the invocation that
+// (SPE-86, Explorer's "Open in Xpecter") belongs to the invocation that
 // carried it, not to every window opened from it afterwards.
 func (a *App) OpenNewWindow() error {
 	exe, err := os.Executable()
@@ -833,8 +836,8 @@ func (a *App) DeleteGroup(id string) error {
 // error) if the user cancels the dialog.
 func (a *App) ExportConfigFile() (string, error) {
 	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
-		Title:           "Export Specter Configuration",
-		DefaultFilename: "specter-config.json",
+		Title:           "Export Xpecter Configuration",
+		DefaultFilename: "xpecter-config.json",
 	})
 	if err != nil {
 		return "", err
@@ -863,9 +866,9 @@ func (a *App) ExportConfigFile() (string, error) {
 // user cancels the dialog.
 func (a *App) ImportConfigFile() (string, error) {
 	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
-		Title: "Import Specter Configuration",
+		Title: "Import Xpecter Configuration",
 		Filters: []runtime.FileFilter{
-			{DisplayName: "Specter Config (*.json)", Pattern: "*.json"},
+			{DisplayName: "Xpecter Config (*.json)", Pattern: "*.json"},
 		},
 	})
 	if err != nil {
@@ -880,7 +883,7 @@ func (a *App) ImportConfigFile() (string, error) {
 	}
 	var bundle config.ConfigBundle
 	if err := json.Unmarshal(data, &bundle); err != nil {
-		return "", fmt.Errorf("not a valid Specter config file: %w", err)
+		return "", fmt.Errorf("not a valid Xpecter config file: %w", err)
 	}
 	if err := config.ImportBundle(bundle); err != nil {
 		return "", err
@@ -996,15 +999,15 @@ func deriveBundleKey(passphrase string, salt []byte) []byte {
 }
 
 // ExportEncryptedConfigFile writes a passphrase-protected portable bundle.
-// The encrypted file is suitable for user-managed cloud storage; Specter
+// The encrypted file is suitable for user-managed cloud storage; Xpecter
 // never uploads it or receives the passphrase.
 func (a *App) ExportEncryptedConfigFile(passphrase string) (string, error) {
 	if passphrase == "" {
 		return "", fmt.Errorf("passphrase cannot be empty")
 	}
 	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
-		Title:           "Export Encrypted Specter Configuration",
-		DefaultFilename: "specter-config.enc.json",
+		Title:           "Export Encrypted Xpecter Configuration",
+		DefaultFilename: "xpecter-config.enc.json",
 	})
 	if err != nil || path == "" {
 		return path, err
@@ -1047,7 +1050,7 @@ func (a *App) ImportEncryptedConfigFile(passphrase string) (string, error) {
 	if passphrase == "" {
 		return "", fmt.Errorf("passphrase cannot be empty")
 	}
-	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{Title: "Import Encrypted Specter Configuration"})
+	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{Title: "Import Encrypted Xpecter Configuration"})
 	if err != nil || path == "" {
 		return path, err
 	}
@@ -1057,7 +1060,7 @@ func (a *App) ImportEncryptedConfigFile(passphrase string) (string, error) {
 	}
 	var envelope encryptedConfigBundle
 	if err := json.Unmarshal(data, &envelope); err != nil {
-		return "", fmt.Errorf("not a valid encrypted Specter config: %w", err)
+		return "", fmt.Errorf("not a valid encrypted Xpecter config: %w", err)
 	}
 	salt, err := base64.StdEncoding.DecodeString(envelope.Salt)
 	if err != nil {
@@ -1217,7 +1220,7 @@ func (a *App) ReadRemoteFile(id string, path string) (string, error) {
 
 // OpenRemoteFile downloads a remote file to a private temporary directory
 // and opens it with the operating system's default application. The temp
-// copy remains available after Specter returns so the external application
+// copy remains available after Xpecter returns so the external application
 // can finish opening it.
 func (a *App) OpenRemoteFile(id string, remotePath string) error {
 	sess, ok := a.sessions[id]
@@ -1225,7 +1228,7 @@ func (a *App) OpenRemoteFile(id string, remotePath string) error {
 		return fmt.Errorf("no such session: %s", id)
 	}
 
-	tmpDir, err := os.MkdirTemp("", "specter-remote-file-*")
+	tmpDir, err := os.MkdirTemp("", "xpecter-remote-file-*")
 	if err != nil {
 		return err
 	}

@@ -1,4 +1,4 @@
-# Specter
+# Xpecter
 
 A cross-platform terminal: SSH client, local shell, serial console, and remote file editor, in one lightweight app. A **Dawnrail** project.
 
@@ -6,7 +6,7 @@ Licensed under [GPLv3](LICENSE).
 
 ## What is this?
 
-Specter is built to cover the SSH-and-serial-console workflow without the bloat of a full-featured tool that does forty things you'll never touch. It runs the same way on Windows, macOS, and Linux.
+Xpecter is built to cover the SSH-and-serial-console workflow without the bloat of a full-featured tool that does forty things you'll never touch. It runs the same way on Windows, macOS, and Linux.
 
 **Core features:**
 - SSH connections with real host key verification, password or key-based auth
@@ -20,11 +20,11 @@ Specter is built to cover the SSH-and-serial-console workflow without the bloat 
 
 ## Installing
 
-Download the build for your platform from the [Releases page](https://github.com/angjones3005/Specter/releases), then run it.
+Download the build for your platform from the [Releases page](https://github.com/angjones3005/Xpecter/releases), then run it.
 
-- **Windows**: unzip and run `specter.exe`.
+- **Windows**: unzip and run `xpecter.exe`.
 - **macOS**: unzip and run the app. Since this isn't a signed/notarized build yet, you'll likely need to right-click the app and choose **Open** the first time, rather than double-clicking, to get past Gatekeeper's unsigned-app warning.
-- **Linux**: extract the archive and run the `specter` binary. No install step required.
+- **Linux**: extract the archive and run the `xpecter` binary. No install step required.
 
 No account, no setup wizard. Open it, and use **Sessions > New Session** (or the **+ New Session** button on a fresh tab) to connect.
 
@@ -62,7 +62,7 @@ Quick troubleshooting reference: [CODEBOOK.md](CODEBOOK.md)
 
 ### A note on performance
 
-If Specter feels sluggish while developing (typing lag, general UI slowness), test with a production build (`wails build`) before assuming it's a real bug. `wails dev` carries real overhead (unminified assets, dev server round-trips, hot-reload machinery) that doesn't reflect the actual app's performance.
+If Xpecter feels sluggish while developing (typing lag, general UI slowness), test with a production build (`wails build`) before assuming it's a real bug. `wails dev` carries real overhead (unminified assets, dev server round-trips, hot-reload machinery) that doesn't reflect the actual app's performance.
 
 ### Setup
 
@@ -105,7 +105,7 @@ Actively tracked in Linear. Notable open items:
 
 ### Session storage
 
-Saved profiles (`backend/config/sessions.go`) store host/user/port/key path/group/tags as plain JSON in the OS config directory. **Passwords are never saved.** MobaXterm stores saved passwords with weak, reversible obfuscation, a known real weakness, and Specter deliberately doesn't repeat it. If password-saving becomes a real requirement later, use the OS keychain (Keychain / Credential Manager / Secret Service) instead of a custom encrypted blob, don't build your own crypto for this.
+Saved profiles (`backend/config/sessions.go`) store host/user/port/key path/group/tags as plain JSON in the OS config directory. **Passwords are never saved.** MobaXterm stores saved passwords with weak, reversible obfuscation, a known real weakness, and Xpecter deliberately doesn't repeat it. If password-saving becomes a real requirement later, use the OS keychain (Keychain / Credential Manager / Secret Service) instead of a custom encrypted blob, don't build your own crypto for this.
 
 ### CI/CD
 
@@ -118,4 +118,4 @@ To cut a release: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 
 ### Naming
 
-**Specter**: the terminal. Fast, cross-platform, gets in and out without the bloat. **Skald**: the other Dawnrail project, a type-safe network config DSL.
+**Xpecter**: the terminal. Fast, cross-platform, gets in and out without the bloat. **Skald**: the other Dawnrail project, a type-safe network config DSL.

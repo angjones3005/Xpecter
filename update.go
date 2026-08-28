@@ -50,11 +50,11 @@ func (a *App) GetVersion() string {
 
 // CheckForUpdate queries GitHub's public releases API (no auth needed
 // for a public repo) and compares against the running build's version.
-// Points at the Dawnrail repo, not Specter's own, Specter's repo stays
+// Points at the Dawnrail repo, not Xpecter's own, Xpecter's repo stays
 // private, but Dawnrail already receives every release automatically
 // (see release.yml's second softprops/action-gh-release step), so
 // there's a genuinely public target to check against without touching
-// Specter's own visibility at all.
+// Xpecter's own visibility at all.
 func (a *App) CheckForUpdate() (UpdateInfo, error) {
 	info := UpdateInfo{CurrentVersion: Version}
 	if Version == "dev" {
@@ -79,7 +79,7 @@ func (a *App) CheckForUpdate() (UpdateInfo, error) {
 			// Dawnrail/Dawnrail is public, so a 404 here means either no
 			// release has been published there yet, or the org/repo name
 			// is wrong, not a privacy issue like the earlier version of
-			// this check (which pointed at Specter's own private repo).
+			// this check (which pointed at Xpecter's own private repo).
 			return info, fmt.Errorf("no releases found at Dawnrail/Dawnrail (or the repo name is wrong)")
 		}
 		return info, fmt.Errorf("github api returned %d", resp.StatusCode)
@@ -146,7 +146,7 @@ func (a *App) DownloadAndInstallUpdate(assetURL string) error {
 		return fmt.Errorf("no update asset available for this platform")
 	}
 
-	tmpDir, err := os.MkdirTemp("", "specter-update-*")
+	tmpDir, err := os.MkdirTemp("", "xpecter-update-*")
 	if err != nil {
 		return err
 	}
@@ -163,11 +163,11 @@ func (a *App) DownloadAndInstallUpdate(assetURL string) error {
 			return err
 		}
 		// Give the installer a moment to actually launch and show its
-		// own window, then quit Specter so its own exe is no longer
+		// own window, then quit Xpecter so its own exe is no longer
 		// locked, the installer needs that to overwrite the old files
 		// as part of a normal reinstall to the same location (this is
 		// the installer's own well-tested behavior, not something
-		// Specter deletes manually). Async so this method still returns
+		// Xpecter deletes manually). Async so this method still returns
 		// normally to the frontend first, rather than the app
 		// disappearing mid-request.
 		go func() {
@@ -315,7 +315,7 @@ func untarGz(tarGzPath, destDir string) error {
 
 // isNewerVersion does a simple numeric major.minor.patch comparison of
 // "vX.Y.Z"-style tags. Not a full semver implementation (no
-// prerelease/build-metadata handling), Specter's own tags are plain
+// prerelease/build-metadata handling), Xpecter's own tags are plain
 // vX.Y.Z, so this is deliberately kept minimal rather than pulling in a
 // semver dependency for something this narrow.
 func isNewerVersion(latest, current string) bool {

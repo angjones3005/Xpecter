@@ -57,7 +57,7 @@ func TestLoadSessionsWithoutPinnedField(t *testing.T) {
 	}
 }
 
-// omitempty means an unpinned session adds no key, so upgrading Specter
+// omitempty means an unpinned session adds no key, so upgrading Xpecter
 // does not rewrite every existing entry in sessions.json.
 func TestUnpinnedSessionOmitsPinnedKey(t *testing.T) {
 	encoded, err := json.Marshal(SessionProfile{ID: "1", Name: "plain"})

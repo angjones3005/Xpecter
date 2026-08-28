@@ -19,7 +19,7 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
 
-	"specter/backend/idgen"
+	"xpecter/backend/idgen"
 )
 
 var ErrPassphraseRequired = errors.New("private key is encrypted, passphrase required")
@@ -36,7 +36,7 @@ type Config struct {
 	X11           bool
 	// IgnoreKeyPermWarning skips the KeyPermissionWarning check below,
 	// set only after the user has explicitly acknowledged it once
-	// (SPE-65). Specter didn't create the user's key file, so this is a
+	// (SPE-65). Xpecter didn't create the user's key file, so this is a
 	// soft warning with real user choice, not a hard block like OpenSSH
 	// itself does.
 	IgnoreKeyPermWarning bool
@@ -107,7 +107,7 @@ func (e *HostKeyChangedError) Error() string {
 
 // KeyPermissionWarning means the selected private key file is
 // group/world-readable, the same condition real OpenSSH refuses to use
-// a key under. Specter treats it as a soft warning rather than a hard
+// a key under. Xpecter treats it as a soft warning rather than a hard
 // block (SPE-65), since it didn't create this file and the user may
 // have a real reason it's set up this way, but they should know.
 type KeyPermissionWarning struct {
@@ -283,7 +283,7 @@ func Dial(cfg Config) (*Session, error) {
 
 	var authMethods []ssh.AuthMethod
 	if cfg.InternalAgent && cfg.KeyPath == "" {
-		return nil, fmt.Errorf("specter internal SSH agent requires a private key path")
+		return nil, fmt.Errorf("xpecter internal SSH agent requires a private key path")
 	}
 	if cfg.KeyPath != "" {
 		if !cfg.IgnoreKeyPermWarning {

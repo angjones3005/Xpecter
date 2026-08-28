@@ -1,5 +1,5 @@
 // Package idgen generates short random hex IDs, used for session,
-// group, and profile identifiers throughout Specter. Previously
+// group, and profile identifiers throughout Xpecter. Previously
 // duplicated verbatim in app.go and sshclient.go.
 package idgen
 

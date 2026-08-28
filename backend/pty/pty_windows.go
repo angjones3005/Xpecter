@@ -26,7 +26,7 @@ func newPlatformTerminal(onData func([]byte), shell string, dir string) (termina
 	}
 
 	// The UserExistsError/conpty wrapper doesn't expose a per-process
-	// environment option, so this sets TERM/COLORTERM on Specter's own
+	// environment option, so this sets TERM/COLORTERM on Xpecter's own
 	// process instead, once per call is harmless. ConPTY-spawned
 	// children inherit the parent's environment by default (the same
 	// CreateProcess behavior os/exec relies on when Env is left unset

@@ -1,14 +1,14 @@
-# Specter backlog handoff for Claude
+# Xpecter backlog handoff for Claude
 
 ## Product summary
 
-Specter is a cross-platform terminal application focused on SSH, local shells, serial consoles, and remote file workflows. The product already has a meaningful core: it works as a real terminal tool and is structured around a clear user problem rather than a generic all-purpose console.
+Xpecter is a cross-platform terminal application focused on SSH, local shells, serial consoles, and remote file workflows. The product already has a meaningful core: it works as a real terminal tool and is structured around a clear user problem rather than a generic all-purpose console.
 
 The product is no longer at the question of whether it works. The next question is whether it feels like a place users want to spend hours in every day. At this stage, polish matters more than feature breadth.
 
 ## Strategic direction
 
-The best path to success is not more features for the sake of feature count. The path is to make Specter feel fast, coherent, and calm in daily use. The app should feel premium in the small things: quick session switching, consistent visual hierarchy, strong home experience, smooth terminal behavior, and a low-friction workflow for infrastructure-heavy work.
+The best path to success is not more features for the sake of feature count. The path is to make Xpecter feel fast, coherent, and calm in daily use. The app should feel premium in the small things: quick session switching, consistent visual hierarchy, strong home experience, smooth terminal behavior, and a low-friction workflow for infrastructure-heavy work.
 
 The next product phase should focus on:
 - session workflow ergonomics
@@ -21,7 +21,7 @@ The next product phase should focus on:
 
 ## Primary goal
 
-Turn Specter from a working utility into a tool people want to keep open all day.
+Turn Xpecter from a working utility into a tool people want to keep open all day.
 
 ## Backlog
 
@@ -241,4 +241,4 @@ Acceptance criteria:
 
 ## Final direction for Claude
 
-Please treat this as the next product phase for Specter. The product already has a working core, and the best path to success is not broad feature expansion but making the application feel like a daily-use environment for terminal-heavy work. Prioritize polish that improves session ergonomics, visual coherence, fast onboarding, and habit-forming daily workflows. The key objective is to make the app feel smooth, intentional, and comfortable enough that users want to live in it.
+Please treat this as the next product phase for Xpecter. The product already has a working core, and the best path to success is not broad feature expansion but making the application feel like a daily-use environment for terminal-heavy work. Prioritize polish that improves session ergonomics, visual coherence, fast onboarding, and habit-forming daily workflows. The key objective is to make the app feel smooth, intentional, and comfortable enough that users want to live in it.

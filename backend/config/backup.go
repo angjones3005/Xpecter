@@ -17,11 +17,15 @@ import (
 // insurance against a corrupted or accidentally-cleared local config,
 // so an accidental clear or on-disk corruption isn't a total loss.
 const (
-	backupDirName     = "backups"
-	backupFilePrefix  = "specter-backup-"
-	backupFileSuffix  = ".json"
-	backupMinInterval = 24 * time.Hour
-	backupRetainCount = 7
+	backupDirName    = "backups"
+	backupFilePrefix = "xpecter-backup-"
+	// Pre-rename (Specter) prefix, still on disk for anyone who was
+	// running the app before the rename. Only read, never written:
+	// migrateLegacyConfigDir renames these forward on first launch.
+	legacyBackupFilePrefix = "specter-backup-"
+	backupFileSuffix       = ".json"
+	backupMinInterval      = 24 * time.Hour
+	backupRetainCount      = 7
 )
 
 func backupDir() (string, error) {

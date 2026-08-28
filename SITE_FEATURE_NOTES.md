@@ -1,14 +1,14 @@
-# Specter Feature Notes
+# Xpecter Feature Notes
 
-Site-ready copy for the current Specter feature set.
+Site-ready copy for the current Xpecter feature set.
 
 ## Terminal Workspaces
 
 ### Home tab
-Specter keeps a dedicated Home tab available at all times, and it opens onto something useful rather than an empty state. Home shows pinned sessions, the sessions used most recently with how long ago each was opened, every saved session grouped by folder, and one-click local shell profiles. It also keeps the application open when every live session has been closed.
+Xpecter keeps a dedicated Home tab available at all times, and it opens onto something useful rather than an empty state. Home shows pinned sessions, the sessions used most recently with how long ago each was opened, every saved session grouped by folder, and one-click local shell profiles. It also keeps the application open when every live session has been closed.
 
 ### Quick connect
-A single field on Home searches saved sessions by name, host, or tag, and also accepts an address typed directly. Enter a `user@host` or `user@host:port` address and Specter offers it as an ad-hoc SSH target alongside any saved sessions that match. Arrow keys move through the results and Enter connects.
+A single field on Home searches saved sessions by name, host, or tag, and also accepts an address typed directly. Enter a `user@host` or `user@host:port` address and Xpecter offers it as an ad-hoc SSH target alongside any saved sessions that match. Arrow keys move through the results and Enter connects.
 
 ### Draggable tabs
 Reorder session tabs by dragging them left or right. The Home tab remains permanent and cannot be closed.
@@ -43,23 +43,23 @@ Use keys from:
 - Windows OpenSSH agent
 - PuTTY Pageant
 - Unix/macOS `SSH_AUTH_SOCK`
-- Specter's memory-only signer cache for repeated connections during one app run
+- Xpecter's memory-only signer cache for repeated connections during one app run
 
 Private keys and passphrases are not saved to session profiles.
 
 ### Mosh launcher
-Start a Mosh session from the Terminal menu. Mosh sessions reuse Specter's terminal tabs, resizing, logging, highlighting, and disconnect handling.
+Start a Mosh session from the Terminal menu. Mosh sessions reuse Xpecter's terminal tabs, resizing, logging, highlighting, and disconnect handling.
 
 The local machine needs the `mosh` client, and the remote host needs `mosh-server` with the required UDP ports available.
 
 ### Telnet launcher
-Start a Telnet session from either the Terminal menu or the New Session picker. Telnet uses Specter's terminal surface, including tabs, resizing, logging, highlighting, and session lifecycle handling.
+Start a Telnet session from either the Terminal menu or the New Session picker. Telnet uses Xpecter's terminal surface, including tabs, resizing, logging, highlighting, and session lifecycle handling.
 
 ### Serial console
 Connect to a serial port by port name and baud rate. Serial sessions are saved, grouped, and filtered alongside SSH sessions, and they use the same terminal surface, logging, and highlighting.
 
 ### X11 forwarding
-Opt in to X11 forwarding when creating an SSH session. Specter requests X11 forwarding and proxies incoming X11 channels to the local display.
+Opt in to X11 forwarding when creating an SSH session. Xpecter requests X11 forwarding and proxies incoming X11 channels to the local display.
 
 A local X server is required:
 
@@ -79,10 +79,10 @@ An optional keepalive holds idle sessions open against the timeouts that would o
 ## Session Management
 
 ### MobaXterm session import
-Import common INI-style `.mxtsessions` and `.ini` files from MobaXterm. Specter maps session names, hosts, usernames, ports, and key paths while deliberately skipping passwords.
+Import common INI-style `.mxtsessions` and `.ini` files from MobaXterm. Xpecter maps session names, hosts, usernames, ports, and key paths while deliberately skipping passwords.
 
 ### Session tags
-Add comma-separated tags to saved sessions. Specter trims and de-duplicates tags, and Quick Connect searches them.
+Add comma-separated tags to saved sessions. Xpecter trims and de-duplicates tags, and Quick Connect searches them.
 
 ### Persistent command snippets
 Save frequently used commands or configuration blocks as snippets. They appear in the Terminal menu and insert into the focused session through the existing paste safety guard.
@@ -90,19 +90,19 @@ Save frequently used commands or configuration blocks as snippets. They appear i
 ### Local shell profiles
 Save a named local shell with its own starting directory. Profiles appear in the Terminal menu and in the sidebar, so a shell that always opens in the right place is one click rather than a `cd`.
 
-### Open in Specter
-On Windows, Specter registers an Explorer context-menu entry for folders. Right-click a directory, or the background of one, to open a Specter session already in that directory.
+### Open in Xpecter
+On Windows, Xpecter registers an Explorer context-menu entry for folders. Right-click a directory, or the background of one, to open a Xpecter session already in that directory.
 
 ### Encrypted configuration bundles
 Export and import passphrase-protected configuration bundles for user-managed cloud storage. Bundles use PBKDF2-SHA256 and AES-256-GCM and contain no passwords or `known_hosts` entries.
 
-This supports a BYO-storage workflow with OneDrive, Dropbox, S3, or another file provider without sending configuration data to a Specter service.
+This supports a BYO-storage workflow with OneDrive, Dropbox, S3, or another file provider without sending configuration data to a Xpecter service.
 
 ### Continuous session logging
-Choose a log directory and Specter continuously appends raw SSH, local shell, and serial output to per-session log files. Logging is disabled until explicitly configured.
+Choose a log directory and Xpecter continuously appends raw SSH, local shell, and serial output to per-session log files. Logging is disabled until explicitly configured.
 
 ### Automatic configuration backups
-Specter creates periodic local configuration backups and provides a restore flow for settings, sessions, groups, and local shell profiles.
+Xpecter creates periodic local configuration backups and provides a restore flow for settings, sessions, groups, and local shell profiles.
 
 ## Text Editor
 
@@ -122,7 +122,7 @@ Add a file or a folder to the workspace you already have open. The tree header c
 Open and save files on the local machine, and write a buffer to any host you are connected to over SFTP. Files opened from the remote browser edit in the same panes as local ones. Reload From Disk re-reads a file that changed underneath you.
 
 ### Command palette and Go to File
-Ctrl+Shift+P opens the editor's command palette, listing Specter's own commands with their shortcuts. Ctrl+P jumps to any file in the open workspace by name. Both act on the pane holding the caret, so they do the right thing in a split.
+Ctrl+Shift+P opens the editor's command palette, listing Xpecter's own commands with their shortcuts. Ctrl+P jumps to any file in the open workspace by name. Both act on the pane holding the caret, so they do the right thing in a split.
 
 ### Editor commands
 Find and Replace, Go to Line, Go to Symbol, Format Document, Toggle Line Comment, Trim Trailing Whitespace, Sort Lines, Transform Case, and Fold and Unfold All. Word wrap, the minimap, and whitespace rendering are toggles that persist. Monaco's own command palette stays on F1 for everything not listed.
@@ -144,7 +144,7 @@ Skald, the switch-configuration DSL, is a first-class language in the editor. It
 ## Remote Files And Editing
 
 ### Open remote files with the system default app
-Open PDFs, images, and other remote files with the operating system's default application. Specter downloads a private temporary copy, preserves its timestamp, and invokes the platform handler.
+Open PDFs, images, and other remote files with the operating system's default application. Xpecter downloads a private temporary copy, preserves its timestamp, and invokes the platform handler.
 
 ### SFTP timestamp preservation
 Remote-to-local downloads preserve remote modification times. Drag-and-drop uploads carry the local file modification time to the remote file when supported.
@@ -183,7 +183,7 @@ Save what is on screen in a session to a file, including from the panel shown af
 Buttons, dropdowns, text inputs, password fields, and numeric controls share one compact control style with quiet borders, tight spacing, and consistent focus states.
 
 ### Consistent dialogs
-Every dialog in Specter, including the host key trust prompt and the encrypted key passphrase prompt, shares one definition and follows the active theme in both light and dark mode. All of them dismiss with Escape or a click outside.
+Every dialog in Xpecter, including the host key trust prompt and the encrypted key passphrase prompt, shares one definition and follows the active theme in both light and dark mode. All of them dismiss with Escape or a click outside.
 
 ### Grouped settings
 Settings opens as a dialog grouped into Appearance, Terminal, Clipboard and paste, Security, Session logging, Configuration, and About. Options that carry a real risk are separated and explained rather than listed alongside ordinary preferences.

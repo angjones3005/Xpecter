@@ -10,7 +10,7 @@ import (
 )
 
 func TestCleanupStaleRemoteFiles(t *testing.T) {
-	stale, err := os.MkdirTemp(os.TempDir(), "specter-remote-file-")
+	stale, err := os.MkdirTemp(os.TempDir(), "xpecter-remote-file-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +31,7 @@ func TestCleanupStaleRemoteFiles(t *testing.T) {
 }
 
 func TestCleanupStaleRemoteFilesKeepsRecentDirectory(t *testing.T) {
-	recent, err := os.MkdirTemp(os.TempDir(), "specter-remote-file-")
+	recent, err := os.MkdirTemp(os.TempDir(), "xpecter-remote-file-")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,6 @@
 package config
 
-import "specter/backend/idgen"
+import "xpecter/backend/idgen"
 
 // configBundleVersion lets a future release detect and migrate an
 // older exported file if the bundle shape ever needs to change.

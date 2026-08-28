@@ -32,6 +32,38 @@ import '@fontsource/ubuntu-mono/400.css';
 import '@fontsource/ubuntu-mono/700.css';
 import type { RemoteFile, LocalFile, Folder, ConnectRequest, SessionProfile, SessionGroup, SessionClosedEvent, Settings, UpdateInfo, LocalShellProfile } from '../wailsjs.d.ts';
 
+
+// The app was renamed from Specter to Xpecter, and every localStorage
+// key it uses is namespaced with that name. Renaming the keys without
+// moving the existing values across would silently reset an upgrading
+// user's theme, shortcuts, snippets, collapsed sections and the rest
+// back to defaults. One-time: the old keys are removed as they're
+// read, so later launches find nothing left to move.
+//
+// Position matters. Several preferences below are read at module
+// level, as the module evaluates, so this has to run before any of
+// them rather than from an init function called later.
+(function migrateRenamedStorageKeys(): void {
+  const legacyPrefix = 'specter-';
+  try {
+    // Object.keys snapshots up front, so removing inside the loop is safe.
+    for (const key of Object.keys(localStorage)) {
+      if (!key.startsWith(legacyPrefix)) continue;
+      const value = localStorage.getItem(key);
+      const renamed = `xpecter-${key.slice(legacyPrefix.length)}`;
+      // Never clobber a value already written under the new name: if
+      // both exist, the new one is the more recent truth.
+      if (value !== null && localStorage.getItem(renamed) === null) {
+        localStorage.setItem(renamed, value);
+      }
+      localStorage.removeItem(key);
+    }
+  } catch {
+    // Storage can throw outright (private mode, quota, blocked site
+    // data). Losing preferences is bad, failing to start is worse.
+  }
+})();
+
 type ThemeName = 'dark' | 'light';
 
 const XTERM_THEMES: Record<ThemeName, Record<string, string>> = {
@@ -147,10 +179,10 @@ function fontStack(fontId: string): string {
 
 // SPE-103: custom themes rather than plain vs-dark/vs, so the editor's
 // own chrome (gutter, current-line highlight, widgets) sits in
-// Specter's palette instead of VS Code's inside a Specter window. The
+// Xpecter's palette instead of VS Code's inside a Xpecter window. The
 // syntax colors themselves are inherited, there's no reason to
 // re-invent those.
-monaco.editor.defineTheme('specter-dark', {
+monaco.editor.defineTheme('xpecter-dark', {
   base: 'vs-dark',
   inherit: true,
   rules: [],
@@ -166,7 +198,7 @@ monaco.editor.defineTheme('specter-dark', {
     'editorCursor.foreground': '#dddddd',
   },
 });
-monaco.editor.defineTheme('specter-light', {
+monaco.editor.defineTheme('xpecter-light', {
   base: 'vs',
   inherit: true,
   rules: [],
@@ -184,8 +216,8 @@ monaco.editor.defineTheme('specter-light', {
 });
 
 const MONACO_THEMES: Record<ThemeName, string> = {
-  dark: 'specter-dark',
-  light: 'specter-light',
+  dark: 'xpecter-dark',
+  light: 'xpecter-light',
 };
 
 // --- Functional languages (SPE-107) ---
@@ -1162,7 +1194,7 @@ async function loadSettingsAndApply() {
 
 function applyTheme(name: ThemeName) {
   document.documentElement.setAttribute('data-theme', name);
-  localStorage.setItem('specter-theme', name);
+  localStorage.setItem('xpecter-theme', name);
 
   // Only follow the UI theme toggle for terminal ANSI colors when the
   // user hasn't explicitly picked a color-scheme preset (SPE-61);
@@ -1195,7 +1227,7 @@ function refitActiveTerminal() {
 }
 
 function currentTheme(): ThemeName {
-  const saved = localStorage.getItem('specter-theme');
+  const saved = localStorage.getItem('xpecter-theme');
   return saved === 'light' ? 'light' : 'dark';
 }
 
@@ -1370,7 +1402,7 @@ function paneIndexOf(tab: Tab, session: Session): number {
 // SPE-97: opt-in (defaults off), a numbered badge is a minor visual
 // addition, not a safety/correctness feature, so it follows the
 // opt-in convention rather than the default-on one.
-let showTabNumbersEnabled = localStorage.getItem('specter-show-tab-numbers') === 'on';
+let showTabNumbersEnabled = localStorage.getItem('xpecter-show-tab-numbers') === 'on';
 
 function renderTabBar() {
   const bar = document.getElementById('tab-bar')!;
@@ -1383,7 +1415,7 @@ function renderTabBar() {
     el.draggable = true;
     el.dataset.tabId = tab.id;
     el.addEventListener('dragstart', (event) => {
-      event.dataTransfer?.setData('text/specter-tab-id', tab.id);
+      event.dataTransfer?.setData('text/xpecter-tab-id', tab.id);
       event.dataTransfer?.setData('text/plain', tab.id);
       el.classList.add('dragging');
     });
@@ -1400,7 +1432,7 @@ function renderTabBar() {
     el.addEventListener('drop', (event) => {
       event.preventDefault();
       el.classList.remove('drop-target');
-      const draggedId = event.dataTransfer?.getData('text/specter-tab-id') || event.dataTransfer?.getData('text/plain');
+      const draggedId = event.dataTransfer?.getData('text/xpecter-tab-id') || event.dataTransfer?.getData('text/plain');
       if (draggedId && draggedId !== tab.id) reorderTabs(draggedId, tab.id);
     });
     el.onclick = () => switchToTab(tab.id);
@@ -1672,7 +1704,7 @@ function ensurePaneGrid(tab: Tab) {
 // another pane being dragged onto it. Shared, because a wrapper gets
 // built in three places (empty pane, terminal, editor) and only one of
 // them existed when the mousedown handler was first written.
-const PANE_DRAG_TYPE = 'text/specter-pane-id';
+const PANE_DRAG_TYPE = 'text/xpecter-pane-id';
 
 function preparePaneWrapper(wrapper: HTMLDivElement, session: Session, tab: Tab) {
   wrapper.addEventListener('mousedown', () => focusPane(tab, paneIndexOf(tab, session)));
@@ -2115,7 +2147,7 @@ function setupCustomScrollbar(session: Session) {
 // several config commands in sequence. Toggleable, matching the
 // checkbox precedent this was modeled on; not everyone wants a prompt
 // on every multi-line paste.
-let warnMultilinePasteEnabled = localStorage.getItem('specter-warn-multiline-paste') !== 'off';
+let warnMultilinePasteEnabled = localStorage.getItem('xpecter-warn-multiline-paste') !== 'off';
 
 function writeToSessionWithPasteGuard(session: Session, text: string) {
   if (warnMultilinePasteEnabled) {
@@ -2448,7 +2480,7 @@ const DEFAULT_EDITOR_PREFS: EditorPrefs = {
 
 function loadEditorPrefs(): EditorPrefs {
   try {
-    return { ...DEFAULT_EDITOR_PREFS, ...JSON.parse(localStorage.getItem('specter-editor-prefs') || '{}') };
+    return { ...DEFAULT_EDITOR_PREFS, ...JSON.parse(localStorage.getItem('xpecter-editor-prefs') || '{}') };
   } catch {
     return { ...DEFAULT_EDITOR_PREFS };
   }
@@ -2457,7 +2489,7 @@ function loadEditorPrefs(): EditorPrefs {
 const editorPrefs = loadEditorPrefs();
 
 function saveEditorPrefs() {
-  localStorage.setItem('specter-editor-prefs', JSON.stringify(editorPrefs));
+  localStorage.setItem('xpecter-editor-prefs', JSON.stringify(editorPrefs));
 }
 
 // Applies whatever the preference toggles changed to every open editor,
@@ -2475,7 +2507,7 @@ const RECENT_FILES_LIMIT = 12;
 
 function loadRecentFiles(): string[] {
   try {
-    const parsed = JSON.parse(localStorage.getItem('specter-editor-recent') || '[]');
+    const parsed = JSON.parse(localStorage.getItem('xpecter-editor-recent') || '[]');
     if (!Array.isArray(parsed)) return [];
     return parsed.filter((entry): entry is string => typeof entry === 'string');
   } catch {
@@ -2485,7 +2517,7 @@ function loadRecentFiles(): string[] {
 
 function rememberRecentFile(path: string) {
   const next = [path, ...loadRecentFiles().filter((entry) => entry !== path)].slice(0, RECENT_FILES_LIMIT);
-  localStorage.setItem('specter-editor-recent', JSON.stringify(next));
+  localStorage.setItem('xpecter-editor-recent', JSON.stringify(next));
 }
 
 // Handles both separators deliberately: local paths are Windows-shaped
@@ -2533,7 +2565,7 @@ function flashStatus(message: string, isError = false) {
   el.style.color = isError ? 'var(--danger)' : 'var(--success)';
   if (statusFlashTimer) clearTimeout(statusFlashTimer);
   statusFlashTimer = setTimeout(() => {
-    el.textContent = 'Specter';
+    el.textContent = 'Xpecter';
     el.style.color = '';
   }, 2600);
 }
@@ -3161,7 +3193,7 @@ function buildDocTab(pane: EditorPane, doc: EditorDoc, isActive: boolean): HTMLD
     void closeDoc(doc);
   };
   el.addEventListener('dragstart', (event) => {
-    event.dataTransfer?.setData('text/specter-doc-id', doc.id);
+    event.dataTransfer?.setData('text/xpecter-doc-id', doc.id);
     el.classList.add('dragging');
   });
   el.addEventListener('dragend', () => {
@@ -3177,7 +3209,7 @@ function buildDocTab(pane: EditorPane, doc: EditorDoc, isActive: boolean): HTMLD
   el.addEventListener('drop', (event) => {
     event.preventDefault();
     el.classList.remove('drop-target');
-    const draggedId = event.dataTransfer?.getData('text/specter-doc-id');
+    const draggedId = event.dataTransfer?.getData('text/xpecter-doc-id');
     if (draggedId && draggedId !== doc.id) reorderDocs(pane, draggedId, doc.id);
   });
 
@@ -3323,7 +3355,7 @@ const RECENT_FOLDERS_LIMIT = 8;
 
 function loadRecentFolders(): string[] {
   try {
-    const parsed = JSON.parse(localStorage.getItem('specter-editor-recent-folders') || '[]');
+    const parsed = JSON.parse(localStorage.getItem('xpecter-editor-recent-folders') || '[]');
     if (!Array.isArray(parsed)) return [];
     return parsed.filter((entry): entry is string => typeof entry === 'string');
   } catch {
@@ -3333,7 +3365,7 @@ function loadRecentFolders(): string[] {
 
 function rememberRecentFolder(folder: string) {
   const next = [folder, ...loadRecentFolders().filter((entry) => entry !== folder)].slice(0, RECENT_FOLDERS_LIMIT);
-  localStorage.setItem('specter-editor-recent-folders', JSON.stringify(next));
+  localStorage.setItem('xpecter-editor-recent-folders', JSON.stringify(next));
 }
 
 async function chooseFolder(pane: EditorPane) {
@@ -4051,7 +4083,7 @@ function registerEditorKeybindings(pane: EditorPane) {
   // key: createContextKey writes into this editor's scoped context
   // service, so the expression is only true while this editor has
   // focus, and the shared service resolves the key to the right pane.
-  const scope = `specterEditorPane${editorScopeSeq += 1}`;
+  const scope = `xpecterEditorPane${editorScopeSeq += 1}`;
   pane.editor.createContextKey(scope, true);
   // Belt to that brace. The pane is resolved when the key is pressed
   // rather than when it is bound, so a registration that resolves to
@@ -4287,7 +4319,7 @@ async function refreshFileList(path = '.', sessionId?: string) {
     if (e.isDir) {
       div.onclick = () => refreshFileList(e.path, id);
     } else {
-      div.title = 'Open in Specter; Shift-click to open with the system app';
+      div.title = 'Open in Xpecter; Shift-click to open with the system app';
       div.onauxclick = (event) => {
         if (event.button === 1) {
           void App.OpenRemoteFile(id, e.path).catch((err) => {
@@ -4579,7 +4611,7 @@ function renderSessionRow(s: SessionProfile, depth: number, live: Map<string, Se
   row.dataset.sessionId = s.id;
   row.tabIndex = -1;
   row.addEventListener('dragstart', (e) => {
-    e.dataTransfer?.setData('text/specter-session-id', s.id);
+    e.dataTransfer?.setData('text/xpecter-session-id', s.id);
   });
 
   const running = live.get(s.id) ?? null;
@@ -4901,7 +4933,7 @@ function renderGroupNode(
   header.addEventListener('drop', async (e) => {
     e.preventDefault();
     header.classList.remove('drop-target');
-    const sessionId = e.dataTransfer?.getData('text/specter-session-id');
+    const sessionId = e.dataTransfer?.getData('text/xpecter-session-id');
     if (!sessionId) return;
     const all = await App.ListSessions();
     const moved = all.find((x) => x.id === sessionId);
@@ -4979,12 +5011,12 @@ let sessionSearchQuery = '';
 // collapsed. They used to be force-collapsed on every launch, which
 // meant the panel opened showing folder names and nothing else.
 const collapsedGroups = new Set<string>(loadCollapsedGroups());
-let runningCollapsed = localStorage.getItem('specter-running-collapsed') === 'on';
-let pinnedCollapsed = localStorage.getItem('specter-pinned-collapsed') === 'on';
+let runningCollapsed = localStorage.getItem('xpecter-running-collapsed') === 'on';
+let pinnedCollapsed = localStorage.getItem('xpecter-pinned-collapsed') === 'on';
 
 function loadCollapsedGroups(): string[] {
   try {
-    const parsed = JSON.parse(localStorage.getItem('specter-collapsed-groups') || '[]');
+    const parsed = JSON.parse(localStorage.getItem('xpecter-collapsed-groups') || '[]');
     return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
   } catch {
     return [];
@@ -4992,17 +5024,17 @@ function loadCollapsedGroups(): string[] {
 }
 
 function saveCollapsedGroups() {
-  localStorage.setItem('specter-collapsed-groups', JSON.stringify(Array.from(collapsedGroups)));
+  localStorage.setItem('xpecter-collapsed-groups', JSON.stringify(Array.from(collapsedGroups)));
 }
 // SPE-64: defaults OFF. OSC 52 lets whatever's running on the remote
 // end write directly to the local OS clipboard with zero confirmation,
 // including from a host you haven't decided to trust yet, the exact
-// TOFU moment Specter's own host-key verification exists to gate.
+// TOFU moment Xpecter's own host-key verification exists to gate.
 // Opt-in via Settings for anyone who wants the convenience.
-let osc52Enabled = localStorage.getItem('specter-osc52') === 'on';
-let copyOnSelectEnabled = localStorage.getItem('specter-copy-on-select') === 'on';
-let rightClickPasteEnabled = localStorage.getItem('specter-rclick-paste') !== 'off';
-let highlightEnabled = localStorage.getItem('specter-highlight') !== 'off';
+let osc52Enabled = localStorage.getItem('xpecter-osc52') === 'on';
+let copyOnSelectEnabled = localStorage.getItem('xpecter-copy-on-select') === 'on';
+let rightClickPasteEnabled = localStorage.getItem('xpecter-rclick-paste') !== 'off';
+let highlightEnabled = localStorage.getItem('xpecter-highlight') !== 'off';
 
 type ShortcutId = 'disconnect' | 'paste' | 'sidebar' | 'zoomIn' | 'zoomOut' | 'resetZoom' | 'fullscreen' | 'splitVertical' | 'splitHorizontal' | 'closePane';
 type ShortcutBinding = { ctrl: boolean; shift: boolean; alt: boolean; key: string };
@@ -5022,7 +5054,7 @@ let shortcuts: Record<ShortcutId, ShortcutBinding> = loadShortcuts();
 
 function loadShortcuts(): Record<ShortcutId, ShortcutBinding> {
   try {
-    const parsed = JSON.parse(localStorage.getItem('specter-shortcuts') || '{}');
+    const parsed = JSON.parse(localStorage.getItem('xpecter-shortcuts') || '{}');
     return Object.fromEntries(Object.entries(DEFAULT_SHORTCUTS).map(([id, binding]) => [id, { ...binding, ...(parsed[id] || {}) }])) as Record<ShortcutId, ShortcutBinding>;
   } catch {
     return { ...DEFAULT_SHORTCUTS };
@@ -5036,7 +5068,7 @@ function shortcutMatches(event: KeyboardEvent, id: ShortcutId): boolean {
 }
 
 function saveShortcuts() {
-  localStorage.setItem('specter-shortcuts', JSON.stringify(shortcuts));
+  localStorage.setItem('xpecter-shortcuts', JSON.stringify(shortcuts));
 }
 
 type CommandSnippet = { name: string; command: string };
@@ -5044,7 +5076,7 @@ let commandSnippets: CommandSnippet[] = loadCommandSnippets();
 
 function loadCommandSnippets(): CommandSnippet[] {
   try {
-    const parsed = JSON.parse(localStorage.getItem('specter-command-snippets') || '[]');
+    const parsed = JSON.parse(localStorage.getItem('xpecter-command-snippets') || '[]');
     if (!Array.isArray(parsed)) return [];
     return parsed.filter((item): item is CommandSnippet =>
       !!item && typeof item.name === 'string' && typeof item.command === 'string');
@@ -5054,7 +5086,7 @@ function loadCommandSnippets(): CommandSnippet[] {
 }
 
 function saveCommandSnippets() {
-  localStorage.setItem('specter-command-snippets', JSON.stringify(commandSnippets));
+  localStorage.setItem('xpecter-command-snippets', JSON.stringify(commandSnippets));
 }
 
 function renderCommandSnippetsMenu() {
@@ -5612,7 +5644,7 @@ async function renderSessionList() {
     head.appendChild(count);
     head.onclick = () => {
       pinnedCollapsed = !pinnedCollapsed;
-      localStorage.setItem('specter-pinned-collapsed', pinnedCollapsed ? 'on' : 'off');
+      localStorage.setItem('xpecter-pinned-collapsed', pinnedCollapsed ? 'on' : 'off');
       renderSessionList();
     };
     list.appendChild(head);
@@ -5642,7 +5674,7 @@ async function renderSessionList() {
     head.appendChild(count);
     head.onclick = () => {
       runningCollapsed = !runningCollapsed;
-      localStorage.setItem('specter-running-collapsed', runningCollapsed ? 'on' : 'off');
+      localStorage.setItem('xpecter-running-collapsed', runningCollapsed ? 'on' : 'off');
       renderSessionList();
     };
     list.appendChild(head);
@@ -6212,8 +6244,8 @@ for (const id of ['home-new-session-btn', 'home-new-session-top']) {
 // no password mode and showed the passphrase in cleartext on-screen
 // while typing. Mirrors showTrustPrompt's modal pattern below.
 // SPE-65: soft warning for a group/world-readable key file, real
-// OpenSSH refuses to use one outright, Specter warns but lets the user
-// proceed, since it's their key and Specter didn't create the file.
+// OpenSSH refuses to use one outright, Xpecter warns but lets the user
+// proceed, since it's their key and Xpecter didn't create the file.
 // SPE-101: one builder for the dialogs that are constructed in JS
 // rather than declared in index.html. Each used to hardcode its own
 // dark palette (#1e1e1e panel, #ddd text, #3a3a3a border), so all three
@@ -6330,8 +6362,8 @@ function dialogText(body: HTMLDivElement, text: string, tone?: 'warn' | 'danger'
 // no password mode and showed the passphrase in cleartext on-screen
 // while typing.
 // SPE-65: soft warning for a group/world-readable key file, real
-// OpenSSH refuses to use one outright, Specter warns but lets the user
-// proceed, since it's their key and Specter didn't create the file.
+// OpenSSH refuses to use one outright, Xpecter warns but lets the user
+// proceed, since it's their key and Xpecter didn't create the file.
 function showKeyPermWarning(opts: { path: string; mode: string; onProceed: () => void; onCancel: () => void }) {
   buildDialog({
     title: 'Key file permissions are too open',
@@ -6454,7 +6486,7 @@ function wireSSHEvents(session: Session, sessionId: string, req: ConnectRequest)
 // so "connected automatically" never means "silently weaker security
 // without you knowing."
 function notifyLegacyCompat(host: string) {
-  alert(`Connected to ${host} using legacy compatibility mode: this device only supports older SSH algorithms, so this connection uses reduced security compared to Specter's normal defaults.`);
+  alert(`Connected to ${host} using legacy compatibility mode: this device only supports older SSH algorithms, so this connection uses reduced security compared to Xpecter's normal defaults.`);
 }
 
 async function reconnectSSH(session: Session, req: ConnectRequest): Promise<void> {
@@ -6751,7 +6783,7 @@ async function newLocalForward() {
   }
 }
 
-// SPE: lets a local shell start somewhere other than Specter's own
+// SPE: lets a local shell start somewhere other than Xpecter's own
 // working directory. A native folder picker rather than a free-text
 // path field, avoids typos and matches the existing SelectKeyFile/
 // SelectAnyFile pattern. Cancelling the picker just skips launching,
@@ -6911,7 +6943,7 @@ authRadios.forEach((radio) => {
 });
 
 // --- Init: start with one pending tab, or a local shell rooted at the
-// launch directory (SPE-86: Windows Explorer's "Open in Specter") ---
+// launch directory (SPE-86: Windows Explorer's "Open in Xpecter") ---
 // SPE-100: all three sidebar sections collapse the same way and
 // remember their state, replacing the one-off Remote-files toggle that
 // hand-edited its own label text.
@@ -6919,7 +6951,7 @@ type SidebarSection = 'sessions' | 'shells' | 'folders' | 'files';
 
 function loadCollapsedSections(): Set<SidebarSection> {
   try {
-    const parsed = JSON.parse(localStorage.getItem('specter-sidebar-sections') || '[]');
+    const parsed = JSON.parse(localStorage.getItem('xpecter-sidebar-sections') || '[]');
     return new Set(Array.isArray(parsed) ? parsed : []);
   } catch {
     return new Set();
@@ -6945,7 +6977,7 @@ document.querySelectorAll('#sidebar .side-head').forEach((head) => {
     if (!section) return;
     if (collapsedSections.has(section)) collapsedSections.delete(section);
     else collapsedSections.add(section);
-    localStorage.setItem('specter-sidebar-sections', JSON.stringify(Array.from(collapsedSections)));
+    localStorage.setItem('xpecter-sidebar-sections', JSON.stringify(Array.from(collapsedSections)));
     applySidebarSections();
   });
 });
@@ -7089,11 +7121,11 @@ async function checkForUpdate(manual = false) {
     if (manual) alert(`You're up to date (${info.currentVersion}).`);
     return;
   }
-  if (!manual && localStorage.getItem('specter-update-dismissed') === info.latestVersion) return;
+  if (!manual && localStorage.getItem('xpecter-update-dismissed') === info.latestVersion) return;
 
   const banner = document.getElementById('update-banner')!;
   document.getElementById('update-banner-text')!.textContent =
-    `A new version of Specter is available: ${info.latestVersion} (you're on ${info.currentVersion})`;
+    `A new version of Xpecter is available: ${info.latestVersion} (you're on ${info.currentVersion})`;
   banner.style.display = 'flex';
 
   const downloadBtn = document.getElementById('update-banner-download') as HTMLButtonElement;
@@ -7114,7 +7146,7 @@ async function checkForUpdate(manual = false) {
       await App.DownloadAndInstallUpdate(info.assetUrl);
       downloadBtn.textContent = 'Downloaded';
       // On Windows this is genuinely done, the installer is now open on
-      // top of Specter. On macOS/Linux, a file manager window just
+      // top of Xpecter. On macOS/Linux, a file manager window just
       // opened showing the extracted files, there's no single-file
       // "launch" without a real installer format.
     } catch (err) {
@@ -7124,7 +7156,7 @@ async function checkForUpdate(manual = false) {
     }
   });
   document.getElementById('update-banner-dismiss')!.addEventListener('click', () => {
-    localStorage.setItem('specter-update-dismissed', info.latestVersion);
+    localStorage.setItem('xpecter-update-dismissed', info.latestVersion);
     banner.style.display = 'none';
   });
 }
@@ -7142,28 +7174,28 @@ const osc52Toggle = document.getElementById('osc52-toggle') as HTMLInputElement;
 osc52Toggle.checked = osc52Enabled;
 osc52Toggle.addEventListener('change', () => {
   osc52Enabled = osc52Toggle.checked;
-  localStorage.setItem('specter-osc52', osc52Enabled ? 'on' : 'off');
+  localStorage.setItem('xpecter-osc52', osc52Enabled ? 'on' : 'off');
 });
 
 const copyOnSelectToggle = document.getElementById('copy-on-select-toggle') as HTMLInputElement;
 copyOnSelectToggle.checked = copyOnSelectEnabled;
 copyOnSelectToggle.addEventListener('change', () => {
   copyOnSelectEnabled = copyOnSelectToggle.checked;
-  localStorage.setItem('specter-copy-on-select', copyOnSelectEnabled ? 'on' : 'off');
+  localStorage.setItem('xpecter-copy-on-select', copyOnSelectEnabled ? 'on' : 'off');
 });
 
 const rclickPasteToggle = document.getElementById('rclick-paste-toggle') as HTMLInputElement;
 rclickPasteToggle.checked = rightClickPasteEnabled;
 rclickPasteToggle.addEventListener('change', () => {
   rightClickPasteEnabled = rclickPasteToggle.checked;
-  localStorage.setItem('specter-rclick-paste', rightClickPasteEnabled ? 'on' : 'off');
+  localStorage.setItem('xpecter-rclick-paste', rightClickPasteEnabled ? 'on' : 'off');
 });
 
 const warnMultilinePasteToggle = document.getElementById('warn-multiline-paste-toggle') as HTMLInputElement;
 warnMultilinePasteToggle.checked = warnMultilinePasteEnabled;
 warnMultilinePasteToggle.addEventListener('change', () => {
   warnMultilinePasteEnabled = warnMultilinePasteToggle.checked;
-  localStorage.setItem('specter-warn-multiline-paste', warnMultilinePasteEnabled ? 'on' : 'off');
+  localStorage.setItem('xpecter-warn-multiline-paste', warnMultilinePasteEnabled ? 'on' : 'off');
 });
 
 // SPE-79: unlike the toggles above, this one lives in the Go-backed
@@ -7200,15 +7232,15 @@ document.getElementById('menu-reset-settings')!.addEventListener('click', async 
   closeAllMenus();
   if (!confirm('Reset all settings to defaults? Saved sessions will not be changed.')) return;
   for (const key of [
-    'specter-theme',
-    'specter-osc52',
-    'specter-copy-on-select',
-    'specter-rclick-paste',
-    'specter-warn-multiline-paste',
-    'specter-show-tab-numbers',
-    'specter-highlight',
-    'specter-command-snippets',
-    'specter-shortcuts',
+    'xpecter-theme',
+    'xpecter-osc52',
+    'xpecter-copy-on-select',
+    'xpecter-rclick-paste',
+    'xpecter-warn-multiline-paste',
+    'xpecter-show-tab-numbers',
+    'xpecter-highlight',
+    'xpecter-command-snippets',
+    'xpecter-shortcuts',
   ]) {
     localStorage.removeItem(key);
   }
@@ -7237,7 +7269,7 @@ const showTabNumbersToggle = document.getElementById('show-tab-numbers-toggle') 
 showTabNumbersToggle.checked = showTabNumbersEnabled;
 showTabNumbersToggle.addEventListener('change', () => {
   showTabNumbersEnabled = showTabNumbersToggle.checked;
-  localStorage.setItem('specter-show-tab-numbers', showTabNumbersEnabled ? 'on' : 'off');
+  localStorage.setItem('xpecter-show-tab-numbers', showTabNumbersEnabled ? 'on' : 'off');
   renderTabBar();
 });
 
@@ -7245,7 +7277,7 @@ const highlightToggle = document.getElementById('highlight-toggle') as HTMLInput
 highlightToggle.checked = highlightEnabled;
 highlightToggle.addEventListener('change', () => {
   highlightEnabled = highlightToggle.checked;
-  localStorage.setItem('specter-highlight', highlightEnabled ? 'on' : 'off');
+  localStorage.setItem('xpecter-highlight', highlightEnabled ? 'on' : 'off');
 });
 
 document.getElementById('menu-manage-snippets')!.addEventListener('click', () => {
@@ -7826,7 +7858,7 @@ document.getElementById('menu-toggle-fullscreen')!.addEventListener('click', () 
 // disconnect, paste, close pane, pane navigation, the disconnected-
 // panel-only keys), several of which aren't shown anywhere else in the
 // UI. Deliberately does NOT bind a new key (like a bare "?") to open
-// this itself: Specter's whole surface is terminal input, and a bare
+// this itself: Xpecter's whole surface is terminal input, and a bare
 // single-key binding would swallow a character real shells/programs
 // need to receive, the same reasoning already documented for why
 // Ctrl+B isn't used bare for the sidebar toggle below. Menu-only is
@@ -8045,13 +8077,13 @@ document.getElementById('menu-import-mobaxterm')!.addEventListener('click', asyn
 });
 
 // --- Restore from automatic backup (SPE-87) ---
-// filenameToLabel parses the "specter-backup-YYYYMMDD-HHMMSS.json"
+// filenameToLabel parses the "xpecter-backup-YYYYMMDD-HHMMSS.json"
 // format written by config.BackupIfDue (Go side) into a readable local
 // date/time for display, purely cosmetic, doesn't affect which file
 // actually gets restored (that's always the exact filename passed to
 // App.RestoreBackup).
 function backupFilenameToLabel(filename: string): string {
-  const match = filename.match(/^specter-backup-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})\.json$/);
+  const match = filename.match(/^xpecter-backup-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})\.json$/);
   if (!match) return filename;
   const [, y, mo, d, h, mi, s] = match;
   // The Go side writes these in UTC (time.Now().UTC()), constructed
@@ -8075,7 +8107,7 @@ async function openBackupRestoreDialog() {
   if (backups.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'backup-empty';
-    empty.textContent = 'No automatic backups yet. Specter creates one at most once a day.';
+    empty.textContent = 'No automatic backups yet. Xpecter creates one at most once a day.';
     list.appendChild(empty);
   } else {
     for (const filename of backups) {

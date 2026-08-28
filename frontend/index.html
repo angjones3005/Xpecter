@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Specter</title>
+  <title>Xpecter</title>
   <style>
     :root[data-theme="dark"] {
       color-scheme: dark;
@@ -493,7 +493,7 @@
     #lsp-editor .fields { display: flex; flex-direction: column; gap: 8px; padding: 16px; }
     /* SPE-62: real "Edit session" dialog, two tabs (Basic/Advanced) over
        actual SessionProfile fields, no placeholder tabs for settings
-       Specter doesn't have per-session yet (terminal theme is global,
+       Xpecter doesn't have per-session yet (terminal theme is global,
        SPE-61; SSH keepalive is global, SPE-79). */
     #session-editor { width: 340px; }
     #shortcuts-dialog { width: 420px; max-height: 80vh; }
@@ -604,7 +604,7 @@
 </head>
 <body>
   <div id="menubar">
-    <div id="titlebar-brand"><img src="/appicon.png" alt="" /><span>Specter</span></div>
+    <div id="titlebar-brand"><img src="/appicon.png" alt="" /><span>Xpecter</span></div>
     <div class="menu-item" data-menu="terminal">Terminal
       <div class="menu-dropdown" id="menu-terminal">
         <div class="item" id="menu-new-window">New Window</div>
@@ -758,7 +758,7 @@
         <div class="settings-row"><label>Log directory</label>
           <button id="session-log-browse" type="button" class="secondary">Choose&hellip;</button>
         </div>
-        <div class="settings-note">Off until a directory is chosen. Specter then appends raw session output to per-session files.</div>
+        <div class="settings-note">Off until a directory is chosen. Xpecter then appends raw session output to per-session files.</div>
         <div class="settings-row" id="session-log-clear-row" style="display:none;">
           <span class="settings-action danger" id="session-log-clear">Disable session logging</span>
         </div>
@@ -847,7 +847,7 @@
         <div id="home-inner">
           <div id="home-hero">
             <div class="home-hero-text">
-              <h1>Specter</h1>
+              <h1>Xpecter</h1>
               <p>Pick up where you left off, or type a host to connect.</p>
             </div>
             <div class="home-hero-actions">
@@ -962,7 +962,7 @@
         </span>
         <span id="auth-key-fields" style="display:none;flex-direction:column;gap:8px;">
           <label><input id="use-ssh-agent" type="checkbox" /> Use SSH agent (OpenSSH / Pageant)</label>
-          <label><input id="use-internal-agent" type="checkbox" /> Use Specter memory agent</label>
+          <label><input id="use-internal-agent" type="checkbox" /> Use Xpecter memory agent</label>
           <input id="keyPath" placeholder="key path" readonly class="dialog-field" />
           <button id="browse-key">Browse…</button>
           <input id="passphrase" placeholder="passphrase (if any)" type="password" class="dialog-field" />
@@ -982,7 +982,7 @@
         <input id="lsp-name" placeholder="Name" class="dialog-field" />
         <input id="lsp-command" placeholder="Command line (e.g. /bin/zsh, powershell.exe, wsl.exe -d Ubuntu-24.04)" class="dialog-field" />
         <div style="display:flex;gap:6px;">
-          <input id="lsp-dir" placeholder="Same as Specter" readonly style="flex:1;min-width:0;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
+          <input id="lsp-dir" placeholder="Same as Xpecter" readonly style="flex:1;min-width:0;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />
           <button id="lsp-browse-dir" type="button">Browse…</button>
         </div>
         <select id="lsp-icon" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 6px;">
@@ -1035,7 +1035,7 @@
             <button id="se-clear-key" type="button">Clear</button>
           </div>
           <label><input id="se-use-ssh-agent" type="checkbox" /> Use SSH agent (OpenSSH / Pageant)</label>
-          <label><input id="se-use-internal-agent" type="checkbox" /> Use Specter memory agent</label>
+          <label><input id="se-use-internal-agent" type="checkbox" /> Use Xpecter memory agent</label>
           <select id="se-devicekind-select" class="dialog-field">
             <option value="host">VM / Host</option>
             <option value="switch">Network switch</option>
@@ -1078,7 +1078,7 @@
       <div id="quickpick-list"></div>
     </div>
   </div>
-  <div id="statusbar">Specter</div>
+  <div id="statusbar">Xpecter</div>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

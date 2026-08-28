@@ -21,7 +21,13 @@ func (s *Session) EnableX11() error {
 	if display == "" {
 		return fmt.Errorf("X11 forwarding requested but DISPLAY is not set")
 	}
-	cookie := os.Getenv("SPECTER_X11_COOKIE")
+	cookie := os.Getenv("XPECTER_X11_COOKIE")
+	if cookie == "" {
+		// Pre-rename name, still honoured: someone who exports it in
+		// their shell profile shouldn't find the override silently
+		// stopped working after upgrading.
+		cookie = os.Getenv("SPECTER_X11_COOKIE")
+	}
 	if cookie == "" {
 		cookie = x11Cookie(display)
 	}

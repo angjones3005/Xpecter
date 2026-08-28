@@ -11,6 +11,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type SessionProfile struct {
@@ -51,16 +52,63 @@ type SessionGroup struct {
 	ParentID string `json:"parentId,omitempty"`
 }
 
+// configDirName is the on-disk directory every config file lives in.
+// legacyConfigDirName is what it was called before the app was renamed
+// from Specter to Xpecter: an existing install has all of its sessions,
+// settings, folders and backups sitting under the old name, so the
+// rename has to bring them across rather than silently presenting the
+// user with an empty config.
+const (
+	configDirName       = "xpecter"
+	legacyConfigDirName = "specter"
+)
+
 func configDir() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
 	}
-	full := filepath.Join(dir, "specter")
+	full := filepath.Join(dir, configDirName)
+	// Only when the new directory doesn't exist yet: once it does, this
+	// install has already migrated (or started life after the rename),
+	// and an old directory still lying around is stale, not the truth.
+	if _, err := os.Stat(full); os.IsNotExist(err) {
+		migrateLegacyConfigDir(filepath.Join(dir, legacyConfigDirName), full)
+	}
 	if err := os.MkdirAll(full, 0o700); err != nil {
 		return "", err
 	}
 	return full, nil
+}
+
+// migrateLegacyConfigDir moves the pre-rename config directory to the
+// new name, then renames the backup files inside it so ListBackups'
+// prefix match still finds them. Best-effort by design, and why the
+// caller ignores the outcome: a migration that can't complete (locked
+// file, permissions) should leave the app starting on a fresh config,
+// never refusing to start at all. The old directory is left untouched
+// in that case, so nothing is lost and the next launch retries.
+func migrateLegacyConfigDir(legacy, target string) {
+	info, err := os.Stat(legacy)
+	if err != nil || !info.IsDir() {
+		return
+	}
+	if err := os.Rename(legacy, target); err != nil {
+		return
+	}
+	backups := filepath.Join(target, backupDirName)
+	entries, err := os.ReadDir(backups)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasPrefix(name, legacyBackupFilePrefix) {
+			continue
+		}
+		renamed := backupFilePrefix + strings.TrimPrefix(name, legacyBackupFilePrefix)
+		_ = os.Rename(filepath.Join(backups, name), filepath.Join(backups, renamed))
+	}
 }
 
 func sessionsPath() (string, error) {

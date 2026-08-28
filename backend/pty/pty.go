@@ -22,7 +22,7 @@ type terminalImpl interface {
 // used (COMSPEC/PowerShell fallback on Windows, $SHELL/bash on Unix).
 // A non-empty shell requests a specific executable, e.g. "cmd.exe" or
 // "powershell.exe" on Windows, used by the Tools menu's quick launchers.
-// If dir is empty, the shell starts in Specter's own current working
+// If dir is empty, the shell starts in Xpecter's own current working
 // directory (each platform's own documented default for an unset
 // working directory), same as before this option existed.
 func New(onData func([]byte), shell string, dir string) (*LocalTerminal, error) {
@@ -42,8 +42,8 @@ func (l *LocalTerminal) Close() error                { return l.impl.Close() }
 // color-capable terminal identity that SSH sessions already get
 // explicitly (sshclient.go's StartShell calls
 // RequestPty("xterm-256color", ...)). Without this, a local shell tab
-// just inherits whatever TERM Specter's own process happened to have,
-// which is often empty when Specter's launched from a dock/Start menu
+// just inherits whatever TERM Xpecter's own process happened to have,
+// which is often empty when Xpecter's launched from a dock/Start menu
 // icon rather than a terminal, silently degrading ls --color, git
 // diff, prompt themes, and syntax highlighters to no-color even though
 // the same commands look fully colored over SSH. Respects an

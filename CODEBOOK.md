@@ -1,4 +1,4 @@
-# Specter Frontend Validation Codebook
+# Xpecter Frontend Validation Codebook
 
 ## Scope
 
@@ -12,14 +12,14 @@ This codebook documents frontend validation behavior for this repo when code is 
 
 ## Confirmed Symptoms
 
-- `npm ci` or `npm install` from Windows against `T:\specter\frontend` fails with:
-  - `EPERM: operation not permitted, mkdir 't:\\specter\\frontend'`
+- `npm ci` or `npm install` from Windows against `T:\xpecter\frontend` fails with:
+  - `EPERM: operation not permitted, mkdir 't:\\xpecter\\frontend'`
 - Basic Node filesystem writes can still succeed on `T:` (mkdir/rmdir test passes).
 - Frontend lint/type/build checks pass when the same folder is copied to a local Windows path (`C:\Temp\...`) and run there.
 - The same failure hits any tool that creates a parent directory before it
   writes, not just npm. That includes editor/agent file-write tooling
-  targeting anything under `T:\specter\frontend`, and `wails build` binding
-  generation (`Error: mkdir T:\specter\frontend\wailsjs\go\main: Access is
+  targeting anything under `T:\xpecter\frontend`, and `wails build` binding
+  generation (`Error: mkdir T:\xpecter\frontend\wailsjs\go\main: Access is
   denied`). That binding failure is non-fatal and the build still completes,
   because nothing imports the generated bindings.
 - Plain shell writes to those same paths succeed (`cp`, `>`, `>>`, heredocs).
@@ -39,7 +39,7 @@ This codebook documents frontend validation behavior for this repo when code is 
 Run Node tooling in the Linux VM on the native Linux path.
 
 ```bash
-cd /path/to/specter/frontend
+cd /path/to/xpecter/frontend
 npm ci
 npm run lint
 npx tsc --noEmit
@@ -50,7 +50,7 @@ npm run build
 
 Use Windows for executable smoke tests only.
 
-- Example binary: `build/bin/specter-test-wails.exe`
+- Example binary: `build/bin/xpecter-test-wails.exe`
 - Smoke test expectation: process starts and remains running, then can be stopped cleanly.
 
 ## Fallback Path (When VM-native tooling is unavailable)
@@ -58,10 +58,10 @@ Use Windows for executable smoke tests only.
 Use a local copy on Windows for frontend checks.
 
 ```powershell
-$dest='C:\Temp\specter-frontend-test'
+$dest='C:\Temp\xpecter-frontend-test'
 if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
 New-Item -ItemType Directory -Path $dest | Out-Null
-Copy-Item -Recurse -Force t:\specter\frontend\* $dest
+Copy-Item -Recurse -Force t:\xpecter\frontend\* $dest
 npm --prefix $dest ci
 npm --prefix $dest run lint
 Push-Location $dest

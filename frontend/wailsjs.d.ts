@@ -1,5 +1,5 @@
 // Wails injects these globals at build time from the Go backend's bound
-// methods (app.go). Hand-written here since Specter isn't using the
+// methods (app.go). Hand-written here since Xpecter isn't using the
 // `wails generate` codegen step yet, keep this in sync with app.go.
 export interface ConnectRequest {
   host: string;
@@ -154,7 +154,7 @@ export interface AppBindings {
   WriteLocalFile(path: string, content: string): Promise<void>;
   CreateLocalFile(dir: string, name: string): Promise<string>;
   CreateLocalDir(dir: string, name: string): Promise<string>;
-  // SPE-105: starts a second Specter process; Wails v2 is one window
+  // SPE-105: starts a second Xpecter process; Wails v2 is one window
   // per process, so this is the only shape a "new window" can take.
   OpenNewWindow(): Promise<void>;
   AppendSessionLog(directory: string, sessionId: string, label: string, content: string): Promise<void>;

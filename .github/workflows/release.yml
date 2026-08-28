@@ -14,13 +14,13 @@ jobs:
         include:
           - os: ubuntu-latest
             platform: linux
-            artifact: specter-linux-amd64.tar.gz
+            artifact: xpecter-linux-amd64.tar.gz
           - os: windows-latest
             platform: windows
-            artifact: specter-windows-amd64.zip
+            artifact: xpecter-windows-amd64.zip
           - os: macos-latest
             platform: darwin
-            artifact: specter-macos-universal.zip
+            artifact: xpecter-macos-universal.zip
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -113,7 +113,7 @@ jobs:
 
       # The exact filename Wails gives the NSIS installer isn't
       # something to hardcode and hope, confirmed the hard way (a first
-      # attempt assumed specter-amd64-installer.exe, the real build
+      # attempt assumed xpecter-amd64-installer.exe, the real build
       # produced something else, and the mismatch silently meant no
       # installer ever got uploaded, continue-on-error above hid the
       # underlying failure too). Find whatever file actually exists and
@@ -126,8 +126,8 @@ jobs:
         run: |
           $installer = Get-ChildItem -Path build/bin -Filter "*installer*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($installer) {
-            Copy-Item $installer.FullName build/bin/specter-windows-installer.exe
-            Write-Host "Found installer: $($installer.Name) -> specter-windows-installer.exe"
+            Copy-Item $installer.FullName build/bin/xpecter-windows-installer.exe
+            Write-Host "Found installer: $($installer.Name) -> xpecter-windows-installer.exe"
           } else {
             Write-Host "No installer file found in build/bin, NSIS build likely failed above."
           }
@@ -138,8 +138,8 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: specter-windows-installer.exe
-          path: build/bin/specter-windows-installer.exe
+          name: xpecter-windows-installer.exe
+          path: build/bin/xpecter-windows-installer.exe
           retention-days: 7
 
       - name: Build (macOS)
@@ -167,13 +167,13 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Publish release (Specter repo, private)
+      - name: Publish release (Xpecter repo, private)
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
           generate_release_notes: true
 
-      # Public-facing distribution: the Specter repo itself stays
+      # Public-facing distribution: the Xpecter repo itself stays
       # private, but builds still need somewhere the public can
       # download from. DAWNRAIL_TOKEN is a fine-grained PAT scoped to
       # just the Dawnrail repo with Contents: Read and write, the
