@@ -1442,7 +1442,7 @@ interface Session {
   // show which saved sessions are live right now and jump to the tab
   // already running one instead of opening a duplicate.
   sessionProfileId: string | null;
-  // SPE-122: true from the moment a connect starts until it resolves,
+  // SPE-128: true from the moment a connect starts until it resolves,
   // either way. A connect is several seconds of awaiting the backend,
   // and for all of it this Session still looks 'pending' to
   // ensurePendingTab and not-yet-'connected' to the sidebar, so a
@@ -2318,7 +2318,7 @@ function writeToSessionWithPasteGuard(session: Session, text: string) {
   if (session.mode === 'serial' && session.backendId) App.WriteSerial(session.backendId, text);
 }
 
-// SPE-122: tears down a session's terminal view (terminal, scrollbar,
+// SPE-128: tears down a session's terminal view (terminal, scrollbar,
 // webgl addon, disconnect overlay, and the term host they all live in)
 // without touching its backend session, which closeSessionBackend
 // still owns. Only for a wrapper about to be handed a new terminal,
@@ -2351,7 +2351,7 @@ function createTerminalForSession(session: Session, tab: Tab) {
     // header, drop the landing button, the real term-host below is
     // always created fresh either way.
     wrapper.querySelector('.pane-landing')?.remove();
-    // SPE-122: belt to the connecting guard's braces. Every term host
+    // SPE-128: belt to the connecting guard's braces. Every term host
     // appended below is flex:1, so a second one doesn't replace the
     // first, it halves the pane and sits under it. If a caller ever
     // reaches here with a live terminal already in this wrapper, drop
@@ -4881,7 +4881,7 @@ function sidebarSessionHost(s: SessionProfile): string {
 // additional connection to the same host stays available on the context
 // menu. Deliberately different from the old behaviour, which always
 // dialled a fresh connection.
-// SPE-122: a session that is mid-connect isn't in liveSessionsByProfile
+// SPE-128: a session that is mid-connect isn't in liveSessionsByProfile
 // yet, that map means "connected right now" and drives the sidebar's
 // live dot. Clicking the row again during those seconds must still go
 // to the tab already dialling it, not start a rival connection.
@@ -6798,7 +6798,7 @@ async function reconnectSSH(session: Session, req: ConnectRequest): Promise<void
 // passphrase/trust/key-perm prompts, save-session prompt) is unchanged.
 async function connectActiveTab(req: ConnectRequest) {
   const target: Session = pendingPaneTarget ?? tabs.get(activeTabId!)!;
-  // SPE-122: one dial at a time per Session. The retry paths inside
+  // SPE-128: one dial at a time per Session. The retry paths inside
   // runConnect (passphrase, key permissions, host trust) deliberately
   // re-enter through here, and still can: each of them returns out of
   // runConnect first, clearing the flag, and only then does the modal's
@@ -6814,7 +6814,7 @@ async function connectActiveTab(req: ConnectRequest) {
   }
 }
 
-// SPE-122: the picker's Connect button is dead space for the several
+// SPE-128: the picker's Connect button is dead space for the several
 // seconds a connect takes, which is exactly what invites the second
 // click the guard above now has to swallow. Say what it's doing.
 function setConnectButtonBusy(busy: boolean) {
@@ -7146,7 +7146,7 @@ async function connectSerialInActiveTab(portName: string, baud: number) {
   const target: Session = pendingPaneTarget ?? ownerTab;
   target.label = portName;
 
-  // SPE-122: the same one-dial-at-a-time guard the SSH path needs, for
+  // SPE-128: the same one-dial-at-a-time guard the SSH path needs, for
   // the same reason: the tab stays 'pending' for the whole open, so a
   // second click put a second serial terminal in this same pane.
   if (target.connecting) return;
