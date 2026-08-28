@@ -1017,9 +1017,7 @@ function applyFontSize(size: number) {
     for (const s of allSessions(tab)) {
       if (!s.term || !s.fitAddon) continue;
       s.term.options.fontSize = clamped;
-      s.fitAddon.fit();
-      if (s.mode === 'local' && s.backendId) App.ResizeLocalTerminal(s.backendId, s.term.cols, s.term.rows);
-      if (s.mode === 'ssh' && s.backendId) App.ResizeSSH(s.backendId, s.term.cols, s.term.rows);
+      syncSessionSize(s);
     }
   }
   // SPE-78: editors share the same font size setting as the terminal,
@@ -1030,9 +1028,113 @@ function applyFontSize(size: number) {
   App.SaveSettings(appSettings);
 }
 
+// SPE-127: the terminal is 80 columns wide. Always, whatever the window
+// is doing.
+//
+// Deriving the column count from the pane is what every modern terminal
+// does, and it is what made this one unusable on network gear. The
+// column count decides two separate things, and following the window
+// breaks both:
+//
+//   - What the remote lays its output out for. A FortiGate told it has
+//     ~120 columns prints a table that needs ~170 and wraps every row
+//     into a ragged pair; told 80 it prints a narrower table that fits.
+//     There is a whole band of widths where its output cannot fit the
+//     width it was given, and a window dragged to any size lands in it.
+//   - How xterm draws what it already has. Changing the column count
+//     reflows the entire buffer (Buffer._reflow runs whenever cols
+//     differ, with no option to stop it), so every resize and every
+//     zoom re-wrapped output that was already on screen and correct.
+//
+// 200 because this FortiGate's widest table runs to about 170
+// characters and this clears it, so the whole thing lands on screen
+// with nothing lost. Wider than most windows, which is fine: the pane
+// scrolls sideways (see .pane-term-host). A grid wider than the view
+// costs a scrollbar; a grid narrower than the output costs the columns
+// past the edge, permanently, because of the wrap mode below.
+//
+// Rows still follow the pane: the row count reflows nothing, and
+// pinning it would either waste the bottom of a tall window or walk the
+// prompt off the bottom of a short one.
+const TERMINAL_COLS = 200;
+
+// DECAWM, the terminal's auto-wrap mode, off.
+//
+// A pinned width is only half of it. This FortiGate ignores the width
+// it is given entirely: told 80 columns it still printed the same ~170
+// character table it prints at 160, so there is no width at which its
+// output is guaranteed to fit. With wrapping on, every row spilled onto
+// a second and third line and the columns stopped lining up. With it
+// off, an over-long line is cut at the right edge instead: every row
+// stays one row and every column stays where it was. That is what
+// MobaXterm does, which is why its output looked clean while this one
+// did not.
+//
+// At 200 columns this table doesn't reach the edge at all, so this is
+// really a backstop for whatever prints wider still. When it does bite,
+// the cost is worth stating plainly: clipped text is discarded, not
+// hidden. It never enters the buffer, so it cannot be scrolled to,
+// selected, searched or saved. Structure over completeness.
+//
+// Written into the terminal rather than sent to the remote: it changes
+// how this end draws what arrives, and the remote is neither asked nor
+// told. Re-asserted after every resize because a remote program is free
+// to set the mode itself (readline does).
+const DECAWM_OFF = '\x1b[?7l';
+
+// The one place a terminal's dimensions are decided. Returns null while
+// the pane is still unmeasurable, which callers treat as "not yet".
+function sizeTerminal(session: Session): { cols: number; rows: number } | null {
+  if (!session.term || !session.fitAddon) return null;
+  // proposeDimensions only for its rows, and because it is also the
+  // signal that xterm has measured its cell size at all: it returns
+  // undefined until then, and a resize before that would be based on
+  // nothing.
+  const proposed = session.fitAddon.proposeDimensions();
+  if (!proposed || proposed.rows <= 0) return null;
+  if (session.term.cols !== TERMINAL_COLS || session.term.rows !== proposed.rows) {
+    session.term.resize(TERMINAL_COLS, proposed.rows);
+    session.term.write(DECAWM_OFF);
+  }
+  return { cols: session.term.cols, rows: session.term.rows };
+}
+
 function zoomBy(delta: number) {
   applyFontSize((appSettings.fontSize || FONT_SIZE_DEFAULT) + delta);
 }
+
+// SPE-125: refuse the webview's page zoom. Ctrl+wheel (and the trackpad
+// pinch that arrives as the same event) scales the entire app, not the
+// terminal, and it is far too easy to trigger while scrolling scrollback
+// with a modifier still held. main.go turns the same thing off at the
+// WebView2 level, which is the real fix but only covers Windows; this
+// covers the Linux and macOS builds too, and is the only half of the
+// pair that a `wails dev` browser tab ever sees.
+// Deliberately not repurposed to change font size: zoomBy above is on
+// Ctrl+= / Ctrl+- / Ctrl+0 for that, and a wheel that silently resizes
+// text is the surprise this is here to remove.
+// passive: false because a passive listener is forbidden to
+// preventDefault; capture so it lands before anything downstream.
+// SPE-127: and having refused it, do the thing people actually reach for
+// the gesture to do, the same as Ctrl+= / Ctrl+- and the same as
+// MobaXterm: resize the text. stopPropagation as well as preventDefault,
+// so the wheel doesn't also scroll the scrollback out from under what is
+// being read while zooming.
+// deltaY is normalised because a wheel reports pixels, lines or pages
+// depending on the device, and a line-mode wheel reports about 3 per
+// notch: without this a mouse in line mode would never reach a step.
+let ctrlWheelDelta = 0;
+window.addEventListener('wheel', (event) => {
+  if (!event.ctrlKey) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const perUnit = event.deltaMode === 1 ? 33 : event.deltaMode === 2 ? 400 : 1;
+  ctrlWheelDelta += event.deltaY * perUnit;
+  const steps = Math.trunc(ctrlWheelDelta / 100);
+  if (steps === 0) return;
+  ctrlWheelDelta -= steps * 100;
+  zoomBy(-steps);
+}, { passive: false, capture: true });
 
 function applyColorScheme(name: ColorScheme) {
   appSettings.colorScheme = name;
@@ -1070,9 +1172,17 @@ function wallpaperBackgroundImage(): string {
   return `linear-gradient(rgba(0,0,0,${dim}), rgba(0,0,0,${dim})), url("${appSettings.wallpaperDataUrl}")`;
 }
 
+// SPE-127: the still box behind a terminal, the one that doesn't move
+// when the text is scrolled sideways. Everything anchored to a pane
+// rather than to the text hangs off this.
+function termFrameOf(session: Session): HTMLElement | null {
+  const host = session.term?.element?.parentElement ?? null;
+  return (host?.parentElement as HTMLElement | null) ?? null;
+}
+
 function applyWallpaperToSession(session: Session) {
   if (!session.term?.element) return;
-  const termHost = session.term.element.parentElement as HTMLElement | null;
+  const termHost = termFrameOf(session);
   const viewport = session.term.element.querySelector('.xterm-viewport') as HTMLElement | null;
   const screen = session.term.element.querySelector('.xterm-screen') as HTMLElement | null;
   if (!termHost || !viewport) return;
@@ -1209,6 +1319,39 @@ function applyTheme(name: ThemeName) {
   monaco.editor.setTheme(MONACO_THEMES[name]);
 }
 
+// SPE-126: xterm only measures its cell size once its element is really
+// on screen, and it does that from an IntersectionObserver callback
+// that lands after the current frame, not during it. Until then
+// FitAddon.proposeDimensions() returns undefined, fit() is a no-op, and
+// term.cols is still xterm's 80-column default. So anything that needs
+// the true size - the PTY request that a remote formats a whole
+// session's output to, or telling a live session how big its pane now
+// is - has to wait for that measurement instead of reading whatever
+// happens to be there the instant the pane is shown.
+// Returns null if the pane never became measurable at all (still
+// hidden, zero width), which callers treat as "don't claim to know".
+async function measuredFit(session: Session, frames = 12): Promise<{ cols: number; rows: number } | null> {
+  for (let attempt = 0; attempt < frames; attempt++) {
+    const size = sizeTerminal(session);
+    if (size) return size;
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+  }
+  return null;
+}
+
+// Fit one pane and tell its backend the size, as soon as the pane is
+// genuinely measurable. Fire-and-forget, but the fit itself still
+// happens synchronously on the first pass for a terminal that has
+// already been measured, so switching between live tabs resizes in the
+// same frame it always did.
+function syncSessionSize(session: Session) {
+  void measuredFit(session).then((size) => {
+    if (!size || !session.backendId) return;
+    if (session.mode === 'ssh') App.ResizeSSH(session.backendId, size.cols, size.rows);
+    if (session.mode === 'local') App.ResizeLocalTerminal(session.backendId, size.cols, size.rows);
+  });
+}
+
 function refitActiveTerminal() {
   // CSS class toggles (sidebar/editor collapse) don't fire a browser
   // resize event, so xterm.js never re-measures its container on its
@@ -1218,10 +1361,8 @@ function refitActiveTerminal() {
     if (!tab) return;
     for (const s of allSessions(tab)) {
       if (!s.fitAddon || !s.term) continue;
-      s.fitAddon.fit();
+      syncSessionSize(s);
       s.term.refresh(0, s.term.rows - 1);
-      if (s.mode === 'local' && s.backendId) App.ResizeLocalTerminal(s.backendId, s.term.cols, s.term.rows);
-      if (s.mode === 'ssh' && s.backendId) App.ResizeSSH(s.backendId, s.term.cols, s.term.rows);
     }
   });
 }
@@ -1301,6 +1442,17 @@ interface Session {
   // show which saved sessions are live right now and jump to the tab
   // already running one instead of opening a duplicate.
   sessionProfileId: string | null;
+  // SPE-122: true from the moment a connect starts until it resolves,
+  // either way. A connect is several seconds of awaiting the backend,
+  // and for all of it this Session still looks 'pending' to
+  // ensurePendingTab and not-yet-'connected' to the sidebar, so a
+  // second click (or a repeated Enter in the password field, which
+  // picker-ssh-fields turns into a Connect click) dialled a whole
+  // second connection into this same Session: two terminals stacked in
+  // the one pane, each half height, with the first backend session
+  // orphaned behind the overwritten backendId. Guards the connect
+  // entry points so only one dial per Session is ever in flight.
+  connecting: boolean;
 }
 
 // A split pane alongside a tab's primary session. Same shape as
@@ -1362,6 +1514,7 @@ function createPendingTab(): Tab {
     ownerTabId: id,
     highlightCarry: '',
     sessionProfileId: null,
+    connecting: false,
     layout: 'single',
     extraPanes: [],
     focusedPaneIndex: 0,
@@ -1551,10 +1704,12 @@ function switchToTab(id: string) {
   if (tab.paneGrid) {
     tab.paneGrid.style.display = 'grid';
     for (const s of allSessions(tab)) {
-      s.fitAddon?.fit();
       editorPanes.get(s.id)?.editor.layout();
-      if (s.mode === 'ssh' && s.backendId && s.term) App.ResizeSSH(s.backendId, s.term.cols, s.term.rows);
-      if (s.mode === 'local' && s.backendId && s.term) App.ResizeLocalTerminal(s.backendId, s.term.cols, s.term.rows);
+      // SPE-126: was an inline fit() + Resize. A terminal being shown
+      // for the very first time is not measurable yet in this frame, so
+      // that sent the backend xterm's 80x24 default as if it were the
+      // real size of the pane.
+      syncSessionSize(s);
     }
   }
 
@@ -1688,6 +1843,7 @@ function createEmptyPane(tab: Tab): Pane {
     ownerTabId: tab.id,
     highlightCarry: '',
     sessionProfileId: null,
+    connecting: false,
   };
 }
 
@@ -2043,7 +2199,7 @@ function setupCustomScrollbar(session: Session) {
   // wrapper, since SPE-92 the wrapper also contains the pane header,
   // an absolutely-positioned track on the wrapper would overlay the
   // header too.
-  const termHost = term.element?.parentElement;
+  const termHost = termFrameOf(session);
   if (!termHost) return;
 
   const track = document.createElement('div');
@@ -2162,6 +2318,24 @@ function writeToSessionWithPasteGuard(session: Session, text: string) {
   if (session.mode === 'serial' && session.backendId) App.WriteSerial(session.backendId, text);
 }
 
+// SPE-122: tears down a session's terminal view (terminal, scrollbar,
+// webgl addon, disconnect overlay, and the term host they all live in)
+// without touching its backend session, which closeSessionBackend
+// still owns. Only for a wrapper about to be handed a new terminal,
+// which must not end up holding two.
+function disposeTerminalView(session: Session) {
+  session.disposeScrollbar?.();
+  session.disposeScrollbar = null;
+  session.webglAddon?.dispose();
+  session.webglAddon = null;
+  session.overlay?.remove();
+  session.overlay = null;
+  const termFrame = termFrameOf(session);
+  session.term?.dispose();
+  session.term = null;
+  termFrame?.remove();
+}
+
 // SPE-92: creates (or fills in) the live xterm.js Terminal for one
 // Session, whether that's a tab's own primary session (the original,
 // unchanged behavior) or a split pane. If `session.container` already
@@ -2177,6 +2351,13 @@ function createTerminalForSession(session: Session, tab: Tab) {
     // header, drop the landing button, the real term-host below is
     // always created fresh either way.
     wrapper.querySelector('.pane-landing')?.remove();
+    // SPE-122: belt to the connecting guard's braces. Every term host
+    // appended below is flex:1, so a second one doesn't replace the
+    // first, it halves the pane and sits under it. If a caller ever
+    // reaches here with a live terminal already in this wrapper, drop
+    // that view rather than grow a second one beside it. View only:
+    // the backend session still belongs to the caller.
+    disposeTerminalView(session);
   } else {
     wrapper = document.createElement('div');
     wrapper.className = 'pane-wrapper';
@@ -2185,10 +2366,19 @@ function createTerminalForSession(session: Session, tab: Tab) {
     tab.paneGrid!.appendChild(wrapper);
   }
 
+  // SPE-127: a frame that stays still, and a host inside it that
+  // scrolls. The grid is wider than the pane now, and anything painted
+  // on the scrolling box travelled sideways with the text: the
+  // wallpaper stretched across the full 200 columns instead of the
+  // visible part, and the scrollbar wandered into the middle of the
+  // window. Those belong to the frame; only the terminal scrolls.
+  const termFrame = document.createElement('div');
+  termFrame.className = 'pane-term-frame';
   const termHost = document.createElement('div');
   termHost.className = 'pane-term-host term-instance';
-  termHost.style.cssText = 'padding:4px;box-sizing:border-box;position:relative;';
-  wrapper.appendChild(termHost);
+  termHost.style.cssText = 'padding:4px;box-sizing:border-box;';
+  termFrame.appendChild(termHost);
+  wrapper.appendChild(termFrame);
   const container = termHost;
 
   const term = new Terminal({
@@ -2201,7 +2391,11 @@ function createTerminalForSession(session: Session, tab: Tab) {
   term.loadAddon(fitAddon);
   term.open(container);
   const webglAddon = wallpaperActive() ? null : createSessionWebglAddon(session);
-  fitAddon.fit();
+  // Starts at the pinned width rather than a measured one. xterm's own
+  // default happens to be 80x24 too, so this is really just saying so
+  // out loud; sizeTerminal sets the rows once the pane is measurable.
+  term.resize(TERMINAL_COLS, term.rows);
+  term.write(DECAWM_OFF);
 
   // OSC 52: let remote programs (xclip, pbcopy, tmux, vim, etc.) sync
   // their copy into the local OS clipboard, gated by osc52Enabled since
@@ -2263,6 +2457,12 @@ function createTerminalForSession(session: Session, tab: Tab) {
     }
     if (e.type === 'keydown' && shortcutMatches(e, 'disconnect')) {
       disconnectSession(session);
+      return false;
+    }
+    if (e.type === 'keydown' && shortcutMatches(e, 'saveOutput')) {
+      // SPE-124: the stopped-session branch above already answers a
+      // bare S for a dead pane, this is the live one.
+      void saveSessionOutput(session);
       return false;
     }
     if (e.type === 'keydown' && shortcutMatches(e, 'sidebar')) {
@@ -2383,9 +2583,9 @@ window.addEventListener('resize', () => {
     if (!tab) return;
     for (const s of allSessions(tab)) {
       if (!s.fitAddon || !s.term) continue;
-      s.fitAddon.fit();
-      if (s.mode === 'local' && s.backendId) App.ResizeLocalTerminal(s.backendId, s.term.cols, s.term.rows);
-      if (s.mode === 'ssh' && s.backendId) App.ResizeSSH(s.backendId, s.term.cols, s.term.rows);
+      // Columns don't move, so this only ever adjusts rows. Kept
+      // because a taller window really should show more lines.
+      syncSessionSize(s);
     }
   }, 100);
 });
@@ -4681,8 +4881,21 @@ function sidebarSessionHost(s: SessionProfile): string {
 // additional connection to the same host stays available on the context
 // menu. Deliberately different from the old behaviour, which always
 // dialled a fresh connection.
+// SPE-122: a session that is mid-connect isn't in liveSessionsByProfile
+// yet, that map means "connected right now" and drives the sidebar's
+// live dot. Clicking the row again during those seconds must still go
+// to the tab already dialling it, not start a rival connection.
+function connectingSessionForProfile(profileId: string): Session | null {
+  for (const tab of tabs.values()) {
+    for (const session of allSessions(tab)) {
+      if (session.connecting && session.sessionProfileId === profileId) return session;
+    }
+  }
+  return null;
+}
+
 function activateSessionRow(s: SessionProfile) {
-  const running = liveSessionsByProfile().get(s.id);
+  const running = liveSessionsByProfile().get(s.id) ?? connectingSessionForProfile(s.id);
   if (running) {
     switchToTab(running.ownerTabId);
     const owner = tabs.get(running.ownerTabId);
@@ -5036,7 +5249,7 @@ let copyOnSelectEnabled = localStorage.getItem('xpecter-copy-on-select') === 'on
 let rightClickPasteEnabled = localStorage.getItem('xpecter-rclick-paste') !== 'off';
 let highlightEnabled = localStorage.getItem('xpecter-highlight') !== 'off';
 
-type ShortcutId = 'disconnect' | 'paste' | 'sidebar' | 'zoomIn' | 'zoomOut' | 'resetZoom' | 'fullscreen' | 'splitVertical' | 'splitHorizontal' | 'closePane';
+type ShortcutId = 'disconnect' | 'paste' | 'sidebar' | 'zoomIn' | 'zoomOut' | 'resetZoom' | 'fullscreen' | 'splitVertical' | 'splitHorizontal' | 'closePane' | 'saveOutput';
 type ShortcutBinding = { ctrl: boolean; shift: boolean; alt: boolean; key: string };
 const DEFAULT_SHORTCUTS: Record<ShortcutId, ShortcutBinding> = {
   disconnect: { ctrl: true, shift: true, alt: false, key: 'x' },
@@ -5049,6 +5262,10 @@ const DEFAULT_SHORTCUTS: Record<ShortcutId, ShortcutBinding> = {
   splitVertical: { ctrl: true, shift: true, alt: false, key: 'd' },
   splitHorizontal: { ctrl: true, shift: true, alt: false, key: 'Enter' },
   closePane: { ctrl: true, shift: true, alt: false, key: 'w' },
+  // SPE-124: the same chord an editor pane uses for Save As, doing the
+  // same job one session type over. They can never collide: this one is
+  // only reachable from inside a terminal, that one from inside Monaco.
+  saveOutput: { ctrl: true, shift: true, alt: false, key: 's' },
 };
 let shortcuts: Record<ShortcutId, ShortcutBinding> = loadShortcuts();
 
@@ -5469,14 +5686,38 @@ function terminalTextContent(term: Terminal): string {
   return lines.join('\n');
 }
 
+// SPE-124: saving a pane's output stops being something only a dead
+// session can do. This was written for the SPE-59 disconnect panel and
+// reachable nowhere else, so the feature effectively didn't exist
+// while a session was still worth reading. It always asked where to
+// put the file (App.SaveTextFile opens the native Save dialog); what
+// it lacked was a way in, and any word about what it did.
 async function saveSessionOutput(session: Session) {
-  if (!session.term) return;
+  if (!session.term) {
+    flashStatus('Nothing to save: this pane has no terminal.', true);
+    return;
+  }
   const content = terminalTextContent(session.term);
-  const defaultName = `${session.label.replace(/[^a-zA-Z0-9._@-]+/g, '_')}.log`;
+  if (!content.trim()) {
+    flashStatus('Nothing to save: this terminal is empty.', true);
+    return;
+  }
+  // Local time, not toISOString's UTC: this string's whole job is to
+  // match the clock on the wall of whoever reads the filename later.
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
+  // Timestamped because saving the same session twice in an afternoon
+  // is the normal case, and the default name is the only thing between
+  // that and quietly overwriting the first file.
+  const defaultName = `${session.label.replace(/[^a-zA-Z0-9._@-]+/g, '_')}-${stamp}.log`;
   try {
-    await App.SaveTextFile(defaultName, content);
+    // '' means the dialog was cancelled, which needs no announcement:
+    // they just decided not to save.
+    const savedTo = await App.SaveTextFile(defaultName, content);
+    if (savedTo) flashStatus(`Saved terminal output to ${savedTo}`);
   } catch (err) {
-    console.error('Failed to save terminal output', err);
+    flashStatus(`Save failed: ${err}`, true);
   }
 }
 
@@ -5559,7 +5800,7 @@ function showDisconnectPanel(session: Session, message: string) {
   // Anchored to the term host (position:relative), same reasoning as
   // the custom scrollbar track above, the outer pane wrapper also
   // contains the header now.
-  const termHost = term.element?.parentElement ?? session.container;
+  const termHost = termFrameOf(session) ?? session.container;
   termHost.appendChild(overlay);
   session.overlay = overlay;
 }
@@ -6537,6 +6778,15 @@ async function reconnectSSH(session: Session, req: ConnectRequest): Promise<void
     renderTabBar();
     session.term!.write('\r\n\x1b[32mReconnected.\x1b[0m\r\n');
     wireSSHEvents(session, result.sessionId, req);
+    // SPE-126: the easy case, the terminal this session is going back
+    // into has been on screen all along, so its size is exact.
+    const size = await measuredFit(session);
+    try {
+      await App.StartShellSSH(result.sessionId, size?.cols ?? 0, size?.rows ?? 0, !!req.x11);
+    } catch (err) {
+      showDisconnectPanel(session, String(err));
+      return;
+    }
     if (result.legacyCompat) notifyLegacyCompat(req.host);
   }
 }
@@ -6547,6 +6797,34 @@ async function reconnectSSH(session: Session, req: ConnectRequest): Promise<void
 // before this feature existed. Everything else (password cache,
 // passphrase/trust/key-perm prompts, save-session prompt) is unchanged.
 async function connectActiveTab(req: ConnectRequest) {
+  const target: Session = pendingPaneTarget ?? tabs.get(activeTabId!)!;
+  // SPE-122: one dial at a time per Session. The retry paths inside
+  // runConnect (passphrase, key permissions, host trust) deliberately
+  // re-enter through here, and still can: each of them returns out of
+  // runConnect first, clearing the flag, and only then does the modal's
+  // callback fire.
+  if (target.connecting) return;
+  target.connecting = true;
+  setConnectButtonBusy(true);
+  try {
+    await runConnect(req);
+  } finally {
+    target.connecting = false;
+    setConnectButtonBusy(false);
+  }
+}
+
+// SPE-122: the picker's Connect button is dead space for the several
+// seconds a connect takes, which is exactly what invites the second
+// click the guard above now has to swallow. Say what it's doing.
+function setConnectButtonBusy(busy: boolean) {
+  const btn = document.getElementById('connect') as HTMLButtonElement | null;
+  if (!btn) return;
+  btn.disabled = busy;
+  btn.textContent = busy ? 'Connecting...' : 'Connect';
+}
+
+async function runConnect(req: ConnectRequest) {
   const ownerTab = tabs.get(activeTabId!)!;
   const target: Session = pendingPaneTarget ?? ownerTab;
   target.status = 'connecting';
@@ -6596,8 +6874,19 @@ async function connectActiveTab(req: ConnectRequest) {
 
   if (result.sessionId) {
     target.mode = 'ssh';
-    target.backendId = result.sessionId;
     target.status = 'connected';
+    // SPE-126: backendId deliberately stays null until the shell is
+    // actually open, a few lines down. It is the flag the rest of the
+    // app reads as "this session is ready to be used", and switchToTab
+    // acts on it immediately: it asks the file browser to list the
+    // remote directory, which opens an SFTP channel on this very
+    // connection. A Cisco switch allows one session channel at a time,
+    // so that SFTP request took the only slot and the shell that
+    // followed was refused with "ssh: rejected: resource shortage" -
+    // every switch, first connect, every time, cleared by pressing R
+    // because a reconnect doesn't switch tabs and so never raced.
+    // Starting the shell inside Connect used to hide this by opening
+    // the shell channel before the frontend knew the id at all.
     createTerminalForSession(target, ownerTab);
     wireSSHEvents(target, result.sessionId, req);
     // SPE-104: a second, independent connection to the same target for
@@ -6617,8 +6906,29 @@ async function connectActiveTab(req: ConnectRequest) {
     if (result.connectDurationMs) {
       target.term?.write(`\r\n\x1b[90mSSH connected in ${result.connectDurationMs} ms.\x1b[0m\r\n`);
     }
+    // SPE-126: switch first, start the shell second. fit() can only
+    // measure a pane that is actually on screen, and the PTY the remote
+    // formats its output to is sized from that measurement, so the tab
+    // has to be visible before the shell exists. Nothing is lost in the
+    // meantime: wireSSHEvents above is already listening.
     switchToTab(ownerTab.id);
     closeSessionPicker();
+    // 0 rather than a guess when the pane could not be measured: the
+    // backend falls back to its own default instead of being told
+    // something untrue.
+    const size = await measuredFit(target);
+    try {
+      await App.StartShellSSH(result.sessionId, size?.cols ?? 0, size?.rows ?? 0, !!req.x11);
+    } catch (err) {
+      // Set even on failure: the session exists on the backend and
+      // closing the tab has to be able to close it.
+      target.backendId = result.sessionId;
+      showDisconnectPanel(target, String(err));
+      return;
+    }
+    // The shell has the channel it needs. Everything else that shares
+    // this connection, the file browser included, can go now.
+    target.backendId = result.sessionId;
     if (target === focusedSession(ownerTab)) refreshFileList('.', result.sessionId);
     if (result.legacyCompat) notifyLegacyCompat(req.host);
 
@@ -6836,13 +7146,21 @@ async function connectSerialInActiveTab(portName: string, baud: number) {
   const target: Session = pendingPaneTarget ?? ownerTab;
   target.label = portName;
 
+  // SPE-122: the same one-dial-at-a-time guard the SSH path needs, for
+  // the same reason: the tab stays 'pending' for the whole open, so a
+  // second click put a second serial terminal in this same pane.
+  if (target.connecting) return;
+  target.connecting = true;
+
   let id: string;
   try {
     id = await App.ConnectSerial(portName, baud);
   } catch (err) {
+    target.connecting = false;
     showConnectError(String(err));
     return;
   }
+  target.connecting = false;
 
   target.mode = 'serial';
   target.backendId = id;
@@ -7607,6 +7925,16 @@ document.getElementById('menu-disconnect-tab')!.addEventListener('click', () => 
   const tab = activeTabId ? tabs.get(activeTabId) : null;
   if (tab) disconnectSession(focusedSession(tab));
 });
+// SPE-124: writes the focused pane's scrollback wherever the Save
+// dialog is pointed. Deliberately the focused pane rather than the tab
+// itself: in a split, "the terminal" means the one being looked at.
+document.getElementById('menu-save-output')!.addEventListener('click', () => {
+  closeAllMenus();
+  const tab = activeTabId ? tabs.get(activeTabId) : null;
+  if (!tab) return;
+  void saveSessionOutput(focusedSession(tab));
+});
+
 document.getElementById('menu-clear-screen')!.addEventListener('click', async () => {
   closeAllMenus();
   const tab = activeTabId ? tabs.get(activeTabId) : null;
@@ -7873,6 +8201,7 @@ const SHORTCUT_GROUPS: { title: string; items: [ShortcutId | null, string][] }[]
     items: [
       ['disconnect', 'Disconnect active session'],
       ['paste', 'Paste'],
+      ['saveOutput', 'Save terminal output to a file'],
     ],
   },
   {

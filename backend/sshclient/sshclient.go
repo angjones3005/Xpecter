@@ -450,13 +450,30 @@ func (s *Session) SSHClient() *ssh.Client { return s.client }
 // stops for any reason (clean remote close, network drop, or a
 // deliberate local Close()), so the frontend can distinguish "the switch
 // closed the session" from "I closed this tab" (SPE-59).
-func (s *Session) StartShell(onData func([]byte), onClose func(CloseReason)) error {
+func (s *Session) StartShell(cols, rows int, onData func([]byte), onClose func(CloseReason)) error {
 	sess, err := s.client.NewSession()
 	if err != nil {
 		return err
 	}
 	modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
-	if err := sess.RequestPty("xterm-256color", 40, 120, modes); err != nil {
+	// SPE-126: the size the caller actually has on screen, rather than
+	// the hardcoded 120x40 this used to request. A lot of remote
+	// software reads the PTY size once, when the PTY is allocated, and
+	// formats everything it prints for the rest of the session to that
+	// number: a FortiGate's `execute dhcp lease-list` decides its column
+	// layout there and then. Asking for 120 columns from a window that
+	// has 100 meant every wide table came back pre-formatted too wide
+	// and wrapped into a mess, and no later window-change could undo
+	// that decision, which is why it only looked right maximised.
+	// The fallbacks preserve the old numbers for any caller that
+	// genuinely has no terminal to measure yet.
+	if cols <= 0 {
+		cols = 120
+	}
+	if rows <= 0 {
+		rows = 40
+	}
+	if err := sess.RequestPty("xterm-256color", rows, cols, modes); err != nil {
 		_ = sess.Close()
 		return err
 	}
@@ -509,8 +526,13 @@ func (s *Session) Write(data []byte) error {
 }
 
 func (s *Session) Resize(cols, rows int) error {
+	// SPE-126: no longer an error. Now that the shell is started
+	// separately from the connection, a resize can legitimately arrive
+	// in the gap between the two (the frontend fits the pane on its way
+	// to measuring it), and there is nothing to report: the size that
+	// call carried is the one StartShell is about to request anyway.
 	if s.sess == nil {
-		return fmt.Errorf("shell not started")
+		return nil
 	}
 	return s.sess.WindowChange(rows, cols)
 }

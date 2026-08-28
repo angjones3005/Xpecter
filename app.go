@@ -293,7 +293,35 @@ func (a *App) Connect(req ConnectRequest) (ConnectResult, error) {
 	id := sess.ID()
 	a.sessions[id] = sess
 
-	err = sess.StartShell(func(data []byte) {
+	// SPE-126: authenticated, but deliberately no shell yet.
+	// StartShellSSH below opens it, once the frontend has a real
+	// terminal on screen and can say how big it actually is.
+	return ConnectResult{SessionID: id, LegacyCompat: sess.UsedLegacyCompat(), ConnectDurationMs: time.Since(startedAt).Milliseconds()}, nil
+}
+
+// StartShellSSH opens the interactive shell on a session Connect has
+// already authenticated, with the PTY sized from the real terminal.
+//
+// SPE-126: this was the tail of Connect, which forced the PTY to be
+// requested before any terminal existed, from a hardcoded guess. See
+// sshclient.StartShell for why that guess is what made wide output
+// wrap in anything but a maximised window.
+//
+// Splitting the call also closes a race that was always here: the
+// frontend can only subscribe to ssh:data:<id> once Connect has told it
+// the id, so whatever the remote sent before that (a banner, the first
+// prompt) was emitted to nobody. The listener is attached before this.
+//
+// x11 comes back in as an argument rather than being remembered from
+// the ConnectRequest: EnableX11 acts on the ssh.Session that StartShell
+// creates, so it can only run here, and one parameter beats a map of
+// pending flags to keep clean.
+func (a *App) StartShellSSH(id string, cols int, rows int, x11 bool) error {
+	sess, ok := a.sessions[id]
+	if !ok {
+		return fmt.Errorf("no such session: %s", id)
+	}
+	if err := sess.StartShell(cols, rows, func(data []byte) {
 		runtime.EventsEmit(a.ctx, "ssh:data:"+id, string(data))
 	}, func(reason sshclient.CloseReason) {
 		if reason.Deliberate {
@@ -303,19 +331,17 @@ func (a *App) Connect(req ConnectRequest) (ConnectResult, error) {
 			EOF:     reason.EOF,
 			Message: closeErrorMessage(reason.Err),
 		})
-	})
-	if err != nil {
-		return ConnectResult{}, err
+	}); err != nil {
+		return err
 	}
-	if req.X11 {
+	if x11 {
 		if err := sess.EnableX11(); err != nil {
 			delete(a.sessions, id)
 			_ = sess.Close()
-			return ConnectResult{}, err
+			return err
 		}
 	}
-
-	return ConnectResult{SessionID: id, LegacyCompat: sess.UsedLegacyCompat(), ConnectDurationMs: time.Since(startedAt).Milliseconds()}, nil
+	return nil
 }
 
 // closeErrorMessage renders a CloseReason's error for display, matching

@@ -149,7 +149,13 @@
     .pane-header-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .pane-header-close { opacity: 0.5; cursor: pointer; padding: 0 2px; }
     .pane-header-close:hover { opacity: 1; color: var(--danger); }
-    .pane-term-host { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+    /* SPE-127: the grid is wider than the pane, so something has to
+       scroll sideways. Two boxes rather than one, because the things
+       that must NOT move with the text (the wallpaper, the scrollbar,
+       the disconnect panel) can't live inside the box that scrolls.
+       The frame stays put and owns those; the host inside it scrolls. */
+    .pane-term-frame { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+    .pane-term-host { width: 100%; height: 100%; position: relative; overflow-x: auto; overflow-y: hidden; }
     .term-wallpaper-layer { display: none; }
     .term-instance .xterm, .term-instance .xterm-viewport, .term-instance .xterm-screen, .term-instance canvas { background: transparent !important; background-color: transparent !important; }
     .pane-landing { flex: 1; display: flex; align-items: center; justify-content: center; }
@@ -266,6 +272,24 @@
     #tab-split-btn { display: none; align-items: center; gap: 4px; align-self: stretch; padding: 0 10px; cursor: pointer; color: var(--text-dim); font-size: 12px; user-select: none; border-left: 1px solid var(--border); }
     #tab-split-btn:hover { color: var(--text); background: var(--hover); }
     #tab-split-btn .caret { font-size: 9px; opacity: 0.7; }
+    /* SPE-123: the split button used to be the pair of characters
+       U+25AF WHITE VERTICAL RECTANGLE, which reads as two tofu boxes,
+       exactly what a missing glyph looks like. Drawn instead, so it is
+       the same shape in every font: one pane divided into two, the
+       divider matching the app's 1px line language everywhere else.
+       currentColor keeps the existing dim/hover colours working. */
+    #tab-split-btn .split-glyph {
+      display: block;
+      width: 15px;
+      height: 15px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1;
+      stroke-linejoin: round;
+      /* Half-pixel geometry on a 1:1 viewBox: crisp at 100% zoom,
+         still clean when the webview scales it. */
+      shape-rendering: geometricPrecision;
+    }
     .popup-menu { position: fixed; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 5px; padding: 4px 0; z-index: 2000; min-width: 200px; font-size: 13px; box-shadow: 0 6px 18px rgba(0,0,0,0.4); }
     .popup-menu .item { display: flex; align-items: center; gap: 9px; padding: 6px 12px; cursor: pointer; white-space: nowrap; }
     .popup-menu .item:hover { background: var(--hover); }
@@ -308,6 +332,15 @@
     button:active {
       transform: translateY(1px);
       box-shadow: inset 0 1px 3px rgba(0,0,0,0.25);
+    }
+    /* SPE-122: a button that is busy (Connect, mid-dial) must look
+       unavailable, not merely stop responding to clicks. */
+    button:disabled, button:disabled:hover, button:disabled:active {
+      background: var(--bg-alt);
+      color: var(--text-dim);
+      cursor: default;
+      box-shadow: none;
+      transform: none;
     }
     /* Shared compact control language: dark surface, tight dimensions,
        quiet borders, and one consistent focus treatment. Important is
@@ -622,6 +655,7 @@
         <div class="item" id="menu-disconnect-tab">Disconnect <span style="opacity:0.5;font-size:11px;">Ctrl+Shift+X</span></div>
         <div class="separator"></div>
         <div class="item" id="menu-clear-screen">Clear Screen</div>
+        <div class="item" id="menu-save-output">Save Terminal Output&hellip; <span style="opacity:0.5;font-size:11px;">Ctrl+Shift+S</span></div>
       </div>
     </div>
     <div class="menu-item" data-menu="sessions">Sessions
@@ -837,7 +871,7 @@
       <div style="display:flex;align-items:center;background:var(--bg-input);border-bottom:1px solid var(--border);">
         <span id="sidebar-expand-btn" title="Show sidebar (Ctrl+Shift+B)" style="display:none;cursor:pointer;padding:0 8px;opacity:0.6;user-select:none;align-self:stretch;">&#10095;</span>
         <div id="tab-bar" style="display:flex;overflow-x:auto;flex:1;"></div>
-        <span id="tab-split-btn" title="Open another terminal or an editor in this tab"><span>&#9647;&#9647;</span><span class="caret">&#9662;</span></span>
+        <span id="tab-split-btn" title="Open another terminal or an editor in this tab"><svg class="split-glyph" viewBox="0 0 15 15" aria-hidden="true"><rect x="1.5" y="2.5" width="12" height="10" rx="1.5"/><path d="M7.5 2.5v10"/></svg><span class="caret">&#9662;</span></span>
       </div>
       <div id="tab-landing" style="display:none;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:12px;">
         <div style="font-size:14px;color:var(--text-dim);">No session yet</div>

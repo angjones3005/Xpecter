@@ -140,6 +140,9 @@ export interface AppBindings {
   ResizeLocalTerminal(id: string, cols: number, rows: number): Promise<void>;
   CloseLocalTerminal(id: string): Promise<void>;
   Connect(req: ConnectRequest): Promise<ConnectResult>;
+  // SPE-126: opens the shell on a session Connect authenticated, with
+  // the PTY sized from the terminal that now exists on screen.
+  StartShellSSH(id: string, cols: number, rows: number, x11: boolean): Promise<void>;
   SelectKeyFile(): Promise<string>;
   SelectImageFile(): Promise<string>;
   ReadImageFile(path: string): Promise<string>;
