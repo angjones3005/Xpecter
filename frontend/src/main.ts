@@ -1058,29 +1058,33 @@ function applyFontSize(size: number) {
 // prompt off the bottom of a short one.
 const TERMINAL_COLS = 200;
 
-// DECAWM, the terminal's auto-wrap mode, off.
+// SPE-132: auto-wrap (DECAWM), decided per session kind, because the two kinds
+// want opposite things.
 //
-// A pinned width is only half of it. This FortiGate ignores the width
-// it is given entirely: told 80 columns it still printed the same ~170
-// character table it prints at 160, so there is no width at which its
-// output is guaranteed to fit. With wrapping on, every row spilled onto
-// a second and third line and the columns stopped lining up. With it
-// off, an over-long line is cut at the right edge instead: every row
-// stays one row and every column stays where it was. That is what
-// MobaXterm does, which is why its output looked clean while this one
-// did not.
+// A remote device session clips. Its output is tables, and a row that
+// folds onto a second line takes every column out of alignment with the
+// rows around it, which is what made a FortiGate's lease list
+// unreadable. Clipping keeps one row per row.
 //
-// At 200 columns this table doesn't reach the edge at all, so this is
-// really a backstop for whatever prints wider still. When it does bite,
-// the cost is worth stating plainly: clipped text is discarded, not
-// hidden. It never enters the buffer, so it cannot be scrolled to,
-// selected, searched or saved. Structure over completeness.
+// A local shell wraps, and must. The shell is told the PTY is this wide
+// and does its own arithmetic on that: cmd.exe echoing a pasted
+// 400-character command counts on the terminal moving to the next row
+// at column 200, and when it doesn't, every cursor position after that
+// is wrong. The line piles into the last cell, the redraw lands in the
+// middle of the screen, and the prompt repeats down the pane. That is
+// what turning this off globally did.
 //
-// Written into the terminal rather than sent to the remote: it changes
-// how this end draws what arrives, and the remote is neither asked nor
-// told. Re-asserted after every resize because a remote program is free
-// to set the mode itself (readline does).
+// The same hazard exists on the remote side, just far out of the way:
+// typing or pasting a single line longer than 200 characters into a
+// device session will misrender the same way, and needs a redraw to
+// recover. 200 is long for a device CLI, and the tables this is here
+// for are nowhere near it, so it is the better trade of the two.
+const DECAWM_ON = '\x1b[?7h';
 const DECAWM_OFF = '\x1b[?7l';
+
+function applyWrapMode(session: Session) {
+  session.term?.write(session.mode === 'local' ? DECAWM_ON : DECAWM_OFF);
+}
 
 // The one place a terminal's dimensions are decided. Returns null while
 // the pane is still unmeasurable, which callers treat as "not yet".
@@ -1094,7 +1098,9 @@ function sizeTerminal(session: Session): { cols: number; rows: number } | null {
   if (!proposed || proposed.rows <= 0) return null;
   if (session.term.cols !== TERMINAL_COLS || session.term.rows !== proposed.rows) {
     session.term.resize(TERMINAL_COLS, proposed.rows);
-    session.term.write(DECAWM_OFF);
+    // Re-asserted rather than set once: a remote program is free to
+    // change the mode itself, readline among them.
+    applyWrapMode(session);
   }
   return { cols: session.term.cols, rows: session.term.rows };
 }
@@ -2395,7 +2401,9 @@ function createTerminalForSession(session: Session, tab: Tab) {
   // default happens to be 80x24 too, so this is really just saying so
   // out loud; sizeTerminal sets the rows once the pane is measurable.
   term.resize(TERMINAL_COLS, term.rows);
-  term.write(DECAWM_OFF);
+  // session.mode is already set by every caller that gets this far
+  // (local, ssh, serial), which is what decides the wrap mode.
+  term.write(session.mode === 'local' ? DECAWM_ON : DECAWM_OFF);
 
   // OSC 52: let remote programs (xclip, pbcopy, tmux, vim, etc.) sync
   // their copy into the local OS clipboard, gated by osc52Enabled since

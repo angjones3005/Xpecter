@@ -4,6 +4,7 @@ package pty
 
 import (
 	"os"
+	"os/exec"
 
 	"github.com/UserExistsError/conpty"
 )
@@ -17,12 +18,40 @@ type windowsTerminal struct {
 	cpty *conpty.ConPty
 }
 
+// defaultShell picks what a local shell opens when nothing named one.
+//
+// SPE-131: this used to read COMSPEC, which on every Windows install is
+// cmd.exe, so "New Local Shell", Tools > Terminal, and any saved
+// profile with an empty command all opened a Command Prompt, sitting
+// next to a menu that already offers Command Prompt explicitly. Nothing
+// said which you had: a saved profile could carry a PowerShell icon and
+// still open cmd, and pasting a PowerShell one-liner into it fails with
+// something as unhelpful as ")) was unexpected at this time."
+//
+// pwsh.exe first, for anyone with PowerShell 7 installed. powershell.exe
+// next, which ships with every supported Windows. COMSPEC only after
+// both of those are missing, which in practice means a machine with no
+// PowerShell at all. Choosing cmd is still possible, it just has to be
+// chosen now rather than arrived at.
+//
+// LookPath rather than a bare name so the resolved path is what conpty
+// starts, and so a missing pwsh is detected here rather than becoming a
+// failed spawn later.
+func defaultShell() string {
+	for _, candidate := range []string{"pwsh.exe", "powershell.exe"} {
+		if resolved, err := exec.LookPath(candidate); err == nil {
+			return resolved
+		}
+	}
+	if comspec := os.Getenv("COMSPEC"); comspec != "" {
+		return comspec
+	}
+	return "cmd.exe"
+}
+
 func newPlatformTerminal(onData func([]byte), shell string, dir string) (terminalImpl, error) {
 	if shell == "" {
-		shell = os.Getenv("COMSPEC")
-		if shell == "" {
-			shell = "powershell.exe"
-		}
+		shell = defaultShell()
 	}
 
 	// The UserExistsError/conpty wrapper doesn't expose a per-process
