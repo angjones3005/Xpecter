@@ -115,6 +115,9 @@ Each editor pane keeps a strip of open documents and switches between them with 
 ### Workspace folder tree
 Open a folder and it appears as a tree inside the pane, not in the application chrome, so a split can hold a folder on one side and a shell on the other. The tree marks which files are currently open, and folders expand independently.
 
+### The tree follows the folder
+A file that lands in an open folder from anywhere else, a git checkout, a build, another editor, another machine, shows up in the tree on its own. Xpecter re-reads only the levels that are currently expanded, only while that tree is on screen, and redraws only when the listing has really changed, so scroll position and expanded folders survive. The refresh action stays for a full reread.
+
 ### Creating files and folders
 Add a file or a folder to the workspace you already have open. The tree header creates at the root, and every folder row offers the same two actions for creating inside it. A new file opens for editing straight away. A name already taken is refused rather than quietly overwriting what is there.
 
@@ -145,6 +148,9 @@ Skald, the switch-configuration DSL, is a first-class language in the editor. It
 
 ### Open remote files with the system default app
 Open PDFs, images, and other remote files with the operating system's default application. Xpecter downloads a private temporary copy, preserves its timestamp, and invokes the platform handler.
+
+### The remote browser follows the directory
+The remote file list re-reads the directory it is pointed at and updates when its contents change, so a file that arrives on the host from elsewhere appears without renavigating. It reads only while the section is visible, and on a slower cadence than the local tree, because every listing is an SFTP request over the connection.
 
 ### SFTP timestamp preservation
 Remote-to-local downloads preserve remote modification times. Drag-and-drop uploads carry the local file modification time to the remote file when supported.

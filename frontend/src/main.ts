@@ -1723,6 +1723,9 @@ function switchToTab(id: string) {
   if (focused?.mode === 'ssh' && focused.backendId) {
     refreshFileList('.', focused.backendId);
   }
+  // An editor pane that has just come back on screen is the one most
+  // likely to be stale: its watcher skips it while its tab is hidden.
+  void runTreeWatch();
 
   renderTabBar();
   // So Ctrl+S works the moment you land on an editor tab, rather than
@@ -3728,8 +3731,15 @@ async function appendTreeLevel(pane: EditorPane, parent: HTMLElement, dir: strin
         void openLocalFile(entry.path, pane);
         return;
       }
-      if (pane.expanded.has(entry.path)) pane.expanded.delete(entry.path);
-      else pane.expanded.add(entry.path);
+      if (pane.expanded.has(entry.path)) {
+        pane.expanded.delete(entry.path);
+      } else {
+        pane.expanded.add(entry.path);
+        // The watcher only follows folders that are open, so a level
+        // that has been sitting collapsed is read again on the way back
+        // in rather than redrawn from a cache of unknown age.
+        pane.treeCache.delete(entry.path);
+      }
       void renderEditorTree(pane);
     };
     parent.appendChild(row);
@@ -4493,6 +4503,9 @@ function openSplitMenu(anchor: HTMLElement) {
 
 let currentRemotePath = '.';
 let currentRemoteSessionId: string | null = null;
+// Signature of the listing currently drawn, so the watcher can tell a
+// directory that changed from one that merely got read again.
+let lastRemoteListing = '';
 
 // Computes the parent of a path built by ListDir's path.Join convention
 // (plain relative strings, e.g. "logs", then "logs/subfolder", no
@@ -4510,6 +4523,13 @@ async function refreshFileList(path = '.', sessionId?: string) {
   currentRemotePath = path;
   currentRemoteSessionId = id;
   const entries: RemoteFile[] = await App.ListRemoteDir(id, path);
+  renderFileList(entries, path, id);
+}
+
+// Split out of refreshFileList so the watcher below, which has already
+// read the directory to decide whether anything changed, can draw that
+// same listing instead of asking the remote host for it twice.
+function renderFileList(entries: RemoteFile[], path: string, id: string) {
   const list = document.getElementById('file-list')!;
   list.innerHTML = '';
   if (path !== '.') {
@@ -4549,6 +4569,7 @@ async function refreshFileList(path = '.', sessionId?: string) {
     }
     list.appendChild(div);
   }
+  lastRemoteListing = listingSignature(entries);
 }
 
 async function uploadFilesToCurrentDir(files: FileList) {
@@ -4596,6 +4617,145 @@ async function uploadFilesToCurrentDir(files: FileList) {
     uploadFilesToCurrentDir(e.dataTransfer.files);
   });
 })();
+
+// --- Following the disk: listings that refresh themselves ---
+//
+// A file that turns up in a folder Xpecter has open should turn up in
+// Xpecter, without anyone reaching for the refresh button. There is no
+// change-notification API to hang that on here: the workspace tree
+// routinely points at an SSHFS-mapped drive (see CODEBOOK.md), which is
+// the mount layer least likely to deliver one, and the remote browser
+// is SFTP, which has no watch verb at all. So both sides poll, as
+// cheaply as a poll can be made:
+//
+//   - only the levels actually on screen (the tree's expanded folders,
+//     the one directory the browser is pointed at),
+//   - only while that surface is visible and the window isn't hidden,
+//   - and the DOM is rebuilt only when the listing really differs, so
+//     an idle folder costs one directory read and nothing else.
+//
+// The manual refresh actions stay exactly as they were: they drop the
+// caches wholesale, which is still the right answer when something
+// looks wrong rather than merely stale.
+
+const TREE_WATCH_INTERVAL_MS = 2500;
+// Slower than the tree deliberately: every ListRemoteDir opens a fresh
+// SFTP subsystem on the SSH connection, so this one is paid for over
+// the wire.
+const REMOTE_WATCH_INTERVAL_MS = 6000;
+
+// Enough to notice a file added, removed, renamed, or written to.
+// Directories carry no size: on Linux a directory's own size changes
+// when entries are created inside it, which would redraw the whole tree
+// for a change in a folder that isn't even expanded.
+function listingSignature(entries: { name: string; isDir: boolean; size: number }[]): string {
+  return entries.map((e) => (e.isDir ? `d ${e.name}` : `f ${e.name} ${e.size}`)).join('\n');
+}
+
+// display:none, whether from a collapsed sidebar section, a collapsed
+// sidebar, or an editor pane sitting in a tab that isn't on screen. All
+// of them mean the same thing here: nobody is looking at this listing,
+// so don't go to disk for it.
+function onScreen(el: HTMLElement): boolean {
+  return el.offsetParent !== null;
+}
+
+async function watchEditorTree(pane: EditorPane) {
+  if (!pane.folder || !onScreen(pane.tree)) return;
+  const fresh = new Map<string, LocalFile[]>();
+  let changed = false;
+  for (const dir of pane.expanded) {
+    let entries: LocalFile[];
+    try {
+      entries = await App.ListLocalDir(dir);
+    } catch {
+      // A folder that has gone away (deleted, renamed, a drive that
+      // dropped) isn't worth interrupting anyone over: leave what is on
+      // screen and try again on the next tick.
+      continue;
+    }
+    const cached = pane.treeCache.get(dir);
+    // An uncached level is one a render is already on its way to
+    // filling. Warm the cache with what was just read, but don't count
+    // it as a change and start a second render on top of that one.
+    if (cached && listingSignature(cached) !== listingSignature(entries)) changed = true;
+    fresh.set(dir, entries);
+  }
+  for (const [dir, entries] of fresh) pane.treeCache.set(dir, entries);
+  if (!changed) return;
+  // Re-rendering rebuilds the tree from the top, so the scroll position
+  // has to be put back: a file appearing three folders down should not
+  // also jump the view to the root.
+  const scroll = pane.tree.scrollTop;
+  await renderEditorTree(pane);
+  pane.tree.scrollTop = scroll;
+}
+
+async function watchRemoteFileList() {
+  const id = currentRemoteSessionId;
+  if (!id) return;
+  const list = document.getElementById('file-list')!;
+  if (!onScreen(list)) return;
+  const path = currentRemotePath;
+  let entries: RemoteFile[];
+  try {
+    entries = await App.ListRemoteDir(id, path);
+  } catch {
+    // A closed session, or a directory that stopped being readable: the
+    // browser keeps showing what it last had rather than emptying out.
+    return;
+  }
+  // The browser may have been pointed somewhere else while this listing
+  // was in flight, and drawing it now would undo that navigation.
+  if (id !== currentRemoteSessionId || path !== currentRemotePath) return;
+  if (listingSignature(entries) === lastRemoteListing) return;
+  const scroll = list.scrollTop;
+  renderFileList(entries, path, id);
+  list.scrollTop = scroll;
+}
+
+// One pass at a time per surface: on a slow link a tick can outlast its
+// interval, and stacking them would put several listings of the same
+// directory in flight at once.
+let treeWatchBusy = false;
+let remoteWatchBusy = false;
+
+async function runTreeWatch() {
+  if (treeWatchBusy || document.hidden) return;
+  treeWatchBusy = true;
+  try {
+    for (const pane of editorPanes.values()) await watchEditorTree(pane);
+  } finally {
+    treeWatchBusy = false;
+  }
+}
+
+async function runRemoteWatch() {
+  if (remoteWatchBusy || document.hidden) return;
+  remoteWatchBusy = true;
+  try {
+    await watchRemoteFileList();
+  } finally {
+    remoteWatchBusy = false;
+  }
+}
+
+// A pass now rather than one interval from now. Coming back to the
+// window is exactly the moment a folder is most likely to have changed
+// while Xpecter wasn't watching it.
+function refreshWatchedListings() {
+  void runTreeWatch();
+  void runRemoteWatch();
+}
+
+function startFileWatch() {
+  window.setInterval(() => { void runTreeWatch(); }, TREE_WATCH_INTERVAL_MS);
+  window.setInterval(() => { void runRemoteWatch(); }, REMOTE_WATCH_INTERVAL_MS);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) refreshWatchedListings();
+  });
+  window.addEventListener('focus', () => refreshWatchedListings());
+}
 
 // --- Saved sessions ---
 
@@ -8559,3 +8719,4 @@ renderSessionList();renderSessionList();
 renderLocalShellProfileList();
 renderFolderList();
 renderLocalShellProfilesMenu();
+startFileWatch();
