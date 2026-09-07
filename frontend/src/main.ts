@@ -1089,32 +1089,21 @@ function applyWrapMode(session: Session) {
 // The one place a terminal's dimensions are decided. Returns null while
 // the pane is still unmeasurable, which callers treat as "not yet".
 //
-// Measured twice, because the first resize can change what there is to
-// measure. The rows are worked out against the pane's content box, and
-// widening the grid to TERMINAL_COLS is usually what brings in the
-// horizontal scrollbar, which then takes its own height out of that box.
-// Sized once, the terminal ends up one row taller than the space left,
-// and the bottom row - the one holding the prompt you are typing at -
-// sits behind the bar. The second pass measures with the bar present.
-//
-// Two passes is enough, and it cannot oscillate: whether the bar exists
-// depends on the column count against the pane width, and the column
-// count is pinned. Rows never affect it.
+// One measurement is enough only because of how the pane is built: the
+// box FitAddon measures carries neither the padding nor the horizontal
+// scrollbar, so what it reports is what is actually free. See
+// .pane-term-host. Re-measuring here cannot substitute for that - the
+// resize that brings the scrollbar in does not lay out until the next
+// frame, so a second pass in the same tick reads the same number.
 function sizeTerminal(session: Session): { cols: number; rows: number } | null {
   if (!session.term || !session.fitAddon) return null;
-  for (let pass = 0; pass < 2; pass++) {
-    // proposeDimensions only for its rows, and because it is also the
-    // signal that xterm has measured its cell size at all: it returns
-    // undefined until then, and a resize before that would be based on
-    // nothing.
-    const proposed = session.fitAddon.proposeDimensions();
-    // Unmeasurable on the first pass means "not yet" and the caller
-    // retries. On the second it just means nothing more to correct.
-    if (!proposed || proposed.rows <= 0) {
-      if (pass === 0) return null;
-      break;
-    }
-    if (session.term.cols === TERMINAL_COLS && session.term.rows === proposed.rows) break;
+  // proposeDimensions only for its rows, and because it is also the
+  // signal that xterm has measured its cell size at all: it returns
+  // undefined until then, and a resize before that would be based on
+  // nothing.
+  const proposed = session.fitAddon.proposeDimensions();
+  if (!proposed || proposed.rows <= 0) return null;
+  if (session.term.cols !== TERMINAL_COLS || session.term.rows !== proposed.rows) {
     session.term.resize(TERMINAL_COLS, proposed.rows);
     // Re-asserted rather than set once: a remote program is free to
     // change the mode itself, readline among them.
@@ -1200,8 +1189,10 @@ function wallpaperBackgroundImage(): string {
 // when the text is scrolled sideways. Everything anchored to a pane
 // rather than to the text hangs off this.
 function termFrameOf(session: Session): HTMLElement | null {
-  const host = session.term?.element?.parentElement ?? null;
-  return (host?.parentElement as HTMLElement | null) ?? null;
+  // By class rather than by counting parents: there is a scroll layer
+  // between the host and the frame now, and anything anchored to the
+  // pane would otherwise silently attach to that instead.
+  return (session.term?.element?.closest('.pane-term-frame') as HTMLElement | null) ?? null;
 }
 
 function applyWallpaperToSession(session: Session) {
@@ -2449,10 +2440,15 @@ function createTerminalForSession(session: Session, tab: Tab) {
   // window. Those belong to the frame; only the terminal scrolls.
   const termFrame = document.createElement('div');
   termFrame.className = 'pane-term-frame';
+  // The scrollbar gets its own layer between the two. It cannot sit on
+  // the host, because the host is the box xterm is measured against and
+  // that measurement does not see a scrollbar; see .pane-term-host.
+  const termScroll = document.createElement('div');
+  termScroll.className = 'pane-term-scroll';
   const termHost = document.createElement('div');
   termHost.className = 'pane-term-host term-instance';
-  termHost.style.cssText = 'padding:4px;box-sizing:border-box;';
-  termFrame.appendChild(termHost);
+  termScroll.appendChild(termHost);
+  termFrame.appendChild(termScroll);
   wrapper.appendChild(termFrame);
   const container = termHost;
 
@@ -5800,7 +5796,21 @@ const HIGHLIGHT_RULES: { category: HighlightCategory; pattern: string }[] = [
   // Timestamps, in the shapes ISO-8601, syslog and IOS all use.
   { category: 'time', pattern: String.raw`\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?` },
   { category: 'time', pattern: String.raw`\*?[A-Z][a-z]{2} {1,2}\d{1,2} \d{2}:\d{2}:\d{2}(?:\.\d+)?` },
-  { category: 'time', pattern: String.raw`\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b` },
+  // Bare wall-clock time. The lookarounds are what keep it from eating
+  // the front of a MAC address: hh:mm:ss and the first three octets of
+  // 76:00:79:4a:3b:3b are the same shape, and this rule is tried before
+  // the address rules below, so a plain \b let it win on every MAC whose
+  // leading octets happen to be all digits. The MAC then came out in two
+  // colours, its head grey as a timestamp and its tail matched by the
+  // IPv6 rule. Refusing to match when another hex-and-colon group sits
+  // on either side leaves whole addresses to the rules that own them,
+  // while a real timestamp, which is surrounded by spaces or
+  // punctuation, is unaffected.
+  //
+  // Ordering cannot fix this on its own: hh:mm:ss also reads as a
+  // three-group IPv6 fragment, so putting the address rules first would
+  // simply break timestamps in the other direction.
+  { category: 'time', pattern: String.raw`(?<![0-9a-f:.])\d{2}:\d{2}:\d{2}(?:\.\d+)?(?![0-9a-f:])` },
 
   // Hardware and network addresses.
   { category: 'addr', pattern: String.raw`\b[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}\b` },

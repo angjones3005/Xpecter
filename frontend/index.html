@@ -154,8 +154,21 @@
        that must NOT move with the text (the wallpaper, the scrollbar,
        the disconnect panel) can't live inside the box that scrolls.
        The frame stays put and owns those; the host inside it scrolls. */
-    .pane-term-frame { flex: 1; min-height: 0; position: relative; overflow: hidden; }
-    .pane-term-host { width: 100%; height: 100%; position: relative; overflow-x: auto; overflow-y: hidden; }
+    /* Three layers, and which one does what decides whether the bottom
+       row is visible. FitAddon sizes the terminal from
+       getComputedStyle(host).height, and that property reports the
+       height the box was *given*, not the height left inside it: it does
+       not subtract a horizontal scrollbar, and under border-box it
+       includes padding. With the scrollbar and the 4px inset both on the
+       host, xterm was told it had 23px more than it did and drew a row
+       that no longer fit, which is the row the prompt sits on.
+       So the inset lives on the frame, the scrollbar on its own layer,
+       and the host xterm mounts into is a plain block whose height:100%
+       resolves against the scroll layer's content box - which does
+       exclude the scrollbar. Measured exact in both states. */
+    .pane-term-frame { flex: 1; min-height: 0; position: relative; overflow: hidden; padding: 4px; box-sizing: border-box; }
+    .pane-term-scroll { width: 100%; height: 100%; overflow-x: auto; overflow-y: hidden; }
+    .pane-term-host { height: 100%; position: relative; }
     .term-wallpaper-layer { display: none; }
     .term-instance .xterm, .term-instance .xterm-viewport, .term-instance .xterm-screen, .term-instance canvas { background: transparent !important; background-color: transparent !important; }
     .pane-landing { flex: 1; display: flex; align-items: center; justify-content: center; }
