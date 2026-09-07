@@ -1723,6 +1723,10 @@ function switchToTab(id: string) {
   if (focused?.mode === 'ssh' && focused.backendId) {
     refreshFileList('.', focused.backendId);
   }
+  // This tab's trees were not being watched while it was hidden, so
+  // catch them up now rather than showing a stale listing until the
+  // next tick.
+  void runTreeWatchPass();
 
   renderTabBar();
   // So Ctrl+S works the moment you land on an editor tab, rather than
@@ -2942,6 +2946,9 @@ function disposeEditorPane(session: Session) {
   pane.editor.dispose();
   editorPanes.delete(session.id);
   if (lastEditorPaneId === session.id) lastEditorPaneId = null;
+  // Closing an editor pane retires whatever folder it was showing, and
+  // with it any watch nothing else still needs.
+  syncWatchedDirs();
 }
 
 // Every unsaved buffer in one editor pane, asked about one at a time.
@@ -3605,6 +3612,9 @@ function closeFolder(pane: EditorPane) {
   renderDocBar(pane);
   renderFolderList();
   pane.editor.layout();
+  // Closing the last open folder is what drops the final watch, so this
+  // path has to report the new set too; it never reaches renderEditorTree.
+  syncWatchedDirs();
 }
 
 async function refreshFolder(pane: EditorPane) {
@@ -3666,6 +3676,9 @@ async function renderEditorTree(pane: EditorPane) {
   const body = document.createElement('div');
   pane.tree.appendChild(body);
   await appendTreeLevel(pane, body, folder, 0);
+  // Every level the tree draws is cached by now, so this is the point
+  // where the set of directories worth watching is actually known.
+  syncWatchedDirs();
 }
 
 function treeAction(glyph: string, title: string, run: () => void): HTMLSpanElement {
@@ -3728,8 +3741,15 @@ async function appendTreeLevel(pane: EditorPane, parent: HTMLElement, dir: strin
         void openLocalFile(entry.path, pane);
         return;
       }
-      if (pane.expanded.has(entry.path)) pane.expanded.delete(entry.path);
-      else pane.expanded.add(entry.path);
+      if (pane.expanded.has(entry.path)) {
+        pane.expanded.delete(entry.path);
+      } else {
+        pane.expanded.add(entry.path);
+        // The watcher only follows folders that are open, so this level
+        // may have gone stale while it was shut. Drop it and pay for one
+        // listing on expand rather than showing what was there before.
+        pane.treeCache.delete(entry.path);
+      }
       void renderEditorTree(pane);
     };
     parent.appendChild(row);
@@ -3752,6 +3772,153 @@ function refreshTreeHighlights(pane: EditorPane) {
     row.classList.toggle('open', !!rowPath && openPaths.has(rowPath));
   });
 }
+
+// A folder that grows while you are looking at it should show the new
+// file without being asked.
+//
+// The local tree is driven by real filesystem notifications: the
+// backend watches exactly the directories drawn on screen and emits
+// "fs:changed". The slow pass below is a backstop, not the mechanism.
+// It stays because a watch can fail to register or miss an event
+// without saying so (a network path, a filesystem with no notification
+// support, the platform's watch limit), and the cost of being wrong
+// about that is a tree that silently stops updating. Re-listing a
+// handful of visible directories every fifteen seconds is cheap
+// insurance against a failure mode with no other symptom.
+//
+// The remote browser has no equivalent and polls outright: it is SFTP,
+// which has no watch verb at all.
+
+const TREE_WATCH_INTERVAL_MS = 15000;
+
+// Name, kind and size, in listing order. Size is deliberately left out
+// for directories: on Linux a directory's own size changes when a file
+// is created inside it, which would redraw the tree for a change in a
+// folder that may not even be expanded. Shaped for both LocalFile and
+// RemoteFile, since the two trees are the same shape.
+function listingSignature(entries: Array<{ name: string; isDir: boolean; size: number }>): string {
+  return entries.map((e) => (e.isDir ? `d:${e.name}` : `f:${e.name}:${e.size}`)).join('\n');
+}
+
+// The directories the tree is currently drawing: the root, plus every
+// expanded folder reachable from it. Walked the same way appendTreeLevel
+// walks, so the two can't drift. pane.expanded on its own is not the
+// answer, it keeps entries for subfolders whose parent has since been
+// collapsed, and those are not on screen.
+function visibleTreeDirs(pane: EditorPane): string[] {
+  const folder = pane.folder;
+  if (!folder) return [];
+  const dirs = [folder];
+  const walk = (dir: string) => {
+    for (const entry of pane.treeCache.get(dir) ?? []) {
+      if (!entry.isDir || !pane.expanded.has(entry.path)) continue;
+      dirs.push(entry.path);
+      walk(entry.path);
+    }
+  };
+  walk(folder);
+  return dirs;
+}
+
+async function watchEditorTree(pane: EditorPane) {
+  if (!pane.folder) return;
+  let changed = false;
+  for (const dir of visibleTreeDirs(pane)) {
+    let entries: LocalFile[];
+    try {
+      entries = await App.ListLocalDir(dir);
+    } catch {
+      // The folder went away or stopped being readable. Drop its cached
+      // level so the redraw re-reads it and reports the failure in
+      // place, which is appendTreeLevel's job rather than the watcher's.
+      if (pane.treeCache.delete(dir)) changed = true;
+      continue;
+    }
+    // An absent cache entry counts as a change even against an empty
+    // listing: that is the state the error path above leaves behind, and
+    // a folder that becomes readable again while still empty has to
+    // clear the error note it is currently showing.
+    const cached = pane.treeCache.get(dir);
+    if (cached && listingSignature(entries) === listingSignature(cached)) continue;
+    pane.treeCache.set(dir, entries);
+    changed = true;
+  }
+  if (!changed) return;
+  // Every visible level is warm now, so the redraw is cache-only. Scroll
+  // is restored because a file appearing three levels down must not
+  // throw the view back to the root.
+  const scrollTop = pane.tree.scrollTop;
+  await renderEditorTree(pane);
+  pane.tree.scrollTop = scrollTop;
+}
+
+// One pass at a time: on a mapped drive a listing can outlast the
+// interval, and stacked ticks would queue round trips behind each other.
+let treeWatchRunning = false;
+
+async function runTreeWatchPass() {
+  if (treeWatchRunning || document.hidden) return;
+  treeWatchRunning = true;
+  try {
+    for (const pane of editorPanes.values()) {
+      // Panes belonging to other tabs are display:none. Their trees are
+      // re-read when the tab is switched to, which is soon enough.
+      if (pane.folder && pane.session.ownerTabId === activeTabId) await watchEditorTree(pane);
+    }
+  } finally {
+    treeWatchRunning = false;
+  }
+}
+
+setInterval(() => { void runTreeWatchPass(); }, TREE_WATCH_INTERVAL_MS);
+// Coming back to the window is the moment a folder is most likely to
+// have changed behind the app's back, so don't wait out the interval.
+window.addEventListener('focus', () => { void runTreeWatchPass(); });
+
+// --- Filesystem notifications for the local tree ---
+
+// Every directory any on-screen tree is drawing, across all panes. This
+// is the set handed to the backend watcher, and the set an incoming
+// change is matched against.
+function watchedTreeDirs(): string[] {
+  const dirs = new Set<string>();
+  for (const pane of editorPanes.values()) {
+    if (!pane.folder) continue;
+    for (const dir of visibleTreeDirs(pane)) dirs.add(dir);
+  }
+  return Array.from(dirs);
+}
+
+// The last set sent, joined, so an unchanged set doesn't cross the
+// bridge again. syncWatchedDirs runs after every render, which is often.
+let sentWatchKey = ' ';
+
+function syncWatchedDirs() {
+  const dirs = watchedTreeDirs();
+  const key = dirs.slice().sort().join('\n');
+  if (key === sentWatchKey) return;
+  sentWatchKey = key;
+  void App.WatchLocalDirs(dirs).catch(() => {
+    // Watching is an optimisation over the reconciliation pass, so a
+    // backend that can't watch is not worth interrupting anyone about.
+    // Clear the cached key so the next render tries again.
+    sentWatchKey = ' ';
+  });
+}
+
+runtime.EventsOn('fs:changed', (payload: unknown) => {
+  const changed = new Set(Array.isArray(payload) ? (payload as string[]) : []);
+  if (changed.size === 0) return;
+  for (const pane of editorPanes.values()) {
+    if (!pane.folder) continue;
+    // Only panes actually showing one of the changed directories. A
+    // change under a folder that this pane has collapsed is not its
+    // business, and re-listing for it would undo the point of watching
+    // a narrow set in the first place.
+    if (!visibleTreeDirs(pane).some((dir) => changed.has(dir))) continue;
+    void watchEditorTree(pane);
+  }
+});
 
 // SPE-106: folders pinned to the sidebar are the editor's counterpart
 // to saved sessions, so the two reach each other: pinning one opens it,
@@ -4493,6 +4660,9 @@ function openSplitMenu(anchor: HTMLElement) {
 
 let currentRemotePath = '.';
 let currentRemoteSessionId: string | null = null;
+// listingSignature of what the browser is currently showing, so the
+// watcher below can tell a real change from an identical re-listing.
+let remoteListingSignature = '';
 
 // Computes the parent of a path built by ListDir's path.Join convention
 // (plain relative strings, e.g. "logs", then "logs/subfolder", no
@@ -4510,6 +4680,16 @@ async function refreshFileList(path = '.', sessionId?: string) {
   currentRemotePath = path;
   currentRemoteSessionId = id;
   const entries: RemoteFile[] = await App.ListRemoteDir(id, path);
+  // Clicking through folders faster than SFTP answers would otherwise
+  // let an older listing land on top of the one just asked for.
+  if (currentRemotePath !== path || currentRemoteSessionId !== id) return;
+  remoteListingSignature = listingSignature(entries);
+  renderFileList(entries, path, id);
+}
+
+// Split out of refreshFileList so the watcher below can draw a listing
+// it has already fetched instead of asking the host for it twice.
+function renderFileList(entries: RemoteFile[], path: string, id: string) {
   const list = document.getElementById('file-list')!;
   list.innerHTML = '';
   if (path !== '.') {
@@ -4523,9 +4703,19 @@ async function refreshFileList(path = '.', sessionId?: string) {
   for (const e of entries) {
     const div = document.createElement('div');
     div.className = 'side-row';
-    div.textContent = (e.isDir ? '\ud83d\udcc1 ' : '\ud83d\udcc4 ') + e.name;
+    // A label span rather than text set on the row itself: the row
+    // carries action buttons now, and .side-row .name is what ellipsises
+    // a long filename instead of shoving them off the edge.
+    const label = document.createElement('span');
+    label.className = 'name';
+    label.textContent = (e.isDir ? '\ud83d\udcc1 ' : '\ud83d\udcc4 ') + e.name;
+    div.appendChild(label);
     if (e.isDir) {
       div.onclick = () => refreshFileList(e.path, id);
+      // The same two actions a folder row offers in the editor's tree,
+      // so a subdirectory can be filled without navigating into it.
+      div.appendChild(remoteAction('\uff0b', `New file in ${e.name}`, () => { void createInRemote(id, e.path, 'file'); }));
+      div.appendChild(remoteAction('\u229e', `New folder in ${e.name}`, () => { void createInRemote(id, e.path, 'folder'); }));
     } else {
       div.title = 'Open in Xpecter; Shift-click to open with the system app';
       div.onauxclick = (event) => {
@@ -4547,9 +4737,123 @@ async function refreshFileList(path = '.', sessionId?: string) {
         });
       };
     }
+    div.appendChild(remoteAction('✎', `Rename ${e.name}`, () => { void renameRemote(id, e.path, e.name); }));
     list.appendChild(div);
   }
 }
+
+// SPE-105 parity: the remote browser gets the editor tree's three
+// workspace actions. Everything else about remote files already routes
+// through the same panes and the same save path; not being able to add
+// a file to the host you are looking at was the last thing that made
+// the browser feel read-only next to the local tree.
+
+function remoteAction(glyph: string, title: string, run: () => void): HTMLSpanElement {
+  const el = document.createElement('span');
+  // 'neutral' keeps it off the danger colour that .side-row .act uses
+  // for the delete affordances elsewhere in the sidebar.
+  el.className = 'act neutral';
+  el.textContent = glyph;
+  el.title = title;
+  // Stopped as well as run: the row underneath either navigates into a
+  // folder or opens a file, and neither is what was clicked.
+  el.onclick = (e) => { e.stopPropagation(); run(); };
+  return el;
+}
+
+async function createInRemote(id: string, dir: string, kind: 'file' | 'folder') {
+  const where = dir === '.' ? 'this directory' : baseName(dir);
+  const name = prompt(`New ${kind} in ${where}:`);
+  if (name === null) return; // cancelled
+  let created: string;
+  try {
+    created = kind === 'file'
+      ? await App.CreateRemoteFile(id, dir, name)
+      : await App.CreateRemoteDir(id, dir, name);
+  } catch (err) {
+    // The backend's refusals arrive here alongside real SFTP errors: a
+    // name already taken, a name that is really a path, a directory
+    // that isn't writable. All of them say something worth reading.
+    flashStatus(String(err), true);
+    return;
+  }
+  flashStatus(`Created ${baseName(created)}`);
+  await refreshFileList(currentRemotePath, id);
+  // A new file opens, because creating one is how you start writing it.
+  // Same as the local tree.
+  if (kind === 'file') {
+    await openRemoteFile(id, created).catch((err) => { flashStatus(`Open failed: ${err}`, true); });
+  }
+}
+
+async function renameRemote(id: string, oldPath: string, currentName: string) {
+  const next = prompt(`Rename ${currentName} to:`, currentName);
+  if (next === null || next === currentName) return; // cancelled, or unchanged
+  let renamed: string;
+  try {
+    renamed = await App.RenameRemoteEntry(id, oldPath, next);
+  } catch (err) {
+    flashStatus(String(err), true);
+    return;
+  }
+  // A buffer opened from the old path would otherwise still be pointing
+  // at it, and saving would recreate the name that was just renamed
+  // away. Retarget it instead, which is what Save As already does.
+  const doc = findOpenDoc(oldPath, false, id);
+  if (doc) {
+    retargetDoc(doc, { path: renamed, isLocal: false, remoteSessionId: id });
+    flashStatus(`Renamed to ${baseName(renamed)}; the open buffer now points at it`);
+  } else {
+    flashStatus(`Renamed to ${baseName(renamed)}`);
+  }
+  await refreshFileList(currentRemotePath, id);
+}
+
+// The remote browser gets the same treatment as the workspace tree, on a
+// slower clock: every ListRemoteDir opens a fresh SFTP subsystem on the
+// connection, so this one is paid for over the wire.
+const REMOTE_WATCH_INTERVAL_MS = 6000;
+
+let remoteWatchRunning = false;
+
+async function watchRemoteFileList() {
+  if (remoteWatchRunning || document.hidden) return;
+  const id = currentRemoteSessionId;
+  if (!id) return;
+  const list = document.getElementById('file-list')!;
+  // Covers both a collapsed Remote files section and a hidden sidebar
+  // without either one having to tell the watcher about it.
+  if (!list.offsetParent) return;
+  // The sidebar only ever shows the focused tab's host. Polling a
+  // directory nobody is looking at spends a round trip for nothing.
+  const tab = activeTabId ? tabs.get(activeTabId) : null;
+  if (!tab || focusedSession(tab)?.backendId !== id) return;
+
+  const path = currentRemotePath;
+  remoteWatchRunning = true;
+  try {
+    const entries = await App.ListRemoteDir(id, path);
+    if (currentRemotePath !== path || currentRemoteSessionId !== id) return;
+    const signature = listingSignature(entries);
+    if (signature === remoteListingSignature) return;
+    remoteListingSignature = signature;
+    // #sidebar is the scroll container here, not #file-list, so this is
+    // where a redraw would otherwise cost you your place.
+    const sidebar = document.getElementById('sidebar');
+    const scrollTop = sidebar?.scrollTop ?? 0;
+    renderFileList(entries, path, id);
+    if (sidebar) sidebar.scrollTop = scrollTop;
+  } catch {
+    // A connection that has dropped already reports itself through the
+    // session's own close handling. The browser just stops updating
+    // rather than throwing an error into the sidebar every six seconds.
+  } finally {
+    remoteWatchRunning = false;
+  }
+}
+
+setInterval(() => { void watchRemoteFileList(); }, REMOTE_WATCH_INTERVAL_MS);
+window.addEventListener('focus', () => { void watchRemoteFileList(); });
 
 async function uploadFilesToCurrentDir(files: FileList) {
   if (!currentRemoteSessionId) return;
@@ -7326,6 +7630,26 @@ wireSidebarHeaderAction('sidebar-new-session', () => {
 wireSidebarHeaderAction('sidebar-new-folder', () => { createNewFolder(); });
 wireSidebarHeaderAction('folder-add-btn', () => { void pinFolder(); });
 wireSidebarHeaderAction('sidebar-collapse-btn', toggleSidebar);
+
+// The remote browser's header creates in whichever directory it is
+// currently showing, the way the editor tree's header creates at the
+// workspace root.
+function withRemoteSession(run: (id: string) => void) {
+  if (!currentRemoteSessionId) {
+    flashStatus('Connect to a host first', true);
+    return;
+  }
+  run(currentRemoteSessionId);
+}
+wireSidebarHeaderAction('remote-new-file', () => {
+  withRemoteSession((id) => { void createInRemote(id, currentRemotePath, 'file'); });
+});
+wireSidebarHeaderAction('remote-new-folder', () => {
+  withRemoteSession((id) => { void createInRemote(id, currentRemotePath, 'folder'); });
+});
+wireSidebarHeaderAction('remote-refresh', () => {
+  withRemoteSession((id) => { void refreshFileList(currentRemotePath, id); });
+});
 
 applySidebarSections();
 

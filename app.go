@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"xpecter/backend/config"
+	"xpecter/backend/fswatch"
 	"xpecter/backend/idgen"
 	"xpecter/backend/pty"
 	"xpecter/backend/serialclient"
@@ -46,6 +47,12 @@ type App struct {
 	// startup sequence, empty when Xpecter was launched normally.
 	startupDir string
 	logMu      sync.Mutex
+	// SPE-105 follow-up: one watcher for every editor workspace tree on
+	// screen, created on first use because a session that never opens a
+	// folder should never hold a watch handle. Guarded by its own mutex
+	// since WatchLocalDirs is reachable from the frontend at any time.
+	fsWatch   *fswatch.Watcher
+	fsWatchMu sync.Mutex
 }
 
 func NewApp(startupDir string) *App {
@@ -104,6 +111,12 @@ func (a *App) shutdown(ctx context.Context) {
 	for _, listener := range a.forwards {
 		listener.Close()
 	}
+	a.fsWatchMu.Lock()
+	if a.fsWatch != nil {
+		_ = a.fsWatch.Close()
+		a.fsWatch = nil
+	}
+	a.fsWatchMu.Unlock()
 }
 
 // SessionClosedEvent is emitted as "ssh:closed:<id>" / "serial:closed:<id>"
@@ -568,6 +581,43 @@ func (a *App) CreateLocalDir(dir string, name string) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// WatchLocalDirs makes the watched set exactly dirs and emits
+// "fs:changed" with the directories whose listings change. The frontend
+// passes every directory its workspace trees are currently drawing, so
+// a folder that gains a file shows it without waiting for a poll.
+//
+// The whole set arrives on every call rather than add/remove deltas:
+// the frontend derives it from what is on screen, which it already has,
+// and a delta protocol would need both sides to agree on state that
+// only one of them owns. Passing an empty slice drops every watch.
+func (a *App) WatchLocalDirs(dirs []string) error {
+	a.fsWatchMu.Lock()
+	defer a.fsWatchMu.Unlock()
+
+	if a.fsWatch == nil {
+		// Nothing to watch and nothing watching: don't create a watcher
+		// (and its goroutine and kernel handle) just to be told so.
+		if len(dirs) == 0 {
+			return nil
+		}
+		w, err := fswatch.New(func(changed []string) {
+			// The watcher outlives a single call and runs on its own
+			// goroutine, so it can fire before startup has handed us a
+			// context or after shutdown has torn one down.
+			if a.ctx == nil {
+				return
+			}
+			runtime.EventsEmit(a.ctx, "fs:changed", changed)
+		})
+		if err != nil {
+			return err
+		}
+		a.fsWatch = w
+	}
+	a.fsWatch.SetDirs(dirs)
+	return nil
 }
 
 // LocalFile mirrors RemoteFile for the local filesystem, so the
@@ -1234,6 +1284,69 @@ func (a *App) ListRemoteDir(id string, path string) ([]RemoteFile, error) {
 		out = append(out, RemoteFile{Name: e.Name, Path: e.Path, IsDir: e.IsDir, Size: e.Size})
 	}
 	return out, nil
+}
+
+// validRemoteName is validLocalName's counterpart for the remote
+// browser. It is deliberately not the same function: remote paths are
+// POSIX, where "/" is the only separator and a backslash is an ordinary
+// character that a legitimate file is allowed to contain. Rejecting "\"
+// here, as the local rule does, would refuse to rename files that exist
+// perfectly happily on the host.
+func validRemoteName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", errors.New("name cannot be empty")
+	}
+	if name == "." || name == ".." {
+		return "", fmt.Errorf("%q is not a name", name)
+	}
+	if strings.Contains(name, "/") {
+		return "", errors.New("a name cannot contain \"/\": create the folder first, then create inside it")
+	}
+	return name, nil
+}
+
+// CreateRemoteFile, CreateRemoteDir and RenameRemoteEntry give the
+// remote browser the same three actions the editor's workspace tree
+// already has. Each takes the parent and the new name separately so the
+// name can be checked as a name, matching the local pair.
+func (a *App) CreateRemoteFile(id string, dir string, name string) (string, error) {
+	sess, ok := a.sessions[id]
+	if !ok {
+		return "", fmt.Errorf("no such session: %s", id)
+	}
+	name, err := validRemoteName(name)
+	if err != nil {
+		return "", err
+	}
+	return sftpclient.CreateFile(sess.SSHClient(), dir, name)
+}
+
+func (a *App) CreateRemoteDir(id string, dir string, name string) (string, error) {
+	sess, ok := a.sessions[id]
+	if !ok {
+		return "", fmt.Errorf("no such session: %s", id)
+	}
+	name, err := validRemoteName(name)
+	if err != nil {
+		return "", err
+	}
+	return sftpclient.CreateDir(sess.SSHClient(), dir, name)
+}
+
+// RenameRemoteEntry renames in place: it takes a new name, not a new
+// path, so a rename can never turn into a move to somewhere the user
+// can't see.
+func (a *App) RenameRemoteEntry(id string, oldPath string, newName string) (string, error) {
+	sess, ok := a.sessions[id]
+	if !ok {
+		return "", fmt.Errorf("no such session: %s", id)
+	}
+	newName, err := validRemoteName(newName)
+	if err != nil {
+		return "", err
+	}
+	return sftpclient.Rename(sess.SSHClient(), oldPath, newName)
 }
 
 func (a *App) ReadRemoteFile(id string, path string) (string, error) {

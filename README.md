@@ -79,13 +79,21 @@ wails dev     # live dev mode
 wails build   # produces a native binary per platform
 ```
 
-### Frontend validation on VM-backed folders
+### Build and validation on Windows
 
-If your repo lives on a Linux VM but is accessed from Windows through a mapped drive (for example SSHFS), frontend package installs may fail on the mapped path even when basic file writes work.
+```powershell
+.\scripts\check.ps1              # every check CI runs, in the right order
+.\scripts\build.ps1              # the above, then build\bin\xpecter.exe
+```
 
-Use the VM-native path for Node tooling (`npm ci`, lint, type-check, build), and use Windows for `.exe` smoke tests.
+One ordering trap is worth knowing before you run Go commands by hand:
+`main.go` embeds `all:frontend/dist`, so on a clean checkout `go build`,
+`go vet` and `go test` against the root package fail with `pattern
+all:frontend/dist: no matching files found` until the frontend has been
+built. Run `npm run build` in `frontend/` first, or just use the scripts.
 
-See [CODEBOOK.md](CODEBOOK.md) for the tested workflow and fallback commands.
+See [CODEBOOK.md](CODEBOOK.md) for the toolchain layout and the other trap
+(`./...` walking into `frontend/node_modules`).
 
 On Linux, the build may need `-tags webkit2_41` depending on your distro's `webkit2gtk` version:
 

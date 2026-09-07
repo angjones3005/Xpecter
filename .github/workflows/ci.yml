@@ -43,6 +43,14 @@ jobs:
         # everything under backend/.
         run: go build ./backend/...
 
+      - name: go test (non-GUI packages)
+        # Scoped for the same reason as the build above. Note this does
+        # not cover the root package's own tests (app_test.go): those
+        # need frontend/dist to exist for the go:embed in main.go, which
+        # only the frontend job produces. `scripts/check.ps1` runs the
+        # whole set locally in the right order.
+        run: go test -count=1 ./backend/...
+
   frontend-checks:
     name: Frontend checks
     runs-on: ubuntu-latest

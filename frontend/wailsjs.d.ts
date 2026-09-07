@@ -157,6 +157,9 @@ export interface AppBindings {
   WriteLocalFile(path: string, content: string): Promise<void>;
   CreateLocalFile(dir: string, name: string): Promise<string>;
   CreateLocalDir(dir: string, name: string): Promise<string>;
+  // Makes the watched set exactly `dirs` and emits "fs:changed" with the
+  // directories whose listings changed. Pass [] to drop every watch.
+  WatchLocalDirs(dirs: string[]): Promise<void>;
   // SPE-105: starts a second Xpecter process; Wails v2 is one window
   // per process, so this is the only shape a "new window" can take.
   OpenNewWindow(): Promise<void>;
@@ -205,6 +208,11 @@ export interface AppBindings {
   OpenRemoteFile(id: string, path: string): Promise<void>;
   WriteRemoteFile(id: string, path: string, content: string): Promise<void>;
   UploadRemoteFile(id: string, path: string, base64Content: string, modifiedAt: number): Promise<void>;
+  // All three return the resulting remote path. A name already taken is
+  // an error rather than a silent overwrite, matching the local pair.
+  CreateRemoteFile(id: string, dir: string, name: string): Promise<string>;
+  CreateRemoteDir(id: string, dir: string, name: string): Promise<string>;
+  RenameRemoteEntry(id: string, oldPath: string, newName: string): Promise<string>;
 }
 interface WailsRuntime {
   EventsOn(eventName: string, callback: (...data: unknown[]) => void): () => void;

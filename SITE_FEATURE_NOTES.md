@@ -118,6 +118,9 @@ Open a folder and it appears as a tree inside the pane, not in the application c
 ### Creating files and folders
 Add a file or a folder to the workspace you already have open. The tree header creates at the root, and every folder row offers the same two actions for creating inside it. A new file opens for editing straight away. A name already taken is refused rather than quietly overwriting what is there.
 
+### The tree keeps up with the folder
+A file added to an open folder by anything other than Xpecter — a build, a download, a shell in the next pane — appears in the tree on its own, as it happens. Xpecter watches exactly the folders on screen, so a busy directory you have collapsed costs nothing. The tree is redrawn only when something has really changed, so scroll position and expanded folders survive, and a burst of writes redraws once rather than once per file. A slow re-read runs underneath as a backstop, for the filesystems that accept a watch and then quietly never report anything.
+
 ### Local and remote files
 Open and save files on the local machine, and write a buffer to any host you are connected to over SFTP. Files opened from the remote browser edit in the same panes as local ones. Reload From Disk re-reads a file that changed underneath you.
 
@@ -145,6 +148,12 @@ Skald, the switch-configuration DSL, is a first-class language in the editor. It
 
 ### Open remote files with the system default app
 Open PDFs, images, and other remote files with the operating system's default application. Xpecter downloads a private temporary copy, preserves its timestamp, and invokes the platform handler.
+
+### Creating and renaming on the host
+The remote browser has the same workspace actions as the editor's folder tree. Its header adds a file or a folder to the directory you are looking at, every folder row offers the same two for creating inside it, and every row can be renamed in place. A new file opens for editing straight away. A name already taken is refused rather than overwriting what is there, for both creating and renaming. Renaming a file that is currently open retargets the buffer, so saving writes to the new name instead of recreating the old one.
+
+### The remote browser keeps up with the directory
+The remote file list re-reads the directory it is showing and updates when its contents change, so a file written by the session in the terminal beside it shows up without a manual refresh. It runs on a slower clock than the local tree because each listing is a round trip to the host, and it stops entirely when the sidebar or the section is closed, when the window is in the background, or when the browser is pointed at a host that is not the focused tab.
 
 ### SFTP timestamp preservation
 Remote-to-local downloads preserve remote modification times. Drag-and-drop uploads carry the local file modification time to the remote file when supported.

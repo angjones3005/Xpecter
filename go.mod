@@ -6,8 +6,9 @@ require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/UserExistsError/conpty v0.1.4
 	github.com/creack/pty v1.1.21
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/pkg/sftp v1.13.6
-	github.com/wailsapp/wails/v2 v2.14.0
+	github.com/wailsapp/wails/v2 v2.15.0
 	go.bug.st/serial v1.8.0
 	golang.org/x/crypto v0.53.0
 	golang.org/x/sys v0.46.0
