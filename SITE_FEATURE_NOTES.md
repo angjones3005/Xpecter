@@ -186,7 +186,10 @@ Eleven monospace fonts, nine of them bundled so they render identically everywhe
 Set a background image with adjustable opacity behind the terminal surface.
 
 ### Clipboard and paste
-Copy on select, right-click to paste, and an explicit paste shortcut that works consistently across platforms and webviews. Multi-line pastes warn before they run. Letting remote hosts write to the local clipboard over OSC 52 is available and off by default, because it lets a remote process write to your clipboard silently.
+Copy on select, right-click to paste, and an explicit paste shortcut that works consistently across platforms and webviews. Letting remote hosts write to the local clipboard over OSC 52 is available and off by default, because it lets a remote process write to your clipboard silently.
+
+### Multi-line paste that arrives intact
+Pasted line endings are translated to what a terminal actually reads as Enter, so text copied from Windows no longer arrives with a stray extra line after each one. Where the program on the other end supports bracketed paste, a pasted block lands on the prompt as one piece and waits: bash and zsh stop running each line as it arrives, and vim stops indenting every line further under the one above it. The multi-line warning still appears wherever the lines really will run one at a time, including on network hardware, and is no longer raised for pastes that will simply sit on the prompt.
 
 ### Saving terminal output
 Save what is on screen in a session to a file, including from the panel shown after a session has dropped.

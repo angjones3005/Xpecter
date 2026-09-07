@@ -2315,17 +2315,64 @@ function setupCustomScrollbar(session: Session) {
 // on every multi-line paste.
 let warnMultilinePasteEnabled = localStorage.getItem('xpecter-warn-multiline-paste') !== 'off';
 
-function writeToSessionWithPasteGuard(session: Session, text: string) {
-  if (warnMultilinePasteEnabled) {
-    const lines = text.split(/\r\n|\r|\n/).filter((l, i, arr) => !(i === arr.length - 1 && l === ''));
-    if (lines.length > 1) {
-      const proceed = confirm(`You're about to paste ${lines.length} lines. Each line may run as a separate command on the remote end. Continue?`);
-      if (!proceed) return;
-    }
-  }
-  if (session.mode === 'local' && session.backendId) App.WriteLocalTerminal(session.backendId, text);
-  if (session.mode === 'ssh' && session.backendId) App.WriteSSH(session.backendId, text);
-  if (session.mode === 'serial' && session.backendId) App.WriteSerial(session.backendId, text);
+function writeToSession(session: Session, data: string) {
+  if (session.mode === 'local' && session.backendId) App.WriteLocalTerminal(session.backendId, data);
+  if (session.mode === 'ssh' && session.backendId) App.WriteSSH(session.backendId, data);
+  if (session.mode === 'serial' && session.backendId) App.WriteSerial(session.backendId, data);
+}
+
+// A terminal's Enter is carriage return, not newline. Clipboard text
+// carries whatever its source used: CRLF from anything Windows, bare LF
+// from a Unix file or a web page. Sending those through untranslated is
+// what mangles a pasted block. CRLF arrives as "execute, then a stray
+// LF", which many shells count as a second empty line, and a bare LF is
+// not the key a terminal is waiting for at all.
+function newlinesToCarriageReturns(text: string): string {
+  return text.replace(/\r\n|\n/g, '\r');
+}
+
+// Bracketed paste (DECSET 2004) is how a program says "tell me when
+// text is pasted rather than typed". Wrapped in these markers, bash and
+// zsh hold a multi-line block on the prompt instead of running each
+// line as it arrives, and vim leaves autoindent off for the duration
+// rather than indenting every line under the one above it, which is the
+// staircase that pasted code turns into without this.
+//
+// xterm.js does this for pastes it handles itself, but the paste guard
+// below deliberately intercepts before xterm sees the event, which had
+// the side effect of dropping the brackets along with it.
+function bracketPaste(session: Session, text: string): string {
+  return session.term?.modes.bracketedPasteMode ? `\x1b[200~${text}\x1b[201~` : text;
+}
+
+// Returns false if the user backed out. Only asked for text that will
+// actually be executed line by line: under bracketed paste the block
+// lands on the prompt and waits, so the old warning's "each line may
+// run as a separate command" was not true there. Where it is true, and
+// on the network hardware this guard was written for, nothing has
+// bracketed paste and the warning still appears.
+function confirmMultiline(text: string, willExecuteEachLine: boolean): boolean {
+  if (!warnMultilinePasteEnabled || !willExecuteEachLine) return true;
+  const lines = text.split(/\r\n|\r|\n/).filter((l, i, arr) => !(i === arr.length - 1 && l === ''));
+  if (lines.length <= 1) return true;
+  return confirm(`You're about to send ${lines.length} lines. Each line may run as a separate command on the remote end. Continue?`);
+}
+
+// A clipboard paste: the text is what the user copied, and the program
+// on the other end decides what to do with it.
+function pasteIntoSession(session: Session, text: string) {
+  const bracketed = !!session.term?.modes.bracketedPasteMode;
+  if (!confirmMultiline(text, !bracketed)) return;
+  writeToSession(session, bracketPaste(session, newlinesToCarriageReturns(text)));
+}
+
+// Text Xpecter is sending on the user's behalf to be run, currently
+// command snippets. Never bracketed: brackets tell the shell to treat
+// the text as literal input, which would leave a snippet sitting on the
+// prompt unexecuted rather than running it.
+function sendTextToSession(session: Session, text: string) {
+  if (!confirmMultiline(text, true)) return;
+  writeToSession(session, newlinesToCarriageReturns(text));
 }
 
 // SPE-128: tears down a session's terminal view (terminal, scrollbar,
@@ -2485,7 +2532,7 @@ function createTerminalForSession(session: Session, tab: Tab) {
       return false;
     }
     if (e.type === 'keydown' && shortcutMatches(e, 'paste')) {
-      navigator.clipboard.readText().then((text) => writeToSessionWithPasteGuard(session, text)).catch(() => {});
+      navigator.clipboard.readText().then((text) => pasteIntoSession(session, text)).catch(() => {});
       return false;
     }
     if (e.type === 'keydown' && shortcutMatches(e, 'zoomIn')) {
@@ -2529,7 +2576,7 @@ function createTerminalForSession(session: Session, tab: Tab) {
   container.addEventListener('contextmenu', (e) => {
     if (!rightClickPasteEnabled) return;
     e.preventDefault();
-    App.GetClipboardText().then((text) => writeToSessionWithPasteGuard(session, text)).catch(() => {});
+    App.GetClipboardText().then((text) => pasteIntoSession(session, text)).catch(() => {});
   });
 
   // Native browser paste (Ctrl+V, middle-click on Linux, right-click ->
@@ -2543,7 +2590,7 @@ function createTerminalForSession(session: Session, tab: Tab) {
     e.preventDefault();
     e.stopPropagation();
     const text = e.clipboardData.getData('text');
-    if (text) writeToSessionWithPasteGuard(session, text);
+    if (text) pasteIntoSession(session, text);
   }, true);
 
   term.onData((data) => {
@@ -5632,7 +5679,7 @@ function renderCommandSnippetsMenu() {
       if (!tab) return;
       const session = focusedSession(tab);
       if (session.status !== 'connected' || !session.backendId) return;
-      writeToSessionWithPasteGuard(session, `${snippet.command}\r`);
+      sendTextToSession(session, `${snippet.command}\r`);
     };
     container.appendChild(item);
   }
