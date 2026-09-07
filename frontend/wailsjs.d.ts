@@ -135,7 +135,10 @@ export interface UpdateInfo {
   assetUrl: string;
 }
 export interface AppBindings {
-  StartLocalTerminal(shell: string, dir: string): Promise<string>;
+  // cols/rows size the PTY at spawn. Pass 0 for either when the pane
+  // isn't measurable yet; the backend substitutes its own default,
+  // which is the terminal's real width, not the PTY library's 80.
+  StartLocalTerminal(shell: string, dir: string, cols: number, rows: number): Promise<string>;
   WriteLocalTerminal(id: string, data: string): Promise<void>;
   ResizeLocalTerminal(id: string, cols: number, rows: number): Promise<void>;
   CloseLocalTerminal(id: string): Promise<void>;

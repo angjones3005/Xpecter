@@ -15,7 +15,7 @@ type unixTerminal struct {
 	cmd *exec.Cmd
 }
 
-func newPlatformTerminal(onData func([]byte), shell string, dir string) (terminalImpl, error) {
+func newPlatformTerminal(onData func([]byte), shell string, dir string, cols int, rows int) (terminalImpl, error) {
 	if shell == "" {
 		shell = os.Getenv("SHELL")
 		if shell == "" {
@@ -45,7 +45,11 @@ func newPlatformTerminal(onData func([]byte), shell string, dir string) (termina
 	// See withColorEnv in pty.go: matches the color-capable terminal
 	// identity SSH sessions already get explicitly.
 	cmd.Env = withColorEnv(os.Environ())
-	f, err := pty.Start(cmd)
+	// StartWithSize rather than Start: an unsized PTY comes up 0x0, and
+	// a shell that queries it before the first resize arrives lays its
+	// output out against nothing. Same reasoning as the ConPTY side,
+	// where the default is 80 rather than 0 but just as wrong.
+	f, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 	if err != nil {
 		return nil, err
 	}

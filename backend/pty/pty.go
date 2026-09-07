@@ -18,6 +18,16 @@ type terminalImpl interface {
 	Close() error
 }
 
+// Fallbacks for a caller that doesn't know the pane size yet. Only the
+// width really matters: a shell lays its output out against the column
+// count and gets every subsequent cursor position wrong if that number
+// is not the terminal's own. The rows figure is corrected by the first
+// resize and nothing reflows on it.
+const (
+	defaultCols = 200
+	defaultRows = 40
+)
+
 // New spawns a local shell. If shell is empty, the platform default is
 // used (COMSPEC/PowerShell fallback on Windows, $SHELL/bash on Unix).
 // A non-empty shell requests a specific executable, e.g. "cmd.exe" or
@@ -25,8 +35,23 @@ type terminalImpl interface {
 // If dir is empty, the shell starts in Xpecter's own current working
 // directory (each platform's own documented default for an unset
 // working directory), same as before this option existed.
-func New(onData func([]byte), shell string, dir string) (*LocalTerminal, error) {
-	impl, err := newPlatformTerminal(onData, shell, dir)
+//
+// cols and rows size the PTY at spawn. They are not optional in
+// practice: ConPTY defaults to 80 columns and creack/pty to 0, and a
+// shell started at either while the terminal draws 200 lays its
+// redraws out against a width the screen does not have. PSReadLine
+// wrapping a typed line at column 80 inside a 200-column grid is what
+// makes a long or multi-line command overwrite its own prompt. Anything
+// <= 0 falls back to the constants above rather than to the library
+// default, which is the value that caused that.
+func New(onData func([]byte), shell string, dir string, cols int, rows int) (*LocalTerminal, error) {
+	if cols <= 0 {
+		cols = defaultCols
+	}
+	if rows <= 0 {
+		rows = defaultRows
+	}
+	impl, err := newPlatformTerminal(onData, shell, dir, cols, rows)
 	if err != nil {
 		return nil, err
 	}

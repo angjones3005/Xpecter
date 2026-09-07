@@ -49,7 +49,7 @@ func defaultShell() string {
 	return "cmd.exe"
 }
 
-func newPlatformTerminal(onData func([]byte), shell string, dir string) (terminalImpl, error) {
+func newPlatformTerminal(onData func([]byte), shell string, dir string, cols int, rows int) (terminalImpl, error) {
 	if shell == "" {
 		shell = defaultShell()
 	}
@@ -72,7 +72,10 @@ func newPlatformTerminal(onData func([]byte), shell string, dir string) (termina
 		_ = os.Setenv("COLORTERM", "truecolor")
 	}
 
-	var opts []conpty.ConPtyOption
+	// Sized explicitly. conpty.Start otherwise uses its own
+	// defaultConsoleWidth of 80, and the shell believes that for the
+	// whole session unless something later happens to resize it.
+	opts := []conpty.ConPtyOption{conpty.ConPtyDimensions(cols, rows)}
 	if dir != "" {
 		opts = append(opts, conpty.ConPtyWorkDir(dir))
 	}

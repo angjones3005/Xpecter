@@ -7383,9 +7383,19 @@ async function startLocalShellInActiveTab(shell: string, label: string, dir = ''
   createTerminalForSession(target, ownerTab);
   switchToTab(ownerTab.id);
 
+  // Measured before the shell is spawned so the PTY is born the right
+  // width. Without this the shell comes up at ConPTY's 80-column
+  // default while the terminal draws TERMINAL_COLS, and lays every
+  // redraw out against a width the screen doesn't have: a long or
+  // multi-line command wraps where the shell thinks column 80 is and
+  // overwrites its own prompt. Null when the pane isn't measurable yet,
+  // which the backend answers with its own sensible default rather than
+  // the library's.
+  const initial = await measuredFit(target);
+
   let id: string;
   try {
-    id = await App.StartLocalTerminal(shell, dir);
+    id = await App.StartLocalTerminal(shell, dir, initial?.cols ?? 0, initial?.rows ?? 0);
   } catch (err) {
     showDisconnectPanel(target, String(err));
     return;
@@ -7393,6 +7403,12 @@ async function startLocalShellInActiveTab(shell: string, label: string, dir = ''
 
   target.backendId = id;
   target.status = 'connected';
+  // syncSessionSize is what normally tells a backend its size, but every
+  // earlier call this session made returned at the !backendId guard
+  // above, because the id only exists now. Without this a local shell
+  // kept whatever size it was spawned at until an unrelated tab switch
+  // or window resize happened to correct it.
+  syncSessionSize(target);
   // SPE-104: same shell, same starting directory, its own process.
   target.duplicate = async (pane) => {
     const previous = pendingPaneTarget;
