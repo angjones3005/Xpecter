@@ -8677,24 +8677,50 @@ document.getElementById('menu-export-config')!.addEventListener('click', async (
     alert(`Export failed: ${err}`);
   }
 });
+// An import is two different operations wearing one name, and confirm()
+// can only offer one of them. Merge adds a file alongside what is here;
+// Replace makes this machine match the file, which is what restoring
+// actually means and the only one that is safe to repeat.
+function askImportMode(): Promise<'merge' | 'replace' | 'cancel'> {
+  return new Promise((resolve) => {
+    buildDialog({
+      title: 'Import configuration',
+      tone: 'warning',
+      onDismiss: () => resolve('cancel'),
+      fill: (body) => {
+        dialogText(body, 'Replace makes this machine match the file exactly. Everything saved here now is cleared first, so restoring the same file twice leaves the same result both times.');
+        dialogText(body, 'Merge keeps what is already here and adds the file alongside it. Importing the same file twice this way leaves two of everything.');
+        dialogText(body, 'Either way, appearance settings come from the file. Passwords are never written to a configuration file, so password-authenticated sessions will ask for theirs again.', 'warn');
+      },
+      actions: [
+        { label: 'Replace', kind: 'danger', run: () => resolve('replace') },
+        { label: 'Cancel', kind: 'secondary', run: () => resolve('cancel') },
+        { label: 'Merge', run: () => resolve('merge') },
+      ],
+    });
+  });
+}
+
+// Everything an import or reset can touch. renderFolderList was missing
+// from these paths, so imported pinned folders only appeared after a
+// restart.
+async function refreshAfterConfigChange() {
+  await Promise.all([
+    loadSettingsAndApply(),
+    renderSessionList(),
+    renderLocalShellProfilesMenu(),
+    renderFolderList(),
+  ]);
+}
+
 document.getElementById('menu-import-config')!.addEventListener('click', async () => {
   closeAllMenus();
-  // Settings (theme/font/wallpaper/etc.) gets replaced outright by an
-  // import, unlike sessions/groups/local shell profiles which merge in
-  // alongside what's already here (see config.ImportBundle), so this
-  // is the one part of an import that can actually change something
-  // the person didn't expect, worth confirming before it happens.
-  if (!confirm('Import configuration? Saved sessions, folders, and local shell profiles will be merged in alongside your existing ones. Appearance settings (theme, font, wallpaper) will be replaced with the imported values.')) {
-    return;
-  }
+  const mode = await askImportMode();
+  if (mode === 'cancel') return;
   try {
-    const path = await App.ImportConfigFile();
+    const path = await App.ImportConfigFile(mode === 'replace');
     if (!path) return;
-    await Promise.all([
-      loadSettingsAndApply(),
-      renderSessionList(),
-      renderLocalShellProfilesMenu(),
-    ]);
+    await refreshAfterConfigChange();
     alert(`Imported configuration from:\n${path}`);
   } catch (err) {
     alert(`Import failed: ${err}`);
@@ -8713,16 +8739,57 @@ document.getElementById('menu-export-encrypted-config')!.addEventListener('click
 });
 document.getElementById('menu-import-encrypted-config')!.addEventListener('click', async () => {
   closeAllMenus();
+  // Mode first, then the passphrase: asking for a passphrase and then
+  // asking whether they meant it puts the irreversible question after
+  // the tedious one.
+  const mode = await askImportMode();
+  if (mode === 'cancel') return;
   const passphrase = prompt('Passphrase for encrypted configuration:');
   if (!passphrase) return;
   try {
-    const path = await App.ImportEncryptedConfigFile(passphrase);
+    const path = await App.ImportEncryptedConfigFile(passphrase, mode === 'replace');
     if (!path) return;
-    await Promise.all([loadSettingsAndApply(), renderSessionList(), renderLocalShellProfilesMenu()]);
+    await refreshAfterConfigChange();
     alert(`Imported encrypted configuration from:\n${path}`);
   } catch (err) {
     alert(`Encrypted import failed: ${err}`);
   }
+});
+
+// Erasing everything is the half of "move my sessions to another
+// machine" that export/import never had: without it you can carry a
+// config away but not hand the machine on clean, and a merge-only
+// import onto a machine that still has the old data just duplicates it.
+document.getElementById('menu-reset-all')!.addEventListener('click', () => {
+  closeAllMenus();
+  buildDialog({
+    title: 'Erase all saved data',
+    tone: 'danger',
+    onDismiss: () => {},
+    fill: (body) => {
+      dialogText(body, 'This clears every saved session, session group, local shell profile and pinned folder, and returns appearance settings to their defaults.', 'danger');
+      dialogText(body, 'A backup is written first and nothing is erased unless that succeeds, so this can be undone from Restore from backup.');
+      dialogText(body, 'Open sessions are not disconnected, and nothing on any remote host is touched.');
+    },
+    actions: [
+      {
+        label: 'Erase everything',
+        kind: 'danger',
+        run: () => {
+          void (async () => {
+            try {
+              const backup = await App.ResetConfiguration();
+              await refreshAfterConfigChange();
+              alert(`Xpecter has been reset.\n\nA backup was saved first, as:\n${backup}\n\nRestore from backup will put it all back.`);
+            } catch (err) {
+              alert(`Reset failed: ${err}`);
+            }
+          })();
+        },
+      },
+      { label: 'Cancel', kind: 'secondary', run: () => {} },
+    ],
+  });
 });
 document.getElementById('menu-import-mobaxterm')!.addEventListener('click', async () => {
   closeAllMenus();

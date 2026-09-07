@@ -93,6 +93,9 @@ Save a named local shell with its own starting directory. Profiles appear in the
 ### Open in Xpecter
 On Windows, Xpecter registers an Explorer context-menu entry for folders. Right-click a directory, or the background of one, to open a Xpecter session already in that directory.
 
+### Carrying your setup to another machine
+Export writes your saved sessions, groups, local shell profiles, pinned folders and appearance settings to a single file. Importing it asks which of the two things you meant: Replace makes the machine match the file exactly, which is what restoring means and is safe to repeat, or Merge adds the file alongside what is already there. Erase all saved data clears the lot, so a machine can be handed on clean or reset before restoring. Erasing writes a backup first and refuses to proceed if it cannot, so it is always undoable from Restore from backup. Passwords are never written to a configuration file, so password-authenticated sessions ask for theirs again on the new machine; key-based ones come back ready to use.
+
 ### Encrypted configuration bundles
 Export and import passphrase-protected configuration bundles for user-managed cloud storage. Bundles use PBKDF2-SHA256 and AES-256-GCM and contain no passwords or `known_hosts` entries.
 

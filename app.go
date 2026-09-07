@@ -936,11 +936,10 @@ func (a *App) ExportConfigFile() (string, error) {
 }
 
 // ImportConfigFile prompts for a previously exported file and applies
-// it (see config.ImportBundle for merge semantics: Settings is
-// replaced outright, Sessions/Groups/LocalShellProfiles are merged in
-// alongside whatever's already here). Returns "" (no error) if the
-// user cancels the dialog.
-func (a *App) ImportConfigFile() (string, error) {
+// it. replace picks between config.ImportMerge (add alongside what is
+// here) and config.ImportReplace (make this machine match the file).
+// Returns "" (no error) if the user cancels the dialog.
+func (a *App) ImportConfigFile(replace bool) (string, error) {
 	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
 		Title: "Import Xpecter Configuration",
 		Filters: []runtime.FileFilter{
@@ -961,10 +960,28 @@ func (a *App) ImportConfigFile() (string, error) {
 	if err := json.Unmarshal(data, &bundle); err != nil {
 		return "", fmt.Errorf("not a valid Xpecter config file: %w", err)
 	}
-	if err := config.ImportBundle(bundle); err != nil {
+	if err := config.ImportBundle(bundle, importMode(replace)); err != nil {
 		return "", err
 	}
 	return path, nil
+}
+
+// importMode keeps the bool-to-mode translation in one place: the two
+// import entry points below both take a bool over the Wails bridge,
+// which has no notion of the Go enum.
+func importMode(replace bool) config.ImportMode {
+	if replace {
+		return config.ImportReplace
+	}
+	return config.ImportMerge
+}
+
+// ResetConfiguration clears everything an export captures and returns
+// the filename of the backup taken immediately beforehand, so the UI
+// can tell the user exactly what to restore from if they change their
+// mind. See config.ResetAll.
+func (a *App) ResetConfiguration() (string, error) {
+	return config.ResetAll()
 }
 
 // MobaImportResult is a struct rather than a (path, count, error)
@@ -1122,7 +1139,7 @@ func (a *App) ExportEncryptedConfigFile(passphrase string) (string, error) {
 
 // ImportEncryptedConfigFile decrypts and imports a user-managed encrypted
 // bundle. A wrong passphrase fails authentication before any config changes.
-func (a *App) ImportEncryptedConfigFile(passphrase string) (string, error) {
+func (a *App) ImportEncryptedConfigFile(passphrase string, replace bool) (string, error) {
 	if passphrase == "" {
 		return "", fmt.Errorf("passphrase cannot be empty")
 	}
@@ -1166,7 +1183,7 @@ func (a *App) ImportEncryptedConfigFile(passphrase string) (string, error) {
 	if err := json.Unmarshal(plain, &bundle); err != nil {
 		return "", fmt.Errorf("decrypted config is invalid: %w", err)
 	}
-	if err := config.ImportBundle(bundle); err != nil {
+	if err := config.ImportBundle(bundle, importMode(replace)); err != nil {
 		return "", err
 	}
 	return path, nil

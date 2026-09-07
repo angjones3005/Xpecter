@@ -89,25 +89,41 @@ func BackupIfDue() error {
 			return nil
 		}
 	}
+	_, err = BackupNow()
+	return err
+}
 
+// BackupNow writes a backup regardless of when the last one was taken,
+// and returns its filename. Split out of BackupIfDue for ResetAll,
+// which needs a backup at the moment it runs rather than one that may
+// be up to a day old, and needs to name it so the user can be told what
+// to restore from.
+//
+// Note this shares the same retention count as the periodic backups, so
+// repeated resets in one sitting will eventually age out earlier ones.
+// That is the right trade: the alternative is an unbounded directory,
+// and the file a user wants back is nearly always the most recent one.
+func BackupNow() (string, error) {
 	bundle, err := ExportBundle()
 	if err != nil {
-		return err
+		return "", err
 	}
 	data, err := json.MarshalIndent(bundle, "", "  ")
 	if err != nil {
-		return err
+		return "", err
 	}
 	dir, err := backupDir()
 	if err != nil {
-		return err
+		return "", err
 	}
 	filename := backupFilePrefix + time.Now().UTC().Format("20060102-150405") + backupFileSuffix
 	if err := os.WriteFile(filepath.Join(dir, filename), data, 0o600); err != nil {
-		return err
+		return "", err
 	}
-
-	return pruneBackups()
+	if err := pruneBackups(); err != nil {
+		return filename, err
+	}
+	return filename, nil
 }
 
 func pruneBackups() error {
@@ -154,14 +170,9 @@ func RestoreBackup(filename string) error {
 	if err := json.Unmarshal(data, &bundle); err != nil {
 		return fmt.Errorf("corrupt backup file: %w", err)
 	}
-	if err := SaveSettings(bundle.Settings); err != nil {
-		return err
-	}
-	if err := SaveGroups(bundle.Groups); err != nil {
-		return err
-	}
-	if err := SaveSessions(bundle.Sessions); err != nil {
-		return err
-	}
-	return SaveLocalShellProfiles(bundle.LocalShellProfiles)
+	// Exactly ImportReplace's semantics, so there is one definition of
+	// "make this machine look like that bundle" rather than two that can
+	// drift. This previously restored everything except Folders, which
+	// meant restoring after a reset silently lost the pinned ones.
+	return ImportBundle(bundle, ImportReplace)
 }

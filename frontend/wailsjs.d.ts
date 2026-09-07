@@ -174,9 +174,16 @@ export interface AppBindings {
   GetPlatform(): Promise<string>;
   GetStartupDir(): Promise<string>;
   ExportConfigFile(): Promise<string>;
-  ImportConfigFile(): Promise<string>;
+  // replace=false merges the file in alongside what is already here;
+  // replace=true makes this machine match the file exactly. Both return
+  // the chosen path, or "" if the file dialog was cancelled.
+  ImportConfigFile(replace: boolean): Promise<string>;
   ExportEncryptedConfigFile(passphrase: string): Promise<string>;
-  ImportEncryptedConfigFile(passphrase: string): Promise<string>;
+  ImportEncryptedConfigFile(passphrase: string, replace: boolean): Promise<string>;
+  // Clears every saved session, group, shell profile, pinned folder and
+  // appearance setting. Returns the filename of the backup taken
+  // immediately beforehand, for RestoreBackup.
+  ResetConfiguration(): Promise<string>;
   ImportMobaXtermSessions(): Promise<{ path: string; count: number }>;
   StartLocalForward(sessionId: string, localPort: number, remoteHost: string, remotePort: number): Promise<string>;
   StopForward(id: string): Promise<void>;
