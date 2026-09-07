@@ -118,6 +118,9 @@ Each editor pane keeps a strip of open documents and switches between them with 
 ### Workspace folder tree
 Open a folder and it appears as a tree inside the pane, not in the application chrome, so a split can hold a folder on one side and a shell on the other. The tree marks which files are currently open, and folders expand independently.
 
+### Resizing and renaming in the tree
+Drag the edge of the workspace tree to give a long filename the room to show, or double-click it to go back to the default. The width is one setting rather than one per pane, so a split with two folders open stays even, and it is remembered between sessions. Every row can be renamed in place. A name already taken is refused rather than overwritten, a renamed folder stays expanded along with everything open inside it, and a file that is currently open follows its new name without losing unsaved changes.
+
 ### Creating files and folders
 Add a file or a folder to the workspace you already have open. The tree header creates at the root, and every folder row offers the same two actions for creating inside it. A new file opens for editing straight away. A name already taken is refused rather than quietly overwriting what is there.
 

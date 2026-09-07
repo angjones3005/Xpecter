@@ -160,6 +160,9 @@ export interface AppBindings {
   WriteLocalFile(path: string, content: string): Promise<void>;
   CreateLocalFile(dir: string, name: string): Promise<string>;
   CreateLocalDir(dir: string, name: string): Promise<string>;
+  // Renames in place and returns the new path. A name already taken is
+  // refused rather than overwritten.
+  RenameLocalEntry(oldPath: string, newName: string): Promise<string>;
   // Makes the watched set exactly `dirs` and emits "fs:changed" with the
   // directories whose listings changed. Pass [] to drop every watch.
   WatchLocalDirs(dirs: string[]): Promise<void>;

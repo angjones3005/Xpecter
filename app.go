@@ -620,6 +620,40 @@ func (a *App) WatchLocalDirs(dirs []string) error {
 	return nil
 }
 
+// RenameLocalEntry renames a file or folder in place, the local
+// counterpart to RenameRemoteEntry. It takes a name rather than a
+// destination path, so a rename can never turn into a move.
+func (a *App) RenameLocalEntry(oldPath string, newName string) (string, error) {
+	newName, err := validLocalName(newName)
+	if err != nil {
+		return "", err
+	}
+	target := filepath.Join(filepath.Dir(oldPath), newName)
+	if target == oldPath {
+		return oldPath, nil
+	}
+	// Checked rather than left to os.Rename, which on Windows resolves to
+	// MoveFileEx with MOVEFILE_REPLACE_EXISTING and would silently
+	// destroy the file being renamed over. The same reasoning as the
+	// remote side's choice of SSH_FXP_RENAME over PosixRename: losing a
+	// file to a typo in a rename box is not a recoverable mistake.
+	//
+	// A case-only rename on a case-insensitive filesystem is the one
+	// place this would refuse something legitimate, since the target
+	// "exists" as the source itself. Allowed through by comparing the
+	// resolved identity rather than the string.
+	if existing, err := os.Stat(target); err == nil {
+		current, statErr := os.Stat(oldPath)
+		if statErr != nil || !os.SameFile(existing, current) {
+			return "", fmt.Errorf("%s already exists", newName)
+		}
+	}
+	if err := os.Rename(oldPath, target); err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
 // LocalFile mirrors RemoteFile for the local filesystem, so the
 // editor's workspace tree and the SFTP browser are the same shape on
 // the frontend.

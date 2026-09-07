@@ -214,8 +214,17 @@
     .editor-body { flex: 1; min-width: 0; min-height: 0; position: relative; }
     /* SPE-105: the opened folder. Hidden entirely until there is one,
        rather than sitting there empty telling you it has nothing. */
-    .editor-tree { display: none; flex: 0 0 auto; width: 212px; border-right: 1px solid var(--border); overflow: auto; font-size: 12.5px; padding-bottom: 8px; }
+    /* Width is a variable rather than a fixed 212px so the drag handle
+       beside it can move every open tree at once: it is one preference,
+       not one per pane, and a split with two folders open looking
+       lopsided is nobody's intent. */
+    .editor-tree { display: none; flex: 0 0 auto; width: var(--editor-tree-w, 212px); border-right: 1px solid var(--border); overflow: auto; font-size: 12.5px; padding-bottom: 8px; }
     .editor-view.has-folder .editor-tree { display: block; }
+    /* Sits in the flex row between tree and buffer. Wider than it looks:
+       4px is a hard target to hit, so the hit area is padded outward
+       with a negative margin while the visible line stays thin. */
+    .editor-tree-resize { display: none; flex: 0 0 4px; margin: 0 -2px; z-index: 2; }
+    .editor-view.has-folder .editor-tree-resize { display: block; }
     .editor-tree-head { display: flex; align-items: center; gap: 5px; padding: 5px 8px; position: sticky; top: 0; background: var(--bg); border-bottom: 1px solid var(--border); }
     .editor-tree-head .name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 600; }
     .editor-tree-head .act { flex: 0 0 auto; cursor: pointer; opacity: 0.5; padding: 0 3px; font-size: 11px; }

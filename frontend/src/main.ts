@@ -2741,6 +2741,10 @@ type EditorPrefs = {
   whitespace: boolean;
   tabSize: number;
   insertSpaces: boolean;
+  // Width of the workspace tree, shared by every editor pane. Absent
+  // from prefs written before this existed, which the spread over
+  // DEFAULT_EDITOR_PREFS fills in.
+  treeWidth: number;
 };
 
 const DEFAULT_EDITOR_PREFS: EditorPrefs = {
@@ -2749,7 +2753,19 @@ const DEFAULT_EDITOR_PREFS: EditorPrefs = {
   whitespace: false,
   tabSize: 4,
   insertSpaces: true,
+  treeWidth: 212,
 };
+
+// Below this the header's five action glyphs collide with the folder
+// name; above it the buffer starts losing more than the tree gains.
+const TREE_WIDTH_MIN = 120;
+const TREE_WIDTH_MAX = 600;
+
+function applyTreeWidth(width: number) {
+  const clamped = Math.min(TREE_WIDTH_MAX, Math.max(TREE_WIDTH_MIN, Math.round(width)));
+  editorPrefs.treeWidth = clamped;
+  document.documentElement.style.setProperty('--editor-tree-w', `${clamped}px`);
+}
 
 function loadEditorPrefs(): EditorPrefs {
   try {
@@ -2764,6 +2780,11 @@ const editorPrefs = loadEditorPrefs();
 function saveEditorPrefs() {
   localStorage.setItem('xpecter-editor-prefs', JSON.stringify(editorPrefs));
 }
+
+// Published before any editor pane is built, so a tree opens at the
+// stored width rather than flashing the default and jumping. Also
+// re-clamps a width saved by an older build or hand-edited out of range.
+applyTreeWidth(editorPrefs.treeWidth);
 
 // Applies whatever the preference toggles changed to every open editor,
 // the same way refreshAllTerminalThemes fans a change out to every live
@@ -2848,6 +2869,45 @@ function flashStatus(message: string, isError = false) {
 // The editor counterpart of createTerminalForSession: turns one Session
 // (a whole tab's primary session, or a split pane) into a live editor,
 // reusing the wrapper and header a split pane already has.
+// Dragging any pane's handle moves the shared width, so two trees on
+// screen stay the same size. Mirrors setupSidebarResize's pointer
+// handling, including capture, so a fast drag that leaves the 4px strip
+// keeps resizing instead of stopping dead.
+function attachTreeResize(handle: HTMLElement, tree: HTMLElement) {
+  handle.addEventListener('dblclick', () => {
+    applyTreeWidth(DEFAULT_EDITOR_PREFS.treeWidth);
+    saveEditorPrefs();
+  });
+
+  handle.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = tree.getBoundingClientRect().width;
+    handle.classList.add('dragging');
+    handle.setPointerCapture(e.pointerId);
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      applyTreeWidth(startWidth + moveEvent.clientX - startX);
+    };
+
+    const finishResize = () => {
+      handle.classList.remove('dragging');
+      handle.removeEventListener('pointermove', onPointerMove);
+      handle.removeEventListener('pointerup', finishResize);
+      handle.removeEventListener('pointercancel', finishResize);
+      if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
+      // Written once at the end rather than on every pointermove, which
+      // would hit localStorage a few hundred times per drag.
+      saveEditorPrefs();
+      // The buffer just changed width and Monaco does not watch for it.
+      for (const pane of editorPanes.values()) pane.editor.layout();
+    };
+    handle.addEventListener('pointermove', onPointerMove);
+    handle.addEventListener('pointerup', finishResize);
+    handle.addEventListener('pointercancel', finishResize);
+  });
+}
+
 function createEditorForSession(session: Session, tab: Tab) {
   ensurePaneGrid(tab);
 
@@ -2904,9 +2964,15 @@ function createEditorForSession(session: Session, tab: Tab) {
   // other without either borrowing space from the app chrome.
   const tree = document.createElement('div');
   tree.className = 'editor-tree';
+  // Shares .resize-handle with the sidebar's, so the cursor and the
+  // accent-on-hover behave the same in both places.
+  const treeResize = document.createElement('div');
+  treeResize.className = 'resize-handle editor-tree-resize';
+  treeResize.title = 'Drag to resize, double-click to reset';
+  attachTreeResize(treeResize, tree);
   const main = document.createElement('div');
   main.className = 'editor-main';
-  main.append(tree, body);
+  main.append(tree, treeResize, body);
 
   const statusBar = document.createElement('div');
   statusBar.className = 'editor-statusbar';
@@ -3263,17 +3329,32 @@ function markDocSaved(doc: EditorDoc) {
   renderTabBar();
 }
 
-// Points a document at a new home after Save As. Both callers have
-// already written the bytes by the time they get here.
-function retargetDoc(doc: EditorDoc, to: { path: string; isLocal: boolean; remoteSessionId: string | null }) {
+// Points a document at a different file, and says nothing about whether
+// it has been written. Renaming is the case that needs this: the file
+// the buffer came from has moved, but nothing was saved in the process,
+// so a modified document is still modified and Ctrl+S must still do
+// something.
+function repointDoc(doc: EditorDoc, to: { path: string; isLocal: boolean; remoteSessionId: string | null }) {
   doc.path = to.path;
   doc.isLocal = to.isLocal;
   doc.remoteSessionId = to.remoteSessionId;
   doc.title = baseName(to.path);
   monaco.editor.setModelLanguage(doc.model, languageForPath(to.path));
-  markDocSaved(doc);
   const pane = editorPanes.get(doc.ownerPaneId);
-  if (pane && pane.activeDocId === doc.id) applyActiveDoc(pane);
+  if (pane) {
+    // The name on the document tab is the thing that just changed.
+    renderDocBar(pane);
+    renderEditorStatusBar(pane);
+    if (pane.activeDocId === doc.id) applyActiveDoc(pane);
+  }
+}
+
+// Points a document at a new home after Save As. Both callers have
+// already written the bytes by the time they get here, which is what
+// makes marking it saved correct here and wrong for a rename.
+function retargetDoc(doc: EditorDoc, to: { path: string; isLocal: boolean; remoteSessionId: string | null }) {
+  repointDoc(doc, to);
+  markDocSaved(doc);
 }
 
 async function saveDoc(doc: EditorDoc): Promise<boolean> {
@@ -3715,6 +3796,48 @@ async function createInTree(pane: EditorPane, dir: string, kind: 'file' | 'folde
   if (kind === 'file') await openLocalFile(path, pane);
 }
 
+// Renaming from the tree, the local counterpart to the remote browser's
+// row action. The workspace root is deliberately not renameable here:
+// its path is held by the recent-folders list, the pinned sidebar and
+// the pane itself, and moving it out from under those is a different
+// job from renaming something inside the folder you are working in.
+async function renameInTree(pane: EditorPane, path: string, isDir: boolean) {
+  const current = baseName(path);
+  const next = prompt(`Rename ${current} to:`, current);
+  if (next === null || next === current) return; // cancelled, or unchanged
+  let renamed: string;
+  try {
+    renamed = await App.RenameLocalEntry(path, next);
+  } catch (err) {
+    flashStatus(String(err), true);
+    return;
+  }
+
+  // A buffer open on the renamed file follows it, so saving writes the
+  // new name instead of recreating the old one. Deliberately repoint
+  // rather than retarget: nothing was written, so an unsaved buffer is
+  // still unsaved.
+  const doc = findOpenDoc(path, true, null);
+  if (doc) repointDoc(doc, { path: renamed, isLocal: true, remoteSessionId: null });
+
+  if (isDir) {
+    // Every expanded path under the old name still refers to it, so a
+    // renamed folder would collapse and take its open subfolders with
+    // it. Rewritten rather than dropped, so the tree looks the same
+    // afterwards apart from the name.
+    const remapped = new Set<string>();
+    for (const entry of pane.expanded) {
+      remapped.add(entry === path || entry.startsWith(path + '\\') || entry.startsWith(path + '/')
+        ? renamed + entry.slice(path.length)
+        : entry);
+    }
+    pane.expanded = remapped;
+  }
+
+  await refreshFolder(pane);
+  flashStatus(`Renamed to ${baseName(renamed)}`);
+}
+
 async function renderEditorTree(pane: EditorPane) {
   pane.tree.innerHTML = '';
   const folder = pane.folder;
@@ -3797,6 +3920,7 @@ async function appendTreeLevel(pane: EditorPane, parent: HTMLElement, dir: strin
       row.appendChild(treeAction('＋', `New file in ${entry.name}`, () => { void createInTree(pane, entry.path, 'file'); }));
       row.appendChild(treeAction('⊞', `New folder in ${entry.name}`, () => { void createInTree(pane, entry.path, 'folder'); }));
     }
+    row.appendChild(treeAction('✎', `Rename ${entry.name}`, () => { void renameInTree(pane, entry.path, entry.isDir); }));
     row.onclick = () => {
       if (!entry.isDir) {
         void openLocalFile(entry.path, pane);
@@ -4862,7 +4986,7 @@ async function renameRemote(id: string, oldPath: string, currentName: string) {
   // away. Retarget it instead, which is what Save As already does.
   const doc = findOpenDoc(oldPath, false, id);
   if (doc) {
-    retargetDoc(doc, { path: renamed, isLocal: false, remoteSessionId: id });
+    repointDoc(doc, { path: renamed, isLocal: false, remoteSessionId: id });
     flashStatus(`Renamed to ${baseName(renamed)}; the open buffer now points at it`);
   } else {
     flashStatus(`Renamed to ${baseName(renamed)}`);

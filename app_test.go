@@ -116,3 +116,62 @@ func TestCreateLocalRefusesAnExistingName(t *testing.T) {
 		t.Error("CreateLocalDir accepted a name already taken, want an error")
 	}
 }
+
+// os.Rename on Windows resolves to MoveFileEx with
+// MOVEFILE_REPLACE_EXISTING, so without an explicit check a rename onto
+// a name already in use destroys the file that was there.
+func TestRenameLocalEntryRefusesAnExistingName(t *testing.T) {
+	dir := t.TempDir()
+	app := &App{}
+
+	source := filepath.Join(dir, "draft.txt")
+	victim := filepath.Join(dir, "keep.txt")
+	if err := os.WriteFile(source, []byte("source"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(victim, []byte("must survive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := app.RenameLocalEntry(source, "keep.txt"); err == nil {
+		t.Error("RenameLocalEntry renamed onto an existing name, want an error")
+	}
+	if data, err := os.ReadFile(victim); err != nil || string(data) != "must survive" {
+		t.Errorf("the existing file was clobbered: %q, %v", data, err)
+	}
+	if _, err := os.Stat(source); err != nil {
+		t.Errorf("the source disappeared on a refused rename: %v", err)
+	}
+}
+
+func TestRenameLocalEntryRenamesAndRejectsPaths(t *testing.T) {
+	dir := t.TempDir()
+	app := &App{}
+
+	source := filepath.Join(dir, "before.txt")
+	if err := os.WriteFile(source, []byte("body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	renamed, err := app.RenameLocalEntry(source, "after.txt")
+	if err != nil {
+		t.Fatalf("RenameLocalEntry: %v", err)
+	}
+	if renamed != filepath.Join(dir, "after.txt") {
+		t.Errorf("returned %q, want the new path in the same directory", renamed)
+	}
+	if data, err := os.ReadFile(renamed); err != nil || string(data) != "body" {
+		t.Errorf("content did not survive the rename: %q, %v", data, err)
+	}
+
+	// A separator would turn a rename into a move out of the folder the
+	// tree is showing, which is never what a rename box means.
+	if _, err := app.RenameLocalEntry(renamed, "sub/escaped.txt"); err == nil {
+		t.Error("RenameLocalEntry accepted a path, want a name only")
+	}
+	// Renaming to the name it already has is a no-op, not a collision
+	// with itself.
+	if same, err := app.RenameLocalEntry(renamed, "after.txt"); err != nil || same != renamed {
+		t.Errorf("renaming to the current name returned (%q, %v), want (%q, nil)", same, err, renamed)
+	}
+}
