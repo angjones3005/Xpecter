@@ -6,7 +6,10 @@
 // a stub in this scaffold and needs filling in before a Windows build works.
 package pty
 
-import "strings"
+import (
+	"os"
+	"strings"
+)
 
 type LocalTerminal struct {
 	impl terminalImpl
@@ -32,9 +35,8 @@ const (
 // used (COMSPEC/PowerShell fallback on Windows, $SHELL/bash on Unix).
 // A non-empty shell requests a specific executable, e.g. "cmd.exe" or
 // "powershell.exe" on Windows, used by the Tools menu's quick launchers.
-// If dir is empty, the shell starts in Xpecter's own current working
-// directory (each platform's own documented default for an unset
-// working directory), same as before this option existed.
+// If dir is empty, the shell starts in the user's home directory: see
+// defaultStartDir.
 //
 // cols and rows size the PTY at spawn. They are not optional in
 // practice: ConPTY defaults to 80 columns and creack/pty to 0, and a
@@ -51,11 +53,46 @@ func New(onData func([]byte), shell string, dir string, cols int, rows int) (*Lo
 	if rows <= 0 {
 		rows = defaultRows
 	}
+	if dir == "" {
+		dir = defaultStartDir()
+	}
 	impl, err := newPlatformTerminal(onData, shell, dir, cols, rows)
 	if err != nil {
 		return nil, err
 	}
 	return &LocalTerminal{impl: impl}, nil
+}
+
+// defaultStartDir is where a shell opens when the caller didn't name a
+// directory: New Local Shell, the Tools menu's launchers, a split, and
+// any saved profile with no starting directory of its own.
+//
+// It used to be wherever Xpecter's own process happened to be, which is
+// not a place anybody chose. Launched from the build directory it was
+// the source tree; launched from a Start menu shortcut it is the
+// install directory, and from some elevated paths, System32. A terminal
+// that opens somewhere different depending on how the app was started
+// is a terminal you have to orient yourself in every time.
+//
+// The home directory instead, which is what every other terminal on
+// both platforms opens in, and unlike a drive root is somewhere you can
+// actually write. Callers that want a specific directory (Open in
+// Xpecter, Open Folder in Terminal, a profile's starting directory)
+// pass one and never reach this.
+//
+// Returning "" falls back to the old inherit-the-process behaviour,
+// which is the only sensible answer if there is no usable home: better
+// a shell somewhere odd than a shell that fails to start, since a
+// non-existent working directory makes the spawn itself fail.
+func defaultStartDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	if info, err := os.Stat(home); err != nil || !info.IsDir() {
+		return ""
+	}
+	return home
 }
 
 func (l *LocalTerminal) Write(data []byte) error     { return l.impl.Write(data) }

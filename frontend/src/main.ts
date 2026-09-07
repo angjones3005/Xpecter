@@ -1088,15 +1088,33 @@ function applyWrapMode(session: Session) {
 
 // The one place a terminal's dimensions are decided. Returns null while
 // the pane is still unmeasurable, which callers treat as "not yet".
+//
+// Measured twice, because the first resize can change what there is to
+// measure. The rows are worked out against the pane's content box, and
+// widening the grid to TERMINAL_COLS is usually what brings in the
+// horizontal scrollbar, which then takes its own height out of that box.
+// Sized once, the terminal ends up one row taller than the space left,
+// and the bottom row - the one holding the prompt you are typing at -
+// sits behind the bar. The second pass measures with the bar present.
+//
+// Two passes is enough, and it cannot oscillate: whether the bar exists
+// depends on the column count against the pane width, and the column
+// count is pinned. Rows never affect it.
 function sizeTerminal(session: Session): { cols: number; rows: number } | null {
   if (!session.term || !session.fitAddon) return null;
-  // proposeDimensions only for its rows, and because it is also the
-  // signal that xterm has measured its cell size at all: it returns
-  // undefined until then, and a resize before that would be based on
-  // nothing.
-  const proposed = session.fitAddon.proposeDimensions();
-  if (!proposed || proposed.rows <= 0) return null;
-  if (session.term.cols !== TERMINAL_COLS || session.term.rows !== proposed.rows) {
+  for (let pass = 0; pass < 2; pass++) {
+    // proposeDimensions only for its rows, and because it is also the
+    // signal that xterm has measured its cell size at all: it returns
+    // undefined until then, and a resize before that would be based on
+    // nothing.
+    const proposed = session.fitAddon.proposeDimensions();
+    // Unmeasurable on the first pass means "not yet" and the caller
+    // retries. On the second it just means nothing more to correct.
+    if (!proposed || proposed.rows <= 0) {
+      if (pass === 0) return null;
+      break;
+    }
+    if (session.term.cols === TERMINAL_COLS && session.term.rows === proposed.rows) break;
     session.term.resize(TERMINAL_COLS, proposed.rows);
     // Re-asserted rather than set once: a remote program is free to
     // change the mode itself, readline among them.
