@@ -215,10 +215,60 @@ monaco.editor.defineTheme('xpecter-light', {
   },
 });
 
+// Wallpaper variants of the two above. Monaco paints its own background
+// over anything behind it, so an image on the pane is invisible until
+// the editor itself stops filling that area: these zero the alpha on
+// the surfaces that would otherwise cover it. Separate themes rather
+// than one theme edited in place, because Monaco's theme is global and
+// swapping between two registered names is cheaper and less stateful
+// than redefining a theme every time the wallpaper changes.
+//
+// The line highlight and indent guides keep a low alpha rather than
+// going fully transparent: they are the two things that stop code
+// becoming unreadable once there is a picture behind it.
+function wallpaperTheme(base: 'vs-dark' | 'vs', ink: string): monaco.editor.IStandaloneThemeData {
+  const dark = base === 'vs-dark';
+  return {
+    base,
+    inherit: true,
+    rules: [],
+    colors: {
+      'editor.background': '#00000000',
+      'editorGutter.background': '#00000000',
+      'minimap.background': '#00000000',
+      'editorOverviewRuler.background': '#00000000',
+      'editor.lineHighlightBackground': dark ? '#ffffff12' : '#00000010',
+      'editorLineNumber.foreground': dark ? '#8a8a8a' : '#6a6a6a',
+      'editorLineNumber.activeForeground': ink,
+      'editorIndentGuide.background1': dark ? '#ffffff1a' : '#00000018',
+      // Widgets stay opaque. A find box or an autocomplete list with a
+      // picture showing through it is unreadable, and unlike the editor
+      // surface there is nothing gained by seeing behind them.
+      'editorWidget.background': dark ? '#252525' : '#f3f3f3',
+      'editorWidget.border': dark ? '#333333' : '#d0d0d0',
+      'editorSuggestWidget.background': dark ? '#252525' : '#f3f3f3',
+      'editorCursor.foreground': ink,
+    },
+  };
+}
+monaco.editor.defineTheme('xpecter-dark-wallpaper', wallpaperTheme('vs-dark', '#ffffff'));
+monaco.editor.defineTheme('xpecter-light-wallpaper', wallpaperTheme('vs', '#1e1e1e'));
+
 const MONACO_THEMES: Record<ThemeName, string> = {
   dark: 'xpecter-dark',
   light: 'xpecter-light',
 };
+
+const MONACO_WALLPAPER_THEMES: Record<ThemeName, string> = {
+  dark: 'xpecter-dark-wallpaper',
+  light: 'xpecter-light-wallpaper',
+};
+
+// Which of the two sets is in force. Monaco's theme is global, so this
+// is a single answer for every open pane, matching the setting itself.
+function monacoTheme(name: ThemeName): string {
+  return editorWallpaperActive() ? MONACO_WALLPAPER_THEMES[name] : MONACO_THEMES[name];
+}
 
 // --- Functional languages (SPE-107) ---
 // Monaco bundles 78 languages. Of the functional family it ships
@@ -1253,6 +1303,60 @@ function applyWallpaperVisual() {
   refreshAllTerminalThemes();
 }
 
+// --- Editor wallpaper ---
+//
+// Deliberately its own image and its own opacity rather than a reuse of
+// the terminal's: see the Settings struct. The mechanics differ too.
+// A terminal is transparent by construction and the image goes on the
+// pane behind it; Monaco paints an opaque background of its own, so the
+// image goes on .editor-body and the theme has to stop covering it.
+
+function editorWallpaperActive(): boolean {
+  return !!appSettings.editorWallpaperPath;
+}
+
+function editorWallpaperBackgroundImage(): string {
+  if (!appSettings.editorWallpaperDataUrl) return '';
+  const opacity = appSettings.editorWallpaperOpacity ?? 0.15;
+  const dim = 1 - opacity;
+  return `linear-gradient(rgba(0,0,0,${dim}), rgba(0,0,0,${dim})), url("${appSettings.editorWallpaperDataUrl}")`;
+}
+
+function applyEditorWallpaperToPane(pane: EditorPane) {
+  const body = pane.root.querySelector('.editor-body') as HTMLElement | null;
+  if (!body) return;
+  const bg = editorWallpaperBackgroundImage();
+  body.style.backgroundImage = bg;
+  // 100% 100% rather than cover, matching the terminal: the box is
+  // fixed while the buffer scrolls inside it, so the image should not
+  // rescale as content changes.
+  body.style.backgroundSize = bg ? '100% 100%' : '';
+  body.style.backgroundPosition = bg ? '0 0' : '';
+}
+
+function applyEditorWallpaperVisual() {
+  for (const pane of editorPanes.values()) applyEditorWallpaperToPane(pane);
+  // Global, so one call covers every pane.
+  monaco.editor.setTheme(monacoTheme(currentTheme()));
+  document.getElementById('editor-wallpaper-opacity-row')!.style.display = editorWallpaperActive() ? 'flex' : 'none';
+  document.getElementById('editor-wallpaper-clear-row')!.style.display = editorWallpaperActive() ? 'flex' : 'none';
+}
+
+async function setEditorWallpaper(path: string) {
+  appSettings.editorWallpaperPath = path;
+  appSettings.editorWallpaperDataUrl = await App.ReadImageFile(path);
+  if (!appSettings.editorWallpaperOpacity) appSettings.editorWallpaperOpacity = 0.15;
+  await App.SaveSettings(appSettings);
+  applyEditorWallpaperVisual();
+}
+
+async function clearEditorWallpaper() {
+  appSettings.editorWallpaperPath = '';
+  appSettings.editorWallpaperDataUrl = undefined;
+  await App.SaveSettings(appSettings);
+  applyEditorWallpaperVisual();
+}
+
 async function setWallpaper(path: string) {
   appSettings.wallpaperPath = path;
   appSettings.wallpaperDataUrl = await App.ReadImageFile(path);
@@ -1279,6 +1383,16 @@ async function loadSettingsAndApply() {
       appSettings.wallpaperPath = '';
     }
   }
+  if (appSettings.editorWallpaperPath) {
+    try {
+      appSettings.editorWallpaperDataUrl = await App.ReadImageFile(appSettings.editorWallpaperPath);
+    } catch {
+      // Same fallback as the terminal's: a file that has moved or been
+      // deleted since last launch becomes no wallpaper, not a thrown
+      // error during startup.
+      appSettings.editorWallpaperPath = '';
+    }
+  }
   const colorSelect = document.getElementById('colorscheme-select') as HTMLSelectElement;
   colorSelect.value = appSettings.colorScheme || currentTheme();
   const fontSelectEl = document.getElementById('font-select') as HTMLSelectElement;
@@ -1286,6 +1400,9 @@ async function loadSettingsAndApply() {
   const opacitySlider = document.getElementById('wallpaper-opacity') as HTMLInputElement;
   opacitySlider.value = String(Math.round((appSettings.wallpaperOpacity ?? 0.15) * 100));
   applyWallpaperVisual();
+  const editorOpacitySlider = document.getElementById('editor-wallpaper-opacity') as HTMLInputElement;
+  editorOpacitySlider.value = String(Math.round((appSettings.editorWallpaperOpacity ?? 0.15) * 100));
+  applyEditorWallpaperVisual();
 
   const keepaliveToggle = document.getElementById('ssh-keepalive-toggle') as HTMLInputElement;
   keepaliveToggle.checked = !appSettings.sshKeepaliveDisabled;
@@ -1330,8 +1447,10 @@ function applyTheme(name: ThemeName) {
   refreshAllTerminalThemes();
 
   // Monaco's theme is global rather than per-instance, so this covers
-  // every open editor pane in one call.
-  monaco.editor.setTheme(MONACO_THEMES[name]);
+  // every open editor pane in one call. Via monacoTheme so switching
+  // dark/light keeps the transparent variant when a wallpaper is set,
+  // rather than dropping an opaque background back over the image.
+  monaco.editor.setTheme(monacoTheme(name));
 }
 
 // SPE-126: xterm only measures its cell size once its element is really
@@ -2985,7 +3104,7 @@ function createEditorForSession(session: Session, tab: Tab) {
     // covers that case; a blank untitled buffer conjured up front would
     // sit in every new editor whether or not it was wanted.
     model: null,
-    theme: MONACO_THEMES[currentTheme()],
+    theme: monacoTheme(currentTheme()),
     automaticLayout: true,
     // SPE-78: shares appSettings.fontSize with the terminal, a
     // confirmed choice rather than an independent editor font size.
@@ -3032,6 +3151,9 @@ function createEditorForSession(session: Session, tab: Tab) {
     positionEl: null,
   };
   editorPanes.set(session.id, pane);
+  // A pane opened after the wallpaper was set has to pick it up too,
+  // not only the ones that were on screen when it changed.
+  applyEditorWallpaperToPane(pane);
 
   session.mode = 'editor';
   session.label = 'Editor';
@@ -7948,9 +8070,30 @@ fontSelect.addEventListener('change', () => {
 });
 
 document.getElementById('wallpaper-browse')!.addEventListener('click', async () => {
-  const path = await App.SelectImageFile();
+  const path = await App.SelectImageFile('Select Terminal Wallpaper');
   if (!path) return;
   await setWallpaper(path);
+});
+
+document.getElementById('editor-wallpaper-browse')!.addEventListener('click', async () => {
+  const path = await App.SelectImageFile('Select Editor Wallpaper');
+  if (!path) return;
+  await setEditorWallpaper(path);
+});
+
+const editorWallpaperOpacitySlider = document.getElementById('editor-wallpaper-opacity') as HTMLInputElement;
+editorWallpaperOpacitySlider.addEventListener('input', () => {
+  appSettings.editorWallpaperOpacity = Number(editorWallpaperOpacitySlider.value) / 100;
+  applyEditorWallpaperVisual();
+});
+// Saved on change rather than input, so dragging the slider doesn't
+// write settings.json on every pixel. Same split as the terminal's.
+editorWallpaperOpacitySlider.addEventListener('change', () => {
+  App.SaveSettings(appSettings);
+});
+
+document.getElementById('editor-wallpaper-clear')!.addEventListener('click', () => {
+  clearEditorWallpaper();
 });
 
 const wallpaperOpacitySlider = document.getElementById('wallpaper-opacity') as HTMLInputElement;

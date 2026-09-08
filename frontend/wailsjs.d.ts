@@ -116,6 +116,11 @@ export interface Settings {
   // re-read as a data: URL each load via App.ReadImageFile(wallpaperPath),
   // since only the path itself is persisted in settings.json.
   wallpaperDataUrl?: string;
+  // The editor's own wallpaper, independent of the terminal's above.
+  editorWallpaperPath?: string;
+  editorWallpaperOpacity?: number;
+  // Frontend-only, same as wallpaperDataUrl.
+  editorWallpaperDataUrl?: string;
   // SPE-79. Inverted polarity matches the Go struct: false/absent means
   // keepalive is ON (the default), only true actually disables it.
   sshKeepaliveDisabled?: boolean;
@@ -147,7 +152,8 @@ export interface AppBindings {
   // the PTY sized from the terminal that now exists on screen.
   StartShellSSH(id: string, cols: number, rows: number, x11: boolean): Promise<void>;
   SelectKeyFile(): Promise<string>;
-  SelectImageFile(): Promise<string>;
+  // title names the surface being set, since there are two wallpapers.
+  SelectImageFile(title: string): Promise<string>;
   ReadImageFile(path: string): Promise<string>;
   SaveTextFile(defaultFilename: string, content: string): Promise<string>;
   SelectAnyFile(): Promise<string>;

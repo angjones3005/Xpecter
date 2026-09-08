@@ -456,10 +456,16 @@ func (a *App) SelectKeyFile() (string, error) {
 }
 
 // SelectImageFile prompts for an image file, used by the wallpaper
-// picker (SPE-61). Returns "" (no error) if the user cancels.
-func (a *App) SelectImageFile() (string, error) {
+// pickers (SPE-61). The title is a parameter because there are two of
+// them now, terminal and editor, and a dialog that names the wrong
+// surface is worse than one that names none. Returns "" (no error) if
+// the user cancels.
+func (a *App) SelectImageFile(title string) (string, error) {
+	if title == "" {
+		title = "Select Wallpaper"
+	}
 	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
-		Title: "Select Terminal Wallpaper",
+		Title: title,
 		Filters: []runtime.FileFilter{
 			{DisplayName: "Images (*.png;*.jpg;*.jpeg;*.gif;*.webp)", Pattern: "*.png;*.jpg;*.jpeg;*.gif;*.webp"},
 		},

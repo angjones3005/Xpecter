@@ -20,6 +20,19 @@ type Settings struct {
 	// so text stays legible without the user needing to tune it first.
 	WallpaperOpacity float64 `json:"wallpaperOpacity,omitempty"`
 
+	// The editor gets its own image and its own opacity rather than
+	// sharing the terminal's. The two surfaces are looked at for
+	// different reasons and are rarely both wanted: a picture that reads
+	// well behind a shell prompt is often noise behind a wall of code,
+	// and code wants a lower opacity than terminal output does. Separate
+	// fields also mean setting one never disturbs the other, and an
+	// upgrading user's existing terminal wallpaper does not silently
+	// appear behind their editor.
+	EditorWallpaperPath string `json:"editorWallpaperPath,omitempty"`
+
+	// Same 0.0-1.0 scale, same 0.15 client-side default.
+	EditorWallpaperOpacity float64 `json:"editorWallpaperOpacity,omitempty"`
+
 	// ColorScheme is a preset name matching a key in the frontend's
 	// XTERM_THEMES map (e.g. "dark", "light", "dracula", "nord").
 	// Plain string, not a Go enum, so new presets are a frontend-only

@@ -186,7 +186,7 @@ Choose from Dark, Light, Dracula, Solarized Dark, Solarized Light, Gruvbox Dark,
 Eleven monospace fonts, nine of them bundled so they render identically everywhere rather than depending on what the host happens to have installed. Font size is adjustable in settings and with the zoom shortcuts, and the editor shares the terminal's font rather than keeping a second setting.
 
 ### Wallpaper
-Set a background image with adjustable opacity behind the terminal surface.
+Set a background image with adjustable opacity behind the terminal surface. The editor takes its own image and its own opacity rather than sharing the terminal's, because a picture that reads well behind a shell prompt is usually noise behind a wall of code, and code wants a fainter one. Setting either leaves the other alone. Behind an editor the image sits under the buffer, the gutter and the minimap, while find boxes and autocomplete stay solid so they remain readable, and the current-line highlight and indent guides are lifted slightly to hold the code together against a busy background.
 
 ### Clipboard and paste
 Copy on select, right-click to paste, and an explicit paste shortcut that works consistently across platforms and webviews. Letting remote hosts write to the local clipboard over OSC 52 is available and off by default, because it lets a remote process write to your clipboard silently.
