@@ -20,7 +20,7 @@ func TestSendMagicPacketBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if err := SendMagicPacket("01:02:03:04:05:06", conn.LocalAddr().String()); err != nil {
 		t.Fatal(err)
@@ -53,7 +53,7 @@ func TestScanPortsFindsOpenListener(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	openPort := ln.Addr().(*net.TCPAddr).Port
 
 	// A port very likely closed on loopback, alongside the open one.
