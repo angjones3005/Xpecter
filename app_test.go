@@ -175,3 +175,40 @@ func TestRenameLocalEntryRenamesAndRejectsPaths(t *testing.T) {
 		t.Errorf("renaming to the current name returned (%q, %v), want (%q, nil)", same, err, renamed)
 	}
 }
+
+func TestParseSSHConfig(t *testing.T) {
+	cfg := `
+# a comment
+Host bastion
+    HostName bastion.example.com
+    User ops
+    Port 2222
+    IdentityFile ~/.ssh/id_ed25519
+
+Host web1 web1-alias
+    HostName 10.0.0.11
+    User deploy
+    ProxyJump ops@bastion.example.com:2222
+
+Host *
+    ServerAliveInterval 60
+`
+	profiles := parseSSHConfig(cfg)
+	if len(profiles) != 2 {
+		t.Fatalf("got %d profiles, want 2 (the wildcard-only block is skipped): %+v", len(profiles), profiles)
+	}
+	b := profiles[0]
+	if b.Name != "bastion" || b.Host != "bastion.example.com" || b.User != "ops" || b.Port != 2222 {
+		t.Errorf("bastion parsed wrong: %+v", b)
+	}
+	if b.KeyPath == "" || strings.HasPrefix(b.KeyPath, "~") {
+		t.Errorf("IdentityFile ~ not expanded: %q", b.KeyPath)
+	}
+	w := profiles[1]
+	if w.Name != "web1" || w.Host != "10.0.0.11" || w.JumpHost != "ops@bastion.example.com:2222" {
+		t.Errorf("web1 parsed wrong: %+v", w)
+	}
+	if w.ID == "" || b.ID == "" {
+		t.Error("imported profiles must get ids")
+	}
+}

@@ -91,6 +91,24 @@ The desktop itself is drawn by the client the platform already has: Remote Deskt
 
 The display choice is full screen, a resizable window whose remote desktop follows the window size as you drag it (dynamic resolution), or a fixed resolution that scales into whatever window you give it (smart sizing) — so a window is a real, usable window rather than one opened at a stale size. FreeRDP gets the matching `/dynamic-resolution` or `/smart-sizing`.
 
+### VNC sessions
+VNC works the same way as RDP: saved beside the other session types, opened in whatever VNC viewer the platform has — Screen Sharing on macOS, and TigerVNC, RealVNC, TightVNC, UltraVNC, Remmina or Vinagre on Windows and Linux — with the same session card tracking it and the same R/D/Enter actions. It stores the host and port and nothing else; the viewer asks for the password.
+
+### SSH jump hosts and terminal speed
+An SSH session can tunnel through a bastion (OpenSSH's ProxyJump, spelled `[user@]host[:port]`): the target is reached over a channel on the jump host rather than directly, so a machine only visible from the bastion becomes reachable. The bastion is host-key-verified exactly like the target, so an unknown one raises the same trust prompt. A session can also carry a terminal speed — the PTY's baud (ispeed/ospeed), the honest analogue of a serial baud rate — which some console servers and serial bridges read; it defaults to leaving the long-standing value alone.
+
+### Port forwarding
+Tools → Port forwarding binds a local port and tunnels it through a live SSH session to a host:port on the far network, so a remote service is reachable as if it were local. Forwards are listed with what they point at and can be stopped one at a time; they live as long as the session does and are torn down with it.
+
+### Network tools
+Tools → Network tools has two self-contained utilities: Wake-on-LAN, which sends a magic packet to a MAC address (with an optional broadcast address), and a port scan, which reports which of a list or range of TCP ports on a host are open.
+
+### Saved passwords, in the OS keychain
+Off by default, and the one setting that makes Xpecter keep a password at all. With it on, a saved SSH session can remember its password in the operating system's own credential store — Windows Credential Manager, macOS Keychain, or the Linux Secret Service — and never in Xpecter's own files; there is no Xpecter-encrypted blob, deliberately, because reinventing that is the weakness the project set out to avoid. A remembered password fills in on connect; the session's context menu forgets it, deleting the session forgets it, and turning the setting off forgets every one.
+
+### Import from an SSH config
+Settings → Import from SSH config reads an OpenSSH `~/.ssh/config` and saves each concrete host as a session, carrying across HostName, User, Port, IdentityFile and ProxyJump — the last landing directly in the jump-host field. Wildcard-only blocks (`Host *`) are rules rather than hosts, and are skipped.
+
 Why not inside the window: Xpecter's surface is a webview, and a remote desktop wants a native client. The pure-Go RDP implementations available could not be brought to a standard worth shipping without a server to test against, and a Remote Desktop that mostly connects is worse than one that always does.
 
 ### Persistent command snippets
@@ -146,12 +164,15 @@ A `.txt` or `.log` file is rarely prose here — it is a capture, a syslog extra
 A run button sits at the end of the document bar for files Xpecter knows how to run, and Run File is in the command palette for the rest. HTML opens in whichever browser the system uses for it. Scripts — Python, PowerShell, shell, batch and Node — open a shell in the file's own directory and run there, in a live shell rather than as the terminal's only process, so the output stays on screen when the script finishes and Up-Enter runs it again. The file is always saved first, and an unsaved buffer is sent to Save As, because running the previous version of a file you have just edited is a confusing way to lose ten minutes. A script opened from a host runs on that host, in the session it was opened from.
 
 ### Reading PDFs
-PDFs open in Xpecter rather than being handed to another application. A PDF is a document like any other here: it gets a tab in an editor pane, it opens from the workspace tree and from the SFTP browser, and one on a host opens straight from the host without being downloaded first. The viewer fits the page to the pane when it opens, and has zoom, an actual-size and a fit-width button, and a page counter that follows as you scroll. Pinch to zoom on a trackpad or touchscreen (Ctrl+scroll with a mouse) zooms around the point under the cursor, not the middle of the page. Pages are drawn as they come into view, so a 400-page manual opens as fast as a one-page memo. Switching to another tab and back keeps the document exactly where it was.
+PDFs open in Xpecter rather than being handed to another application. A PDF is a document like any other here: it gets a tab in an editor pane, it opens from the workspace tree and from the SFTP browser, and one on a host opens straight from the host without being downloaded first. The viewer fits the page to the pane when it opens, and has zoom, an actual-size and a fit-width button, and a page counter that follows as you scroll. Pinch to zoom on a trackpad or touchscreen, Ctrl+scroll with a mouse, and the keyboard Ctrl and +/−/0 all zoom, around the point under the cursor rather than the middle of the page. Pages are drawn as they come into view, so a 400-page manual opens as fast as a one-page memo. Switching to another tab and back keeps the document exactly where it was.
 
 Rendering is Xpecter's own rather than the webview's, because only two of the three platforms it runs on have a built-in PDF viewer; doing it this way means it looks and behaves the same on all of them. A PDF is opened for reading and is never written back — saving is refused rather than quietly doing nothing — and Open Outside Xpecter is there in the toolbar and the command palette for the times you want the system viewer after all.
 
+### Viewing images
+Images open in Xpecter the same way PDFs do — a tab in an editor pane, from the workspace tree or the SFTP browser, and straight from a host without downloading first. The viewer fits the image to the pane when it opens (never blowing a small image up past its real size), and zooms the same three ways the PDF viewer does: pinch, Ctrl+scroll, and Ctrl with +/−/0, plus buttons for fit and actual size. A transparent PNG shows its transparency against a checkerboard rather than against a colour that changes with the theme. The formats a webview can draw — PNG, JPEG, GIF, WebP, BMP, ICO, SVG, AVIF — open here; the ones it cannot, like TIFF and PSD, still go to the system application.
+
 ### Opening anything in a folder
-The tree lists everything a folder holds and every row opens. Files Xpecter cannot show — programs, archives, PDFs, office documents, images, media, databases — are handed to the application the system already uses for them, and so is anything whose contents turn out to be binary or in a text encoding the editor cannot read. Opening something that is a program rather than a document asks first, because a single click in a file tree should not be able to start one silently. Files too large for the editor say so rather than taking the window with them.
+The tree lists everything a folder holds and every row opens. Files Xpecter cannot show — programs, archives, office documents, media, databases — are handed to the application the system already uses for them, and so is anything whose contents turn out to be binary or in a text encoding the editor cannot read. PDFs and common image formats open in Xpecter's own viewers instead. Opening something that is a program rather than a document asks first, because a single click in a file tree should not be able to start one silently. Files too large for the editor say so rather than taking the window with them.
 
 ### Local and remote files
 Open and save files on the local machine, and write a buffer to any host you are connected to over SFTP. Files opened from the remote browser edit in the same panes as local ones. Reload From Disk re-reads a file that changed underneath you.

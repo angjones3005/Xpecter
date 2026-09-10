@@ -262,7 +262,7 @@
        open PDF, and only the active one is shown. Monaco is hidden
        rather than unmounted while one is on top of it. */
     .editor-pdf { position: absolute; inset: 0; display: none; flex-direction: column; background: var(--bg-alt); }
-    .editor-view.viewing-pdf .editor-host { visibility: hidden; }
+    .editor-view.viewing-media .editor-host { visibility: hidden; }
     .pdf-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; padding: 4px 8px; background: var(--bg-alt); border-bottom: 1px solid var(--border); font-size: 11.5px; color: var(--text-dim); }
     /* Overrides the app's default button, which is a solid accent-blue
        call to action: a row of those across a viewer toolbar would shout
@@ -279,6 +279,22 @@
     .pdf-page { flex: 0 0 auto; background: #ffffff; box-shadow: 0 2px 10px rgba(0,0,0,0.35); }
     .pdf-page canvas { display: block; }
     .pdf-page-error { padding: 12px; color: var(--danger); font-size: 12px; }
+    /* The image viewer shares the PDF toolbar (.pdf-bar). Its surface is
+       a checkerboard so a transparent PNG reads as transparent rather
+       than as whatever the theme's background happens to be, and the
+       image is centred until it is zoomed past the pane, when the
+       surface scrolls. */
+    .editor-image { position: absolute; inset: 0; display: none; flex-direction: column; background: var(--bg-alt); }
+    /* margin:auto on the child centres it when it fits and, crucially,
+       collapses to 0 when it overflows so a zoomed-in image scrolls to
+       its own top-left instead of being clipped there — which is what
+       justify-content:center would do. So the centring lives on the
+       child, not here. */
+    .image-surface { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; padding: 16px; outline: none;
+      background-color: var(--bg);
+      background-image: linear-gradient(45deg, rgba(128,128,128,0.15) 25%, transparent 25%, transparent 75%, rgba(128,128,128,0.15) 75%), linear-gradient(45deg, rgba(128,128,128,0.15) 25%, transparent 25%, transparent 75%, rgba(128,128,128,0.15) 75%);
+      background-size: 20px 20px; background-position: 0 0, 10px 10px; }
+    .image-el { flex: 0 0 auto; margin: auto; image-rendering: auto; box-shadow: 0 2px 10px rgba(0,0,0,0.35); }
     .editor-view.empty .editor-host { visibility: hidden; }
     .editor-view.empty .editor-empty { display: flex; }
     .editor-empty h2 { margin: 0 0 5px; font-size: 18px; font-weight: 600; }
@@ -487,7 +503,7 @@
        meant editing five places and missing one. IDs below now carry
        only what genuinely differs, which is width and scrolling. */
     #session-picker-overlay, #lsp-editor-overlay, #session-editor-overlay,
-    #shortcuts-overlay, #backup-restore-overlay, .dialog-overlay {
+    #shortcuts-overlay, #backup-restore-overlay, #forward-overlay, #nettools-overlay, .dialog-overlay {
       position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none;
       align-items: center; justify-content: center; z-index: 2000;
       padding: 20px; box-sizing: border-box;
@@ -497,9 +513,9 @@
        rather than having its bottom or right edge cut off. */
     #session-picker-overlay, #lsp-editor-overlay, #session-editor-overlay { overflow: auto; }
     #session-picker-overlay.open, #lsp-editor-overlay.open, #session-editor-overlay.open,
-    #shortcuts-overlay.open, #backup-restore-overlay.open, .dialog-overlay.open { display: flex; }
+    #shortcuts-overlay.open, #backup-restore-overlay.open, #forward-overlay.open, #nettools-overlay.open, .dialog-overlay.open { display: flex; }
     #session-picker, #lsp-editor, #session-editor,
-    #shortcuts-dialog, #backup-restore-dialog, .dialog {
+    #shortcuts-dialog, #backup-restore-dialog, #forward-dialog, #nettools-dialog, .dialog {
       background: var(--bg); color: var(--text); border: 1px solid var(--border);
       border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);
       max-width: 100%; max-height: 100%; overflow-y: auto;
@@ -604,6 +620,32 @@
     #backup-restore-dialog .backup-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 16px; font-size: 13px; cursor: pointer; }
     #backup-restore-dialog .backup-row:hover { background: var(--hover); }
     #backup-restore-dialog .backup-empty { padding: 16px; font-size: 12px; color: var(--text-dim); }
+    #forward-dialog { width: 480px; max-height: 82vh; }
+    #forward-body { padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+    #forward-body .fwd-target { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+    #forward-body .fwd-target select { flex: 1 1 auto; min-width: 0; }
+    #forward-body .fwd-form { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    #forward-body .fwd-form .sep { color: var(--text-dim); }
+    #forward-body .fwd-form .fwd-local { width: 88px; flex: 0 0 auto; }
+    #forward-body .fwd-form .fwd-rhost { flex: 1 1 120px; min-width: 0; }
+    #forward-body .fwd-form .fwd-rport { width: 88px; flex: 0 0 auto; }
+    #forward-body .fwd-add { flex: 1 0 100%; padding: 6px; margin-top: 2px; }
+    #forward-body .fwd-note { font-size: 11px; color: var(--text-dim); line-height: 1.5; }
+    #forward-body .fwd-list { display: flex; flex-direction: column; gap: 4px; max-height: 34vh; overflow-y: auto; }
+    #forward-body .fwd-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 5px; font-size: 12px; }
+    #forward-body .fwd-row .fwd-desc { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: Menlo, Consolas, monospace; }
+    #forward-body .fwd-row .fwd-desc b { color: var(--accent-ink); font-weight: 500; }
+    #forward-body .fwd-stop { flex: 0 0 auto; cursor: pointer; color: var(--text-dim); padding: 2px 6px; border-radius: 4px; }
+    #forward-body .fwd-stop:hover { color: var(--danger); background: var(--hover); }
+    #forward-body .fwd-empty { font-size: 12px; color: var(--text-dim); padding: 6px 0; }
+    #nettools-dialog { width: 460px; max-height: 82vh; }
+    #nettools-body { padding: 8px 16px 16px; display: flex; flex-direction: column; }
+    #nettools-body .nt-section { display: flex; flex-direction: column; gap: 7px; padding: 12px 0; }
+    #nettools-body .nt-section + .nt-section { border-top: 1px solid var(--border); }
+    #nettools-body .nt-head { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-dim); }
+    #nettools-body .nt-results { font-size: 12px; font-family: Menlo, Consolas, monospace; line-height: 1.6; max-height: 30vh; overflow-y: auto; }
+    #nettools-body .nt-results .nt-open { color: var(--success); }
+    #nettools-body .nt-results .nt-none { color: var(--text-dim); }
     #session-editor .editor-tabs { display: flex; border-bottom: 1px solid var(--border); }
     #session-editor .editor-tab { flex: 1; text-align: center; padding: 8px; cursor: pointer; font-size: 13px; color: var(--text-dim); border-bottom: 2px solid transparent; user-select: none; }
     #session-editor .editor-tab.active { color: var(--text); border-bottom-color: var(--accent); }
@@ -629,19 +671,19 @@
        this card is what stands for the session inside Xpecter — where it
        is, what is showing it, whether it is still up, and the same
        R/D/Enter actions a stopped terminal offers. */
-    .rdp-pane { flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px; outline: none; }
-    .rdp-card { width: min(540px, 100%); box-sizing: border-box; background: var(--bg-alt); border: 1px solid var(--border); border-top: 2px solid var(--success); border-radius: 8px; padding: 16px 18px; font-family: Menlo, Consolas, monospace; font-size: 12.5px; box-shadow: 0 4px 16px rgba(0,0,0,0.3); }
-    .rdp-card.ended { border-top-color: var(--danger); }
-    .rdp-card.launched { border-top-color: var(--warning); }
-    .rdp-card .rdp-title { display: flex; align-items: center; gap: 8px; font-weight: bold; font-size: 14px; margin-bottom: 8px; }
-    .rdp-card .rdp-line { color: var(--text-dim); margin: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .rdp-card .rdp-line b { color: var(--text); font-weight: 500; }
-    .rdp-card .rdp-state { margin: 10px 0 4px; font-weight: 600; }
-    .rdp-card .rdp-state.running { color: var(--success); }
-    .rdp-card .rdp-state.ended { color: var(--danger); }
-    .rdp-card .rdp-state.launched { color: var(--warning); }
-    .rdp-card .rdp-note { color: var(--text-dim); font-size: 11.5px; line-height: 1.5; margin-bottom: 10px; }
-    .rdp-pane:focus .rdp-card { box-shadow: 0 0 0 2px var(--accent-soft), 0 4px 16px rgba(0,0,0,0.3); }
+    .sc-pane { flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px; outline: none; }
+    .sc-card { width: min(540px, 100%); box-sizing: border-box; background: var(--bg-alt); border: 1px solid var(--border); border-top: 2px solid var(--success); border-radius: 8px; padding: 16px 18px; font-family: Menlo, Consolas, monospace; font-size: 12.5px; box-shadow: 0 4px 16px rgba(0,0,0,0.3); }
+    .sc-card.ended { border-top-color: var(--danger); }
+    .sc-card.launched { border-top-color: var(--warning); }
+    .sc-card .sc-title { display: flex; align-items: center; gap: 8px; font-weight: bold; font-size: 14px; margin-bottom: 8px; }
+    .sc-card .sc-line { color: var(--text-dim); margin: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sc-card .sc-line b { color: var(--text); font-weight: 500; }
+    .sc-card .sc-state { margin: 10px 0 4px; font-weight: 600; }
+    .sc-card .sc-state.running { color: var(--success); }
+    .sc-card .sc-state.ended { color: var(--danger); }
+    .sc-card .sc-state.launched { color: var(--warning); }
+    .sc-card .sc-note { color: var(--text-dim); font-size: 11.5px; line-height: 1.5; margin-bottom: 10px; }
+    .sc-pane:focus .sc-card { box-shadow: 0 0 0 2px var(--accent-soft), 0 4px 16px rgba(0,0,0,0.3); }
     .disconnect-title { color: var(--danger); font-weight: bold; margin-bottom: 6px; }
     .disconnect-action { display: flex; align-items: center; gap: 8px; padding: 3px 2px; cursor: pointer; color: var(--text); border-radius: 4px; }
     .disconnect-action:hover { background: var(--hover); }
@@ -767,6 +809,9 @@
         <div class="item" id="menu-tool-cmd">Command Prompt</div>
         <div class="item" id="menu-tool-powershell">PowerShell</div>
         <div class="separator"></div>
+        <div class="item" id="menu-tool-forwarding">Port forwarding&hellip;</div>
+        <div class="item" id="menu-tool-nettools">Network tools&hellip;</div>
+        <div class="separator"></div>
         <div class="item" id="menu-tool-text-editor">Text Editor</div>
       </div>
     </div>
@@ -882,6 +927,8 @@
         <div class="settings-group-title">Security</div>
         <div class="settings-row"><label><input type="checkbox" id="osc52-toggle" /> Allow remote hosts to write to your clipboard (OSC 52)</label></div>
         <div class="settings-note">Off by default. With this on, anything running on the remote end can replace your local clipboard contents silently, including on a host you have not decided to trust yet.</div>
+        <div class="settings-row"><label><input type="checkbox" id="password-store-toggle" /> Remember SSH passwords in the OS keychain</label></div>
+        <div class="settings-note">Off by default. With this on, a saved session can store its password in the operating system's own credential store — Windows Credential Manager, macOS Keychain, or the Linux Secret Service — never in Xpecter's own files. Turning it off forgets every password Xpecter has saved.</div>
       </div>
 
       <div class="settings-group">
@@ -902,6 +949,7 @@
         <div class="settings-action" id="menu-export-encrypted-config">Export encrypted configuration&hellip;</div>
         <div class="settings-action" id="menu-import-encrypted-config">Import encrypted configuration&hellip;</div>
         <div class="settings-action" id="menu-import-mobaxterm">Import from MobaXterm&hellip;</div>
+        <div class="settings-action" id="menu-import-sshconfig">Import from SSH config&hellip;</div>
         <div class="settings-action" id="menu-restore-backup">Restore from backup&hellip;</div>
         <div class="settings-action danger" id="menu-reset-settings">Reset appearance settings to defaults</div>
         <div class="settings-action danger" id="menu-reset-all">Erase all saved data&hellip;</div>
@@ -1064,15 +1112,23 @@
             <span class="picker-desc">RDP to a Windows machine, opened in your system's Remote Desktop client</span>
           </span>
         </div>
-        <div class="picker-item picker-wide" id="picker-editor" tabindex="0" role="button">
+        <div class="picker-item picker-wide" id="picker-vnc" tabindex="0" role="button">
           <span class="picker-key">6</span>
+          <span class="icon">&#128421;</span>
+          <span class="picker-text">
+            <span class="picker-name">VNC</span>
+            <span class="picker-desc">VNC to a machine, opened in your system's VNC viewer</span>
+          </span>
+        </div>
+        <div class="picker-item picker-wide" id="picker-editor" tabindex="0" role="button">
+          <span class="picker-key">7</span>
           <span class="icon">&#128221;</span>
           <span class="picker-text">
             <span class="picker-name">Editor</span>
             <span class="picker-desc">Edit local files and files on any connected host &mdash; no connection of its own</span>
           </span>
         </div>
-        <div class="picker-foot">Press 1-6 to choose, or Esc to close.</div>
+        <div class="picker-foot">Press 1-7 to choose, or Esc to close.</div>
       </div>
       <div id="picker-serial-fields" style="display:none;flex-direction:column;gap:8px;padding:16px;">
         <input id="serial-port" placeholder="/dev/ttyUSB0 or COM3" class="dialog-field" />
@@ -1107,6 +1163,14 @@
         <div id="rdp-connect-error" style="display:none;color:var(--danger);font-size:12px;"></div>
         <button id="rdp-connect" style="padding:6px;">Connect</button>
       </div>
+      <div id="picker-vnc-fields" style="display:none;flex-direction:column;gap:8px;padding:16px;">
+        <div class="settings-note" style="margin:0 0 2px;">Opens in your system's VNC viewer, which asks for the password itself. Xpecter stores only the address.</div>
+        <input id="vnc-host" placeholder="host" class="dialog-field" />
+        <input id="vnc-port" placeholder="port (5900)" type="number" class="dialog-field" />
+        <input disabled placeholder="password — the VNC viewer will ask for it" class="dialog-field" title="Xpecter never stores a password; the VNC viewer prompts for it when it opens." />
+        <div id="vnc-connect-error" style="display:none;color:var(--danger);font-size:12px;"></div>
+        <button id="vnc-connect" style="padding:6px;">Connect</button>
+      </div>
       <div id="picker-ssh-fields" style="display:none;padding:16px;display:none;flex-direction:column;gap:8px;">
         <input id="host" placeholder="host" class="dialog-field" />
         <input id="user" placeholder="user" class="dialog-field" />
@@ -1124,6 +1188,7 @@
         <span id="auth-password-fields">
           <input id="password" placeholder="password" type="password" class="dialog-field" />
         <div id="caps-lock-warning" style="display:none;color:var(--warning);font-size:11px;">⚠ Caps Lock is on</div>
+        <label id="remember-password-row" style="display:none;font-size:12px;"><input type="checkbox" id="remember-password" /> Remember this password in the OS keychain</label>
         </span>
         <span id="auth-key-fields" style="display:none;flex-direction:column;gap:8px;">
           <label><input id="use-ssh-agent" type="checkbox" /> Use SSH agent (OpenSSH / Pageant)</label>
@@ -1133,6 +1198,18 @@
           <input id="passphrase" placeholder="passphrase (if any)" type="password" class="dialog-field" />
         </span>
         <label><input id="x11-toggle" type="checkbox" /> Enable X11 forwarding</label>
+        <input id="ssh-jumphost" placeholder="Jump host (bastion) — optional, [user@]host[:port]" class="dialog-field" />
+        <div class="settings-row" style="gap:6px;">
+          <label for="ssh-termspeed" style="white-space:nowrap;">Terminal speed</label>
+          <select id="ssh-termspeed" class="dialog-field">
+            <option value="">Default</option>
+            <option value="9600">9600 baud</option>
+            <option value="19200">19200 baud</option>
+            <option value="38400">38400 baud</option>
+            <option value="57600">57600 baud</option>
+            <option value="115200">115200 baud</option>
+          </select>
+        </div>
         <button id="connect" style="padding:6px;">Connect</button>
       </div>
     </div>
@@ -1199,6 +1276,11 @@
           <input id="se-rdp-domain" placeholder="domain — optional, e.g. CORP (not a password)" class="dialog-field" />
           <input disabled placeholder="password — Remote Desktop will ask for it" class="dialog-field" title="Xpecter never stores a password; the Remote Desktop client prompts for it when it opens." />
         </div>
+        <div id="se-vnc-basic-fields" style="display:none;flex-direction:column;gap:8px;">
+          <div class="settings-note" style="margin:0 0 2px;">Opens in your system's VNC viewer, which asks for the password. Only the address is saved.</div>
+          <input id="se-vnc-host" placeholder="host" class="dialog-field" />
+          <input id="se-vnc-port" placeholder="port (5900)" type="number" class="dialog-field" />
+        </div>
       </div>
       <div class="editor-tab-content" id="session-editor-tab-advanced" style="display:none;">
         <div id="se-rdp-advanced-fields" style="display:none;flex-direction:column;gap:10px;">
@@ -1224,6 +1306,18 @@
             <option value="switch">Network switch</option>
             <option value="firewall">Firewall</option>
           </select>
+          <input id="se-jumphost" placeholder="Jump host (bastion) — optional, [user@]host[:port]" class="dialog-field" />
+          <div class="settings-row" style="gap:6px;">
+            <label for="se-termspeed" style="white-space:nowrap;">Terminal speed</label>
+            <select id="se-termspeed" class="dialog-field">
+              <option value="">Default</option>
+              <option value="9600">9600 baud</option>
+              <option value="19200">19200 baud</option>
+              <option value="38400">38400 baud</option>
+              <option value="57600">57600 baud</option>
+              <option value="115200">115200 baud</option>
+            </select>
+          </div>
         </div>
         <select id="se-group" style="width:100%;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 6px;">
           <option value="">No folder</option>
@@ -1253,6 +1347,38 @@
         <span class="close" id="backup-restore-close">✕</span>
       </div>
       <div id="backup-restore-list"></div>
+    </div>
+  </div>
+  <div id="forward-overlay">
+    <div id="forward-dialog">
+      <div class="picker-header">
+        <strong>Port forwarding</strong>
+        <span class="close" id="forward-close">✕</span>
+      </div>
+      <div id="forward-body"></div>
+    </div>
+  </div>
+  <div id="nettools-overlay">
+    <div id="nettools-dialog">
+      <div class="picker-header">
+        <strong>Network tools</strong>
+        <span class="close" id="nettools-close">✕</span>
+      </div>
+      <div id="nettools-body">
+        <div class="nt-section">
+          <div class="nt-head">Wake-on-LAN</div>
+          <input id="wol-mac" placeholder="MAC address (aa:bb:cc:dd:ee:ff)" class="dialog-field" />
+          <input id="wol-broadcast" placeholder="Broadcast address — optional (default 255.255.255.255)" class="dialog-field" />
+          <button id="wol-send" type="button" class="secondary">Send magic packet</button>
+        </div>
+        <div class="nt-section">
+          <div class="nt-head">Port scan</div>
+          <input id="scan-host" placeholder="host" class="dialog-field" />
+          <input id="scan-ports" placeholder="ports, e.g. 22,80,443,8000-8100" class="dialog-field" />
+          <button id="scan-run" type="button" class="secondary">Scan</button>
+          <div id="scan-results" class="nt-results"></div>
+        </div>
+      </div>
     </div>
   </div>
   <div id="quickpick-overlay">

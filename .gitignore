@@ -17,3 +17,4 @@ frontend/wailsjs/
 # OS
 .DS_Store
 /xpecter
+/xpecter.exe

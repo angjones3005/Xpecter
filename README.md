@@ -13,8 +13,10 @@ Xpecter is built to cover the SSH-and-serial-console workflow without the bloat 
 - Local shell tabs (including Command Prompt / PowerShell specifically on Windows)
 - Direct serial/COM port console access, for connecting straight to network hardware
 - A built-in file browser and Monaco-based code editor for remote files, with drag-and-drop upload
-- A PDF viewer in the same panes as the editor, for files here or on a host
-- Saved Remote Desktop (RDP) sessions, opened in your system's Remote Desktop client with the address, user and display filled in
+- A PDF and image viewer in the same panes as the editor, for files here or on a host
+- Saved Remote Desktop (RDP) and VNC sessions, opened in your system's own client with the address, user and display filled in
+- SSH jump hosts (ProxyJump), a configurable terminal speed, a visual port-forwarding manager, Wake-on-LAN and a port scanner
+- Optional password saving in the OS keychain (off by default), and import from an OpenSSH `~/.ssh/config`
 - Session organization: folders, drag-and-drop, quick-connect search, recent sessions, tags
 - Dark/Light theming
 - Clipboard sync between the local OS and remote sessions (OSC 52), plus optional auto-copy-on-select
@@ -107,11 +109,9 @@ wails build -tags webkit2_41
 
 Actively tracked in Linear. Notable open items:
 - Tmux-style pane multiplexing
-- Visual port-forwarding manager
-- MobaXterm session import
 - Additional theme presets and a font picker
 - Drag-and-drop *download* (remote → local)
-- VNC, and RDP drawn inside the window rather than by the system client
+- RDP and VNC drawn inside the window rather than by the system client
 
 ### Session storage
 

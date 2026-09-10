@@ -25,6 +25,10 @@ type SessionProfile struct {
 	UseAgent      bool   `json:"useAgent,omitempty"`
 	InternalAgent bool   `json:"internalAgent,omitempty"`
 	X11           bool   `json:"x11,omitempty"`
+	// JumpHost tunnels an SSH session through a bastion ("[user@]host[:port]").
+	JumpHost string `json:"jumpHost,omitempty"`
+	// TerminalSpeed sets the SSH PTY baud (ispeed/ospeed); 0 is the default.
+	TerminalSpeed int    `json:"terminalSpeed,omitempty"`
 	SerialPort    string `json:"serialPort,omitempty"`
 	Baud          int    `json:"baud,omitempty"`
 	// RDP sessions reuse Host, Port and User, and add these. The same

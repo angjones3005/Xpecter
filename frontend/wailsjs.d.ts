@@ -11,6 +11,10 @@ export interface ConnectRequest {
   useAgent?: boolean;
   internalAgent?: boolean;
   x11?: boolean;
+  // Tunnel through a bastion ("[user@]host[:port]"); empty is direct.
+  jumpHost?: string;
+  // PTY baud (ispeed/ospeed); 0/absent uses the default.
+  terminalSpeed?: number;
   // SPE-65: user already acknowledged the key-permission warning once
   // for this attempt.
   ignoreKeyPermWarning?: boolean;
@@ -48,6 +52,10 @@ export interface SessionProfile {
   x11?: boolean;
   serialPort?: string;
   baud?: number;
+  // SSH: tunnel through a bastion ("[user@]host[:port]"), and the PTY
+  // baud (ispeed/ospeed). Both optional; absent means direct / default.
+  jumpHost?: string;
+  terminalSpeed?: number;
   // RDP sessions (type 'rdp') reuse host/port/user and add these. No
   // password field, by the same policy as SSH: the Remote Desktop
   // client prompts for it.
@@ -121,6 +129,12 @@ export interface RDPLaunch {
   client: string;
   tracked: boolean;
 }
+// What LaunchVNC hands back — the same shape as RDPLaunch.
+export interface VNCLaunch {
+  id: string;
+  client: string;
+  tracked: boolean;
+}
 // Global terminal personalization (SPE-61): wallpaper, color scheme,
 // and font, one set for the whole app, not per-session/per-tab.
 export interface Settings {
@@ -143,6 +157,8 @@ export interface Settings {
   sshKeepaliveDisabled?: boolean;
   sessionLogDirectory?: string;
   keepOpenOnLastTab?: boolean;
+  // Opt-in: remember SSH passwords in the OS keychain. Off by default.
+  passwordStoreEnabled?: boolean;
   // Lines of output a terminal keeps after they scroll off the top.
   // Absent or 0 means SCROLLBACK_DEFAULT, not xterm.js's own 1000.
   scrollbackLines?: number;
@@ -234,6 +250,9 @@ export interface AppBindings {
   // immediately beforehand, for RestoreBackup.
   ResetConfiguration(): Promise<string>;
   ImportMobaXtermSessions(): Promise<{ path: string; count: number }>;
+  // Imports hosts from an OpenSSH client config (~/.ssh/config), carrying
+  // HostName/User/Port/IdentityFile/ProxyJump across.
+  ImportSSHConfig(): Promise<{ path: string; count: number }>;
   StartLocalForward(sessionId: string, localPort: number, remoteHost: string, remotePort: number): Promise<string>;
   StopForward(id: string): Promise<void>;
   ListBackups(): Promise<string[]>;
@@ -244,6 +263,20 @@ export interface AppBindings {
   LaunchRDP(profile: SessionProfile): Promise<RDPLaunch>;
   // Deliberate: closes the Remote Desktop window, no rdp:closed follows.
   CloseRDP(id: string): Promise<void>;
+  // Sends a Wake-on-LAN magic packet. broadcast '' means 255.255.255.255.
+  WakeOnLAN(mac: string, broadcast: string): Promise<void>;
+  // Returns which of the given TCP ports on host are open. Capped at 4096.
+  ScanPorts(host: string, ports: number[]): Promise<number[]>;
+  // Saved SSH passwords in the OS credential store, keyed by session id.
+  // Opt-in via Settings.passwordStoreEnabled; the backend just stores.
+  SetSessionPassword(profileId: string, password: string): Promise<void>;
+  GetSessionPassword(profileId: string): Promise<string>;
+  HasSessionPassword(profileId: string): Promise<boolean>;
+  DeleteSessionPassword(profileId: string): Promise<void>;
+  // Starts the platform's VNC viewer for a profile and tracks it;
+  // "vnc:closed:<id>" fires when a tracked viewer exits on its own.
+  LaunchVNC(profile: SessionProfile): Promise<VNCLaunch>;
+  CloseVNC(id: string): Promise<void>;
   WriteSerial(id: string, data: string): Promise<void>;
   CloseSerial(id: string): Promise<void>;
   ListSerialPorts(): Promise<string[]>;

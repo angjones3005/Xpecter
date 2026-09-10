@@ -45,6 +45,19 @@ type Config struct {
 	// at connect time in app.go's Connect(), not something the caller
 	// usually sets directly.
 	DisableKeepalive bool
+	// JumpHost, when set, is a bastion to tunnel through, in OpenSSH's
+	// ProxyJump spelling ("[user@]host[:port]"). The target is dialled
+	// over an SSH channel on the jump host rather than reached directly,
+	// so a machine only visible from the bastion becomes reachable. Empty
+	// is an ordinary direct connection. One hop; the same credentials are
+	// offered to both the bastion and the target.
+	JumpHost string
+	// TerminalSpeed sets the PTY's input and output baud (ispeed/ospeed
+	// in the pty-req). SSH is not itself rate-limited by it, but some
+	// console servers and serial-bridging setups read it and behave
+	// differently — it is the honest analogue of a serial baud rate. 0
+	// means the long-standing default of 14400.
+	TerminalSpeed int
 }
 
 type Session struct {
@@ -58,6 +71,13 @@ type Session struct {
 	// the widened SPE-99 algorithm set to connect, exposed via
 	// UsedLegacyCompat() below.
 	usedLegacyCompat bool
+	// termSpeed is Config.TerminalSpeed carried to StartShell, where the
+	// pty-req is actually built.
+	termSpeed int
+	// jumpClient is the bastion connection this session tunnels through,
+	// held so it can be torn down with the session. nil for a direct
+	// connection.
+	jumpClient *ssh.Client
 }
 
 // CloseReason distinguishes why a session's read loop stopped, so the
@@ -360,57 +380,124 @@ func Dial(cfg Config) (*Session, error) {
 	}
 
 	addr := net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", cfg.Port))
-	client, err := ssh.Dial("tcp", addr, sshCfg)
-	usedLegacyCompat := false
-	if err != nil {
-		// SPE-99: automatic fallback, not a manual checkbox the person
-		// has to predict in advance. Only retries for the specific
-		// failure this addresses (AlgorithmNegotiationError, "no common
-		// algorithm"), a real exported error type confirmed against
-		// Go's own source, not a broad catch-all retry on any failure.
-		var algErr *ssh.AlgorithmNegotiationError
-		if errors.As(err, &algErr) {
-			// Combine the library's own real "modern" and "insecure"
-			// algorithm lists rather than hardcoding a guessed copy of
-			// either, that guess could silently drift from what the
-			// installed x/crypto/ssh version actually implements/
-			// defaults to. Modern algorithms listed first, so they're
-			// still preferred whenever the peer supports them, legacy
-			// ones only come into play as a fallback for older devices
-			// that need them, confirmed real via a real CBC-only
-			// device tonight.
-			supported := ssh.SupportedAlgorithms()
-			insecure := ssh.InsecureAlgorithms()
-			legacyCfg := &ssh.ClientConfig{
-				User:            cfg.User,
-				Auth:            authMethods,
-				Timeout:         10 * time.Second,
-				HostKeyCallback: hkCallback,
-				Config: ssh.Config{
-					Ciphers:      append(append([]string{}, supported.Ciphers...), insecure.Ciphers...),
-					KeyExchanges: append(append([]string{}, supported.KeyExchanges...), insecure.KeyExchanges...),
-					MACs:         append(append([]string{}, supported.MACs...), insecure.MACs...),
-				},
-				HostKeyAlgorithms: append(append([]string{}, supported.HostKeys...), insecure.HostKeys...),
-			}
-			client, err = ssh.Dial("tcp", addr, legacyCfg)
-			if err == nil {
-				usedLegacyCompat = true
-			}
+
+	// A plain TCP dial. The target uses this directly, or through the
+	// jump host's tunnel below; either way establish() wraps it with the
+	// SPE-99 legacy-algorithm fallback, so bastion and target each get
+	// that fallback on their own terms.
+	directDial := func(a string, c *ssh.ClientConfig) (*ssh.Client, error) {
+		return ssh.Dial("tcp", a, c)
+	}
+
+	var jump *ssh.Client
+	dialTarget := directDial
+	if strings.TrimSpace(cfg.JumpHost) != "" {
+		juser, jaddr := parseJumpHost(cfg.JumpHost, cfg.User)
+		jumpCfg := &ssh.ClientConfig{
+			User:    juser,
+			Auth:    authMethods,
+			Timeout: 10 * time.Second,
+			// The bastion is verified against known_hosts exactly like
+			// the target: an unknown bastion key raises the same
+			// HostKeyUnknownError, and the existing trust prompt names
+			// the bastion, so trusting it and retrying just works.
+			HostKeyCallback: hkCallback,
 		}
-		if err != nil {
+		var jerr error
+		jump, _, jerr = establish(jaddr, jumpCfg, directDial)
+		if jerr != nil {
 			if agentConn != nil {
 				_ = agentConn.Close()
 			}
-			return nil, err
+			// Wrapped with %w so the frontend's errors.As still finds a
+			// HostKeyUnknownError inside and routes it to the trust flow.
+			return nil, fmt.Errorf("jump host %s: %w", jaddr, jerr)
+		}
+		dialTarget = func(a string, c *ssh.ClientConfig) (*ssh.Client, error) {
+			conn, err := jump.Dial("tcp", a)
+			if err != nil {
+				return nil, err
+			}
+			ncc, chans, reqs, err := ssh.NewClientConn(conn, a, c)
+			if err != nil {
+				_ = conn.Close()
+				return nil, err
+			}
+			return ssh.NewClient(ncc, chans, reqs), nil
 		}
 	}
 
-	sess := &Session{id: idgen.New(), client: client, agentConn: agentConn, usedLegacyCompat: usedLegacyCompat}
+	client, usedLegacyCompat, err := establish(addr, sshCfg, dialTarget)
+	if err != nil {
+		if jump != nil {
+			_ = jump.Close()
+		}
+		if agentConn != nil {
+			_ = agentConn.Close()
+		}
+		return nil, err
+	}
+
+	sess := &Session{
+		id: idgen.New(), client: client, agentConn: agentConn,
+		usedLegacyCompat: usedLegacyCompat, termSpeed: cfg.TerminalSpeed, jumpClient: jump,
+	}
 	if !cfg.DisableKeepalive {
 		go sess.keepaliveLoop()
 	}
 	return sess, nil
+}
+
+// establish connects an SSH client to addr with cfg, and on an algorithm
+// negotiation failure retries once with the widened SPE-99 algorithm set,
+// returning whether that fallback was used. dial is how the raw
+// connection is made — straight TCP, or through a jump host — so both
+// hops share one definition of "connect, with the old-device fallback".
+func establish(addr string, cfg *ssh.ClientConfig, dial func(string, *ssh.ClientConfig) (*ssh.Client, error)) (*ssh.Client, bool, error) {
+	client, err := dial(addr, cfg)
+	if err == nil {
+		return client, false, nil
+	}
+	var algErr *ssh.AlgorithmNegotiationError
+	if errors.As(err, &algErr) {
+		// The library's own modern and insecure lists, combined rather
+		// than hardcoded, so the fallback tracks whatever the installed
+		// x/crypto/ssh actually implements. Modern first, so a peer that
+		// supports them still gets them.
+		supported := ssh.SupportedAlgorithms()
+		insecure := ssh.InsecureAlgorithms()
+		legacy := *cfg
+		legacy.Config = ssh.Config{
+			Ciphers:      append(append([]string{}, supported.Ciphers...), insecure.Ciphers...),
+			KeyExchanges: append(append([]string{}, supported.KeyExchanges...), insecure.KeyExchanges...),
+			MACs:         append(append([]string{}, supported.MACs...), insecure.MACs...),
+		}
+		legacy.HostKeyAlgorithms = append(append([]string{}, supported.HostKeys...), insecure.HostKeys...)
+		client, err = dial(addr, &legacy)
+		if err == nil {
+			return client, true, nil
+		}
+	}
+	return nil, false, err
+}
+
+// parseJumpHost splits OpenSSH's "[user@]host[:port]" ProxyJump spelling
+// into a username (the target's, when the spec names none) and a
+// host:port with 22 filled in. A bare IPv6 literal must be bracketed to
+// carry a port, the same rule OpenSSH itself keeps.
+func parseJumpHost(spec, defaultUser string) (user, addr string) {
+	user = defaultUser
+	host := strings.TrimSpace(spec)
+	if at := strings.LastIndex(host, "@"); at >= 0 {
+		if u := strings.TrimSpace(host[:at]); u != "" {
+			user = u
+		}
+		host = host[at+1:]
+	}
+	if _, _, err := net.SplitHostPort(host); err != nil {
+		host = net.JoinHostPort(host, "22")
+	}
+	return user, host
 }
 
 // UsedLegacyCompat reports whether this session had to fall back to
@@ -455,7 +542,13 @@ func (s *Session) StartShell(cols, rows int, onData func([]byte), onClose func(C
 	if err != nil {
 		return err
 	}
-	modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
+	// ISPEED/OSPEED is the PTY's baud, configurable per session (the SSH
+	// analogue of a serial baud rate); 0 keeps the long-standing 14400.
+	speed := uint32(s.termSpeed)
+	if speed == 0 {
+		speed = 14400
+	}
+	modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: speed, ssh.TTY_OP_OSPEED: speed}
 	// SPE-126: the size the caller actually has on screen, rather than
 	// the hardcoded 120x40 this used to request. A lot of remote
 	// software reads the PTY size once, when the PTY is allocated, and
@@ -545,5 +638,11 @@ func (s *Session) Close() error {
 	if s.agentConn != nil {
 		_ = s.agentConn.Close()
 	}
-	return s.client.Close()
+	err := s.client.Close()
+	// The bastion outlives the target's channel and has to be closed too,
+	// or its TCP connection and goroutines leak for the life of the app.
+	if s.jumpClient != nil {
+		_ = s.jumpClient.Close()
+	}
+	return err
 }

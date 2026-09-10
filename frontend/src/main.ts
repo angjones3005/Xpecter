@@ -38,7 +38,7 @@ import '@fontsource/victor-mono/400.css';
 import '@fontsource/victor-mono/700.css';
 import '@fontsource/ubuntu-mono/400.css';
 import '@fontsource/ubuntu-mono/700.css';
-import type { RemoteFile, LocalFile, Folder, ConnectRequest, SessionProfile, SessionGroup, SessionClosedEvent, Settings, UpdateInfo, LocalShellProfile, RDPLaunch } from '../wailsjs.d.ts';
+import type { RemoteFile, LocalFile, Folder, ConnectRequest, SessionProfile, SessionGroup, SessionClosedEvent, Settings, UpdateInfo, LocalShellProfile, RDPLaunch, VNCLaunch } from '../wailsjs.d.ts';
 
 
 // The app was renamed from Specter to Xpecter, and every localStorage
@@ -1474,6 +1474,8 @@ async function loadSettingsAndApply() {
   const keepOpenToggle = document.getElementById('keep-open-last-tab-toggle') as HTMLInputElement;
   keepOpenToggle.checked = !!appSettings.keepOpenOnLastTab;
 
+  (document.getElementById('password-store-toggle') as HTMLInputElement).checked = !!appSettings.passwordStoreEnabled;
+
   const initialSize = appSettings.fontSize || FONT_SIZE_DEFAULT;
   const fontSizeSelect = document.getElementById('font-size-select') as HTMLSelectElement;
   fontSizeSelect.value = String(initialSize);
@@ -1625,7 +1627,7 @@ platformPromise.then((name) => { platformName = name; });
 // or local terminal ID). 'pending' tabs show the connect form instead of a
 // live terminal, until Connect/StartLocalTerminal resolves them.
 
-type TabMode = 'pending' | 'local' | 'ssh' | 'serial' | 'editor' | 'rdp';
+type TabMode = 'pending' | 'local' | 'ssh' | 'serial' | 'editor' | 'rdp' | 'vnc';
 type TabStatus = 'connecting' | 'connected' | 'disconnected';
 
 // SPE-92: Session describes everything a single live terminal needs.
@@ -1842,7 +1844,7 @@ function renderTabBar() {
     }
 
     const label = document.createElement('span');
-      label.textContent = tab.isHome ? '⌂ Home' : tab.mode === 'editor' ? editorTabLabel(tab) : (tab.mode === 'local' ? '💻 ' : tab.mode === 'ssh' ? '🌐 ' : tab.mode === 'serial' ? '🔌 ' : tab.mode === 'rdp' ? '🪟 ' : '') + tab.label + editorDirtyMarker(tab);
+      label.textContent = tab.isHome ? '⌂ Home' : tab.mode === 'editor' ? editorTabLabel(tab) : (tab.mode === 'local' ? '💻 ' : tab.mode === 'ssh' ? '🌐 ' : tab.mode === 'serial' ? '🔌 ' : tab.mode === 'rdp' ? '🪟 ' : tab.mode === 'vnc' ? '🖥 ' : '') + tab.label + editorDirtyMarker(tab);
     el.appendChild(label);
 
       if (!tab.isHome) {
@@ -1883,7 +1885,7 @@ function renderTabBar() {
       if (!wrapper) return;
       const labelEl = wrapper.querySelector('.pane-header-label');
       if (labelEl) {
-        labelEl.textContent = (s.mode === 'local' ? '💻 ' : s.mode === 'ssh' ? '🌐 ' : s.mode === 'serial' ? '🔌 ' : s.mode === 'rdp' ? '🪟 ' : '') + s.label;
+        labelEl.textContent = (s.mode === 'local' ? '💻 ' : s.mode === 'ssh' ? '🌐 ' : s.mode === 'serial' ? '🔌 ' : s.mode === 'rdp' ? '🪟 ' : s.mode === 'vnc' ? '🖥 ' : '') + s.label;
       }
       wrapper.classList.toggle('focused', active.layout !== 'single' && i === active.focusedPaneIndex);
     });
@@ -1969,6 +1971,10 @@ function switchToTab(id: string) {
 async function closeSessionBackend(s: Session) {
   if (s.mode === 'editor') disposeEditorPane(s);
   if (s.mode === 'ssh' && s.backendId) {
+    // A forward is a listener tunnelled through this session; once the
+    // session is gone it can only refuse connections, so it is torn
+    // down with the session rather than left as a dead open port.
+    await stopForwardsForSession(s.backendId);
     await App.CloseSSH(s.backendId);
     runtime.EventsOff('ssh:data:' + s.backendId, 'ssh:closed:' + s.backendId);
   }
@@ -1984,7 +1990,12 @@ async function closeSessionBackend(s: Session) {
     // between a stray click and a desktop vanishing mid-task.
     await App.CloseRDP(s.backendId);
     runtime.EventsOff('rdp:closed:' + s.backendId);
-    rdpPanes.delete(s);
+    sessionCards.delete(s);
+  }
+  if (s.mode === 'vnc' && s.backendId) {
+    await App.CloseVNC(s.backendId);
+    runtime.EventsOff('vnc:closed:' + s.backendId);
+    sessionCards.delete(s);
   }
   s.disposeScrollbar?.();
   s.disposeScrollbar = null;
@@ -3077,8 +3088,9 @@ interface EditorDoc {
   // reads doc.model valid, and the handful that would *write* through it
   // are guarded by kind instead. The guards are the important half —
   // saving an empty buffer over a PDF would destroy the file.
-  kind: 'text' | 'pdf';
+  kind: 'text' | 'pdf' | 'image';
   pdf: PdfView | null;
+  image: ImageView | null;
   model: monaco.editor.ITextModel;
   viewState: monaco.editor.ICodeEditorViewState | null;
   // model.getAlternativeVersionId() as of the last open or save. Monaco
@@ -3520,11 +3532,11 @@ function focusedEditorPane(): EditorPane | null {
 }
 
 
-// A PDF is never dirty: there is no buffer to have changed, and saying
-// otherwise would put a close-confirmation in front of a document that
-// has nothing to lose.
+// A viewer document — a PDF, an image — is never dirty: there is no
+// buffer to have changed, and saying otherwise would put a
+// close-confirmation in front of a document that has nothing to lose.
 function isDocDirty(doc: EditorDoc): boolean {
-  if (doc.kind === 'pdf') return false;
+  if (doc.kind !== 'text') return false;
   return doc.model.getAlternativeVersionId() !== doc.savedVersionId;
 }
 
@@ -3627,10 +3639,6 @@ type PdfView = {
   // nothing else on screen is using any more.
   generation: number;
   observer: IntersectionObserver;
-  // A pinch or ctrl-wheel accumulates here and is applied once per
-  // frame, so a fast gesture is one re-render per frame rather than one
-  // per event. null between frames; see queuePdfZoom.
-  pendingZoom: { factor: number; x: number; y: number } | null;
 };
 
 // Pages are rendered as they come into view rather than all at once. A
@@ -3716,61 +3724,99 @@ function zoomPdfAt(view: PdfView, factor: number, clientX: number, clientY: numb
   updatePdfPageLabel(view);
 }
 
-// Collects the zoom deltas that arrive within one frame — a trackpad
-// pinch fires a burst of them — into a single application, so the page
-// is re-rendered at most once per frame no matter how fast the gesture.
-function queuePdfZoom(view: PdfView, factor: number, clientX: number, clientY: number) {
-  if (view.pendingZoom) {
-    view.pendingZoom.factor *= factor;
-    view.pendingZoom.x = clientX;
-    view.pendingZoom.y = clientY;
-    return;
-  }
-  view.pendingZoom = { factor, x: clientX, y: clientY };
-  requestAnimationFrame(() => {
-    const z = view.pendingZoom;
-    view.pendingZoom = null;
-    if (z) zoomPdfAt(view, z.factor, z.x, z.y);
-  });
-}
+// --- Shared zoom gestures, for every viewer that zooms ---
+//
+// The PDF viewer and the image viewer want the identical set of inputs:
+// pinch on a trackpad or touchscreen, Ctrl+wheel on a mouse, and the
+// keyboard Ctrl +/-/0 a browser trains everyone to expect. A viewer
+// supplies the two things those inputs cannot know — how to zoom toward
+// a point, and what "reset" means for it — and this wires the rest.
+type ZoomController = {
+  // The scrolling element the gestures listen on and the keys reach once
+  // it holds focus. contains() against it is also how the keyboard
+  // router finds which viewer a keystroke belongs to.
+  surface: HTMLElement;
+  zoomAt: (factor: number, clientX: number, clientY: number) => void;
+  reset: () => void;
+};
 
-function pdfTouchDistance(a: Touch, b: Touch): number {
+const ZOOM_KEY_STEP = 1.2;
+
+function touchDistance(a: Touch, b: Touch): number {
   return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
 }
 
-// Pinch-to-zoom, from both the trackpad and a touchscreen. Chromium (and
-// so WebView2) delivers a trackpad pinch as a wheel event with ctrlKey
-// set, which is also how a mouse's Ctrl+wheel arrives — both should zoom
-// the document, and preventDefault stops the webview zooming its whole
-// self instead. A touchscreen sends real two-finger touch events, which
-// the wheel path never sees.
-function wirePdfZoomGestures(view: PdfView) {
-  view.pagesBox.addEventListener('wheel', (e) => {
-    if (!e.ctrlKey) return; // an ordinary scroll; leave it to the box
+// Zoom around the middle of the surface, for the keyboard, which has no
+// pointer to zoom toward.
+function zoomFromCenter(z: ZoomController, factor: number) {
+  const r = z.surface.getBoundingClientRect();
+  z.zoomAt(factor, r.left + r.width / 2, r.top + r.height / 2);
+}
+
+function wireZoomGestures(z: ZoomController) {
+  // Deltas that arrive within one frame — a trackpad pinch fires a burst
+  // of them — collapse into a single application, so the viewer redraws
+  // at most once per frame however fast the gesture.
+  let pending: { factor: number; x: number; y: number } | null = null;
+  const queue = (factor: number, x: number, y: number) => {
+    if (pending) {
+      pending.factor *= factor;
+      pending.x = x;
+      pending.y = y;
+      return;
+    }
+    pending = { factor, x, y };
+    requestAnimationFrame(() => {
+      const p = pending;
+      pending = null;
+      if (p) z.zoomAt(p.factor, p.x, p.y);
+    });
+  };
+
+  // Chromium (and so WebView2) delivers a trackpad pinch as a wheel event
+  // with ctrlKey set, which is also how a mouse's Ctrl+wheel arrives —
+  // both zoom the document. preventDefault stops the webview zooming its
+  // whole self instead.
+  z.surface.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey) return; // an ordinary scroll; leave it to the surface
     e.preventDefault();
-    // exp keeps the step multiplicative and symmetric, so zooming in
-    // then out by the same gesture returns to where it started.
-    queuePdfZoom(view, Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY);
+    // exp keeps the step multiplicative and symmetric, so zooming in then
+    // out by the same amount returns to where it started.
+    queue(Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY);
   }, { passive: false });
 
   let pinch = 0;
-  view.pagesBox.addEventListener('touchstart', (e) => {
-    if (e.touches.length === 2) pinch = pdfTouchDistance(e.touches[0], e.touches[1]);
+  z.surface.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 2) pinch = touchDistance(e.touches[0], e.touches[1]);
   }, { passive: true });
-  view.pagesBox.addEventListener('touchmove', (e) => {
+  z.surface.addEventListener('touchmove', (e) => {
     if (e.touches.length !== 2) return;
-    e.preventDefault(); // this is a zoom, not a pan
-    const distance = pdfTouchDistance(e.touches[0], e.touches[1]);
+    e.preventDefault(); // a two-finger gesture here is a zoom, not a pan
+    const distance = touchDistance(e.touches[0], e.touches[1]);
     if (pinch > 0) {
-      const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
-      const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-      queuePdfZoom(view, distance / pinch, midX, midY);
+      queue(distance / pinch,
+        (e.touches[0].clientX + e.touches[1].clientX) / 2,
+        (e.touches[0].clientY + e.touches[1].clientY) / 2);
     }
     pinch = distance;
   }, { passive: false });
-  view.pagesBox.addEventListener('touchend', (e) => {
+  z.surface.addEventListener('touchend', (e) => {
     if (e.touches.length < 2) pinch = 0;
   }, { passive: true });
+
+  // Ctrl/Cmd +/-/0. stopPropagation keeps the app's global handler from
+  // also reading these as the terminal font-zoom shortcut: while a viewer
+  // holds focus, the keys are the viewer's. '=' is the unshifted '+', the
+  // same forgiving pair browsers accept.
+  z.surface.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+    if (e.key === '=' || e.key === '+') zoomFromCenter(z, ZOOM_KEY_STEP);
+    else if (e.key === '-' || e.key === '_') zoomFromCenter(z, 1 / ZOOM_KEY_STEP);
+    else if (e.key === '0') z.reset();
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+  });
 }
 
 // The scale that puts a page across the width available, which is what
@@ -3846,7 +3892,6 @@ async function buildPdfView(pane: EditorPane, doc: EditorDoc, bytes: Uint8Array)
     baseWidth: base.width,
     baseHeight: base.height,
     generation: 0,
-    pendingZoom: null,
     observer: new IntersectionObserver((entries) => {
       for (const entry of entries) {
         if (entry.isIntersecting) void renderPdfPage(view, entry.target as HTMLElement);
@@ -3866,7 +3911,7 @@ async function buildPdfView(pane: EditorPane, doc: EditorDoc, bytes: Uint8Array)
   );
   if (doc.path) {
     const external = pdfBarButton('Open outside', 'Open in the application your system uses for PDFs', () => {
-      void openPdfExternally(doc);
+      void openViewerExternally(doc);
     });
     external.classList.add('pdf-bar-right');
     bar.appendChild(external);
@@ -3882,7 +3927,14 @@ async function buildPdfView(pane: EditorPane, doc: EditorDoc, bytes: Uint8Array)
   container.append(bar, pagesBox);
   pane.body.appendChild(container);
   pagesBox.addEventListener('scroll', () => updatePdfPageLabel(view));
-  wirePdfZoomGestures(view);
+  // Focusable so the keyboard zoom keys reach it; a click on a page,
+  // which is not itself focusable, lands focus here.
+  pagesBox.tabIndex = 0;
+  wireZoomGestures({
+    surface: pagesBox,
+    zoomAt: (factor, x, y) => zoomPdfAt(view, factor, x, y),
+    reset: () => fitPdfToWidth(view),
+  });
 
   zoomLabel.textContent = '100%';
   for (const box of Array.from(pagesBox.children) as HTMLElement[]) {
@@ -3914,7 +3966,10 @@ function destroyPdfView(view: PdfView) {
   void view.file.destroy();
 }
 
-async function openPdfExternally(doc: EditorDoc) {
+// Hands whatever a viewer is showing to the system application for it —
+// the PDF client, the image viewer — over the local path or, for a
+// remote file, the download-and-open route OpenRemoteFile already has.
+async function openViewerExternally(doc: EditorDoc) {
   if (!doc.path) return;
   try {
     if (doc.isLocal) {
@@ -3927,6 +3982,189 @@ async function openPdfExternally(doc: EditorDoc) {
     flashStatus(`Could not open ${doc.title}: ${err}`, true);
   }
 }
+
+// --- Image documents ---
+//
+// Images open in a viewer of their own, the same way PDFs do, rather
+// than being handed to the OS: a screenshot on a jump host, an exported
+// diagram, a photo dropped in a working folder are all things worth
+// seeing without leaving the window. It is a plainer viewer than the
+// PDF one because an image is a single element — one <img>, sized by a
+// scale — so it needs no worker, no lazy paging, only the same fit,
+// zoom, and pinch/Ctrl-zoom the PDF viewer has.
+//
+// The extensions are the ones a Chromium webview renders. TIFF, PSD and
+// the like are left to the system application: the viewer would show a
+// broken image for them, which is worse than not offering to.
+const IMAGE_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.svg', '.avif',
+]);
+
+const IMAGE_MIME: Record<string, string> = {
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
+  '.ico': 'image/x-icon', '.svg': 'image/svg+xml', '.avif': 'image/avif',
+};
+
+const IMAGE_MIN_SCALE = 0.05;
+const IMAGE_MAX_SCALE = 20;
+
+type ImageView = {
+  container: HTMLDivElement;
+  surface: HTMLDivElement;
+  img: HTMLImageElement;
+  zoomLabel: HTMLSpanElement;
+  scale: number;
+  naturalWidth: number;
+  naturalHeight: number;
+};
+
+function setImageScale(view: ImageView, scale: number) {
+  const next = Math.min(IMAGE_MAX_SCALE, Math.max(IMAGE_MIN_SCALE, scale));
+  view.scale = next;
+  view.img.style.width = `${view.naturalWidth * next}px`;
+  view.img.style.height = `${view.naturalHeight * next}px`;
+  view.zoomLabel.textContent = `${Math.round(next * 100)}%`;
+}
+
+// Anchored zoom, the same idea as the PDF viewer's: the content point
+// under the cursor is put back under it after the scale changes, so the
+// image grows toward the pointer rather than jumping to the middle.
+function zoomImageAt(view: ImageView, factor: number, clientX: number, clientY: number) {
+  const rect = view.surface.getBoundingClientRect();
+  const px = clientX - rect.left;
+  const py = clientY - rect.top;
+  const contentX = view.surface.scrollLeft + px;
+  const contentY = view.surface.scrollTop + py;
+  const before = view.scale;
+  setImageScale(view, before * factor);
+  const ratio = view.scale / before;
+  if (ratio === 1) return;
+  view.surface.scrollLeft = contentX * ratio - px;
+  view.surface.scrollTop = contentY * ratio - py;
+}
+
+// The scale that shows the whole image inside the pane, never above 100%
+// (blowing a small image up to fill the pane on open is not what anyone
+// wants — that is what zoom is for). Guarded against a zero-sized pane,
+// which is what the surface measures at before it is shown.
+function imageFitScale(view: ImageView): number {
+  const availW = view.surface.clientWidth - 32;
+  const availH = view.surface.clientHeight - 32;
+  if (availW < 40 || availH < 40) return view.scale;
+  return Math.min(1, availW / view.naturalWidth, availH / view.naturalHeight);
+}
+
+function fitImageToPane(view: ImageView) {
+  setImageScale(view, imageFitScale(view));
+}
+
+function buildImageView(pane: EditorPane, dataUrl: string): Promise<ImageView> {
+  return new Promise((resolve, reject) => {
+    const container = document.createElement('div');
+    container.className = 'editor-image';
+    const bar = document.createElement('div');
+    bar.className = 'pdf-bar'; // the same toolbar styling the PDF viewer uses
+    const surface = document.createElement('div');
+    surface.className = 'image-surface';
+    surface.tabIndex = 0;
+    const img = document.createElement('img');
+    img.className = 'image-el';
+    img.draggable = false;
+    surface.appendChild(img);
+
+    const zoomLabel = document.createElement('span');
+    zoomLabel.className = 'pdf-bar-zoom';
+
+    img.onload = () => {
+      const view: ImageView = {
+        container, surface, img, zoomLabel,
+        scale: 1,
+        naturalWidth: img.naturalWidth || 1,
+        naturalHeight: img.naturalHeight || 1,
+      };
+      const button = (label: string, title: string, run: () => void) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'pdf-bar-btn';
+        b.textContent = label;
+        b.title = title;
+        b.onclick = run;
+        return b;
+      };
+      bar.append(
+        button('−', 'Zoom out', () => zoomFromCenter(imageZoom(view), 1 / 1.2)),
+        zoomLabel,
+        button('+', 'Zoom in', () => zoomFromCenter(imageZoom(view), 1.2)),
+        button('Fit', 'Fit the image to the pane', () => fitImageToPane(view)),
+        button('100%', 'Actual size', () => setImageScale(view, 1)),
+      );
+      container.append(bar, surface);
+      pane.body.appendChild(container);
+      wireZoomGestures(imageZoom(view));
+      resolve(view);
+    };
+    img.onerror = () => reject(new Error('the image could not be decoded'));
+    img.src = dataUrl;
+  });
+}
+
+// The image viewer's ZoomController, made on demand so the buttons and
+// the gesture wiring share one definition of what zoom means here.
+function imageZoom(view: ImageView): ZoomController {
+  return {
+    surface: view.surface,
+    zoomAt: (factor, x, y) => zoomImageAt(view, factor, x, y),
+    reset: () => fitImageToPane(view),
+  };
+}
+
+function destroyImageView(view: ImageView) {
+  // Release the decoded image; the data URL is large and there is no
+  // reason to hold it once the tab is gone.
+  view.img.src = '';
+  view.container.remove();
+}
+
+async function openImageFile(path: string, isLocal: boolean, remoteSessionId: string | null, into?: EditorPane) {
+  const already = findOpenDoc(path, isLocal, remoteSessionId);
+  if (already) {
+    revealDoc(already);
+    return;
+  }
+  const name = baseName(path);
+  flashStatus(`Opening ${name}…`);
+  let dataUrl: string;
+  try {
+    if (isLocal) {
+      // ReadImageFile already returns a data: URL with the right MIME,
+      // the same call the wallpaper picker uses.
+      dataUrl = await App.ReadImageFile(path);
+    } else {
+      const mime = IMAGE_MIME[extensionOf(path)] ?? 'application/octet-stream';
+      dataUrl = `data:${mime};base64,${await App.ReadRemoteFileBase64(remoteSessionId!, path)}`;
+    }
+  } catch (err) {
+    flashStatus(`Open failed: ${err}`, true);
+    return;
+  }
+
+  const pane = into ?? editorPaneForOpening();
+  const doc = createDoc(pane, { title: name, path, isLocal, remoteSessionId, content: '', kind: 'image' });
+  try {
+    doc.image = await buildImageView(pane, dataUrl);
+  } catch (err) {
+    discardDoc(doc);
+    flashStatus(`${name} could not be shown as an image: ${err}`, true);
+    return;
+  }
+  if (isLocal) rememberRecentFile(path);
+  setActiveDoc(pane, doc.id);
+  fitImageToPane(doc.image);
+  renderDocBar(pane);
+  flashStatus(`Opened ${name}`);
+}
+
 
 // atob gives back a string of char codes, one per byte, which is the
 // only shape the bridge can carry binary in. Copied out a byte at a
@@ -3985,7 +4223,7 @@ function createDoc(pane: EditorPane, opts: {
   isLocal: boolean;
   remoteSessionId: string | null;
   content: string;
-  kind?: 'text' | 'pdf';
+  kind?: 'text' | 'pdf' | 'image';
 }): EditorDoc {
   editorDocCounter += 1;
   const model = monaco.editor.createModel(opts.content, languageForPath(opts.path));
@@ -3997,6 +4235,7 @@ function createDoc(pane: EditorPane, opts: {
     remoteSessionId: opts.remoteSessionId,
     kind: opts.kind ?? 'text',
     pdf: null,
+    image: null,
     model,
     viewState: null,
     savedVersionId: model.getAlternativeVersionId(),
@@ -4047,14 +4286,20 @@ function applyActiveDoc(pane: EditorPane) {
     pane.editor.setModel(null);
     renderRecentFiles(pane);
   }
-  // Each PDF keeps its own viewer in the pane, built once and hidden
-  // rather than torn down, so switching away from a 300-page document
-  // and back does not re-render it or lose where you had scrolled to.
+  // Each viewer keeps its own element in the pane, built once and hidden
+  // rather than torn down, so switching away from a 300-page document or
+  // a large image and back does not rebuild it or lose the scroll and
+  // zoom you left it at.
   for (const id of pane.docIds) {
     const other = editorDocs.get(id);
-    if (other?.pdf) other.pdf.container.style.display = other === doc ? 'flex' : 'none';
+    const el = other?.pdf?.container ?? other?.image?.container ?? null;
+    if (el) el.style.display = other === doc ? 'flex' : 'none';
   }
-  pane.root.classList.toggle('viewing-pdf', doc?.kind === 'pdf');
+  pane.root.classList.toggle('viewing-media', doc?.kind === 'pdf' || doc?.kind === 'image');
+  // Focus the viewer so its keyboard zoom (Ctrl +/-/0) works without a
+  // click first; a text document keeps Monaco's own focus handling.
+  if (doc?.pdf) doc.pdf.pagesBox.focus();
+  else if (doc?.image) doc.image.surface.focus();
   // Drives both the pane header and, for a whole editor tab, the tab
   // bar entry, so the filename is visible wherever the editor is.
   pane.session.label = doc ? doc.title : 'Editor';
@@ -4114,7 +4359,9 @@ const OPENS_EXTERNALLY = new Set([
   '.zip', '.7z', '.rar', '.gz', '.bz2', '.xz', '.tar', '.tgz', '.iso', '.dmg', '.deb', '.rpm', '.cab',
   // .pdf is deliberately absent: those open in Xpecter's own viewer now.
   '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.ods', '.odp', '.rtf',
-  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.ico', '.tif', '.tiff', '.psd', '.svgz',
+  // The image formats a webview renders open in Xpecter's own viewer
+  // (see IMAGE_EXTENSIONS); only the ones it cannot show are here.
+  '.tif', '.tiff', '.psd', '.svgz',
   '.mp3', '.wav', '.flac', '.ogg', '.m4a', '.mp4', '.mkv', '.avi', '.mov', '.webm',
   '.ttf', '.otf', '.woff', '.woff2', '.eot',
   '.db', '.sqlite', '.sqlite3', '.pyc', '.pyo', '.pdb', '.bin', '.dat',
@@ -4157,6 +4404,10 @@ async function openLocalFile(path?: string, into?: EditorPane) {
   }
   if (extensionOf(target) === '.pdf') {
     await openPdfFile(target, true, null, into);
+    return;
+  }
+  if (IMAGE_EXTENSIONS.has(extensionOf(target))) {
+    await openImageFile(target, true, null, into);
     return;
   }
   if (OPENS_EXTERNALLY.has(extensionOf(target))) {
@@ -4215,6 +4466,10 @@ async function openRemoteFile(sessionId: string, path: string) {
     await openPdfFile(path, false, sessionId);
     return;
   }
+  if (IMAGE_EXTENSIONS.has(extensionOf(path))) {
+    await openImageFile(path, false, sessionId);
+    return;
+  }
   const content = await App.ReadRemoteFile(sessionId, path);
   const pane = editorPaneForOpening();
   const doc = createDoc(pane, {
@@ -4268,11 +4523,11 @@ function retargetDoc(doc: EditorDoc, to: { path: string; isLocal: boolean; remot
 
 async function saveDoc(doc: EditorDoc): Promise<boolean> {
   // The guard that matters most in this file. Every save path writes
-  // doc.model.getValue(), and a PDF's model is an empty buffer it never
-  // shows: without this, Ctrl+S on a PDF tab would replace the file with
-  // nothing. Refused rather than made a no-op, so it says so.
-  if (doc.kind === 'pdf') {
-    flashStatus(`${doc.title} is open for reading; Xpecter does not edit PDFs`, true);
+  // doc.model.getValue(), and a viewer's model is an empty buffer it
+  // never shows: without this, Ctrl+S on a PDF or image tab would
+  // replace the file with nothing. Refused rather than made a no-op.
+  if (doc.kind !== 'text') {
+    flashStatus(`${doc.title} is open for reading; Xpecter does not edit it`, true);
     return false;
   }
   // Nothing written anywhere yet (Untitled), so Save behaves like Save
@@ -4293,8 +4548,8 @@ async function saveDoc(doc: EditorDoc): Promise<boolean> {
 }
 
 async function saveDocAs(doc: EditorDoc): Promise<boolean> {
-  if (doc.kind === 'pdf') {
-    flashStatus(`${doc.title} is open for reading; Xpecter does not edit PDFs`, true);
+  if (doc.kind !== 'text') {
+    flashStatus(`${doc.title} is open for reading; Xpecter does not edit it`, true);
     return false;
   }
   const pane = editorPanes.get(doc.ownerPaneId);
@@ -4356,14 +4611,16 @@ function remoteTargetSessionId(): string | null {
 async function reloadDoc(doc: EditorDoc) {
   if (!doc.path) return;
   if (!doc.isLocal && !doc.remoteSessionId) return;
-  // A PDF is re-read by closing and reopening it: the viewer holds a
-  // parsed document and a worker rather than a buffer, and swapping
-  // those under a live view is more machinery than the case is worth.
-  if (doc.kind === 'pdf') {
+  // A viewer document is re-read by closing and reopening it: it holds a
+  // decoded image or a parsed PDF and its worker rather than a buffer,
+  // and swapping those under a live view is more machinery than the case
+  // is worth.
+  if (doc.kind !== 'text') {
     const pane = editorPanes.get(doc.ownerPaneId);
     const target = { path: doc.path, isLocal: doc.isLocal, remoteSessionId: doc.remoteSessionId };
+    const reopen = doc.kind === 'pdf' ? openPdfFile : openImageFile;
     discardDoc(doc);
-    await openPdfFile(target.path, target.isLocal, target.remoteSessionId, pane);
+    await reopen(target.path, target.isLocal, target.remoteSessionId, pane);
     return;
   }
   if (doc.dirty && !confirm(`Reload ${doc.title} from disk? Unsaved changes will be lost.`)) return;
@@ -4435,6 +4692,10 @@ function discardDoc(doc: EditorDoc) {
   if (doc.pdf) {
     destroyPdfView(doc.pdf);
     doc.pdf = null;
+  }
+  if (doc.image) {
+    destroyImageView(doc.image);
+    doc.image = null;
   }
   if (!pane) return;
   renderDocBar(pane);
@@ -4791,12 +5052,18 @@ function renderEditorStatusBar(pane: EditorPane) {
   pane.statusBar.appendChild(path);
   if (!doc) return;
 
-  // A PDF has none of the things the rest of this bar reports: no
-  // cursor, no indentation, no line endings, no language to change. It
-  // gets the one fact that is true of it instead.
+  // A viewer document has none of the things the rest of this bar
+  // reports: no cursor, no indentation, no line endings, no language. It
+  // gets the one fact that is true of it, and a way back to the system
+  // application, instead.
   if (doc.kind === 'pdf') {
     const pages = doc.pdf ? doc.pdf.file.numPages : 0;
-    statusItem(pane, `PDF · ${pages} ${pages === 1 ? 'page' : 'pages'}`, 'Open in the application your system uses for PDFs', () => { void openPdfExternally(doc); });
+    statusItem(pane, `PDF · ${pages} ${pages === 1 ? 'page' : 'pages'}`, 'Open in the application your system uses for this file', () => { void openViewerExternally(doc); });
+    return;
+  }
+  if (doc.kind === 'image') {
+    const label = doc.image ? `Image · ${doc.image.naturalWidth} × ${doc.image.naturalHeight}` : 'Image';
+    statusItem(pane, label, 'Open in the application your system uses for this file', () => { void openViewerExternally(doc); });
     return;
   }
 
@@ -5839,11 +6106,11 @@ function openCommandPalette(pane: EditorPane) {
   // A PDF answers to the handful of these that are about the file
   // rather than about a buffer. Listing the rest would be listing
   // commands that exist only to refuse.
-  if (doc?.kind === 'pdf') {
+  if (doc && doc.kind !== 'text') {
     items.push(
       { label: 'Reload From Disk', detail: doc.path ?? 'nothing to reload from', run: () => { void reloadDoc(doc); } },
       { label: 'Close File', hint: 'Ctrl+W', run: () => { void closeDoc(doc); } },
-      { label: 'Open Outside Xpecter', detail: 'the application your system uses for PDFs', run: () => { void openPdfExternally(doc); } },
+      { label: 'Open Outside Xpecter', detail: 'the application your system uses for this file', run: () => { void openViewerExternally(doc); } },
       { label: 'Delete File…', detail: doc.path ?? 'never saved, so there is nothing to delete', run: () => { void deleteOpenDoc(pane, doc); } },
       { label: 'Copy File Path', run: () => { if (doc.path) void navigator.clipboard.writeText(doc.path); } },
     );
@@ -6441,6 +6708,10 @@ function currentDeviceKind(): 'host' | 'switch' | 'firewall' {
 let skipSavePrompt = false;
 let skipSerialSavePrompt = false;
 let pendingSessionName: string | null = null;
+// The saved session, if any, that the picker's password prompt is
+// standing in for, so a "remember this password" tick knows which
+// session to file the password under. Cleared alongside pendingSessionName.
+let pendingSessionId: string | null = null;
 
 // SPE-99: the picker has no port field and every ad-hoc connect through
 // it has always been hardcoded to 22. Home's quick connect accepts
@@ -6512,6 +6783,10 @@ async function useSession(s: SessionProfile) {
     await useRDPSession(s);
     return;
   }
+  if (s.type === 'vnc') {
+    await useVNCSession(s);
+    return;
+  }
   await useSSHSession(s);
 }
 
@@ -6551,7 +6826,7 @@ async function useSSHSession(s: SessionProfile) {
 
     (document.getElementById('passphrase') as HTMLInputElement).value = '';
 
-    await connectActiveTab({ host: s.host ?? '', port: s.port ?? 22, user: s.user ?? '', keyPath: s.keyPath, useAgent: s.useAgent, internalAgent: s.internalAgent, x11: s.x11 });
+    await connectActiveTab({ host: s.host ?? '', port: s.port ?? 22, user: s.user ?? '', keyPath: s.keyPath, useAgent: s.useAgent, internalAgent: s.internalAgent, x11: s.x11, jumpHost: s.jumpHost, terminalSpeed: s.terminalSpeed });
 
     const connected = paneTarget ?? tabs.get(activeTabId!);
 
@@ -6572,11 +6847,18 @@ async function useSSHSession(s: SessionProfile) {
 
     const cacheKey = passwordCacheKey(s.host ?? '', s.port ?? 22, s.user ?? '');
 
-    const cachedPassword = passwordCache.get(cacheKey);
+    // The in-memory cache first (this run), then the OS keychain (across
+    // restarts, opt-in), before falling back to prompting. A keychain
+    // read that errors is treated as "nothing saved" rather than
+    // blocking the connect on it.
+    let storedPassword = passwordCache.get(cacheKey) ?? '';
+    if (!storedPassword && appSettings.passwordStoreEnabled && s.id) {
+      storedPassword = await App.GetSessionPassword(s.id).catch(() => '');
+    }
 
-    if (cachedPassword) {
+    if (storedPassword) {
 
-      await connectActiveTab({ host: s.host ?? '', port: s.port ?? 22, user: s.user ?? '', password: cachedPassword });
+      await connectActiveTab({ host: s.host ?? '', port: s.port ?? 22, user: s.user ?? '', password: storedPassword, jumpHost: s.jumpHost, terminalSpeed: s.terminalSpeed });
 
       const connected = paneTarget ?? tabs.get(activeTabId!);
 
@@ -6591,6 +6873,7 @@ async function useSSHSession(s: SessionProfile) {
     } else {
 
       pendingSessionName = s.name;
+      pendingSessionId = s.id || null;
 
       openSessionPicker();
 
@@ -6604,6 +6887,19 @@ async function useSSHSession(s: SessionProfile) {
       document.getElementById('picker-grid')!.style.display = 'none';
 
       document.getElementById('picker-ssh-fields')!.style.display = 'flex';
+
+      // The picker's SSH form is what builds the request on the password
+      // path, so a saved session's jump host and speed have to be put
+      // into it, after openSessionPicker's reset cleared them.
+      (document.getElementById('ssh-jumphost') as HTMLInputElement).value = s.jumpHost ?? '';
+      (document.getElementById('ssh-termspeed') as HTMLSelectElement).value = s.terminalSpeed ? String(s.terminalSpeed) : '';
+
+      // Offer to remember the password only when the store is on and
+      // this is a saved session; a brand-new session has no id to file
+      // one under yet.
+      const rememberRow = document.getElementById('remember-password-row')!;
+      rememberRow.style.display = appSettings.passwordStoreEnabled && s.id ? 'block' : 'none';
+      (document.getElementById('remember-password') as HTMLInputElement).checked = false;
 
       const pwField = document.getElementById('password') as HTMLInputElement;
 
@@ -6651,19 +6947,30 @@ async function useSerialSession(s: SessionProfile) {
 // a dropped terminal does. The password is never written anywhere; the
 // client asks, as it always has.
 
-type RDPPaneState = 'running' | 'launched' | 'ended';
+// --- Session cards: the pane that stands for an external client ---
+//
+// RDP and VNC are both drawn by a native client in its own window, not
+// inside Xpecter, so both get the same thing in their pane: a card that
+// says where the session went, which client has it, and whether it is
+// still up, and answers the same R/D/Enter a stopped terminal does. The
+// machinery is shared; only the title, the lines of detail, and the noun
+// for "the window" differ, and each protocol supplies those.
+type SessionCardState = 'running' | 'launched' | 'ended';
 
-type RDPPaneView = {
+type SessionCardView = {
   card: HTMLDivElement;
   state: HTMLDivElement;
   note: HTMLDivElement;
   actions: HTMLDivElement;
+  // What to call the far window in messages: "Remote Desktop window",
+  // "VNC viewer". Carried so the shared code can name it correctly.
+  noun: string;
 };
 
-// One card per live RDP pane, keyed by the Session it stands for. A
-// WeakMap rather than a field on Session, which is shared by every
-// session kind and would otherwise grow a slot only this one uses.
-const rdpPanes = new WeakMap<Session, RDPPaneView>();
+// One card per live external-session pane, keyed by the Session it
+// stands for. A WeakMap rather than a field on Session, which is shared
+// by every session kind and would otherwise grow a slot only these use.
+const sessionCards = new WeakMap<Session, SessionCardView>();
 
 let skipRDPSavePrompt = false;
 
@@ -6802,7 +7109,7 @@ async function reconnectRDP(session: Session, profile: SessionProfile) {
   session.status = 'connected';
   session.stopped = false;
   wireRDPEvents(session, launch.id);
-  setRDPPaneState(session, launch.tracked ? 'running' : 'launched', launch.client);
+  setSessionCardState(session, launch.tracked ? 'running' : 'launched', launch.client);
   renderTabBar();
   renderSessionList();
 }
@@ -6813,36 +7120,36 @@ async function reconnectRDP(session: Session, profile: SessionProfile) {
 function markRDPEnded(session: Session, message: string) {
   session.stopped = true;
   session.status = 'disconnected';
-  setRDPPaneState(session, 'ended', message);
+  setSessionCardState(session, 'ended', message);
   renderTabBar();
   renderSessionList();
 }
 
-function setRDPPaneState(session: Session, state: RDPPaneState, detail: string) {
-  const view = rdpPanes.get(session);
+function setSessionCardState(session: Session, state: SessionCardState, detail: string) {
+  const view = sessionCards.get(session);
   if (!view) return;
   view.card.classList.remove('running', 'launched', 'ended');
   view.card.classList.add(state);
-  view.state.className = `rdp-state ${state}`;
+  view.state.className = `sc-state ${state}`;
   if (state === 'running') {
     view.state.textContent = `● Open in ${detail}`;
-    view.note.textContent = 'The desktop is in that window. This pane follows it: it will say so when the window closes, and Disconnect closes it from here.';
+    view.note.textContent = `The session is open in its own window. This pane follows it: it will say so when the ${view.noun} closes, and Disconnect closes it from here.`;
   } else if (state === 'launched') {
     view.state.textContent = `● Handed to ${detail}`;
-    view.note.textContent = 'On this platform the client is opened and not watched, so this pane cannot tell when the window closes. Close the pane when you are done with the session.';
+    view.note.textContent = `On this platform the client is opened and not watched, so this pane cannot tell when the ${view.noun} closes. Close the pane when you are done with the session.`;
   } else {
     view.state.textContent = `■ ${detail}`;
     view.note.textContent = 'Press R to open it again, or Enter to close this pane.';
   }
-  renderRDPActions(session, view, state);
+  renderSessionCardActions(session, view, state);
 }
 
-function renderRDPActions(session: Session, view: RDPPaneView, state: RDPPaneState) {
+function renderSessionCardActions(session: Session, view: SessionCardView, state: SessionCardState) {
   view.actions.innerHTML = '';
   const ownerTab = tabs.get(session.ownerTabId)!;
   const actions: { key: string; label: string; run: () => void; enabled: boolean }[] = [
     { key: 'R', label: state === 'ended' ? 'open again' : 'open another window', run: () => { void reconnectSession(session); }, enabled: !!session.reconnect },
-    { key: 'D', label: 'disconnect (close the Remote Desktop window)', run: () => { void disconnectSession(session); }, enabled: state === 'running' },
+    { key: 'D', label: `disconnect (close the ${view.noun})`, run: () => { void disconnectSession(session); }, enabled: state === 'running' },
     { key: 'Enter', label: 'close this pane', run: () => closePane(ownerTab, paneIndexOf(ownerTab, session)), enabled: true },
   ];
   for (const action of actions) {
@@ -6860,15 +7167,22 @@ function renderRDPActions(session: Session, view: RDPPaneView, state: RDPPaneSta
   }
 }
 
-// Builds (or rebuilds) the card that is this pane's whole content. The
-// wrapper, header and drag handling are the same ones a terminal pane
-// gets; only what sits under the header differs.
-function mountRDPPane(session: Session, tab: Tab, profile: SessionProfile, launch: RDPLaunch) {
+// Builds (or rebuilds) the card that is an external session's whole
+// pane. The wrapper, header and drag handling are the same ones a
+// terminal pane gets; the card — title, a few labelled lines, and the
+// live state — is what differs, and the caller supplies its content.
+function mountSessionCard(session: Session, tab: Tab, opts: {
+  title: string;
+  lines: { label: string; value: string }[];
+  noun: string;
+  client: string;
+  tracked: boolean;
+}) {
   ensurePaneGrid(tab);
   let wrapper = session.container;
   if (wrapper) {
     wrapper.querySelector('.pane-landing')?.remove();
-    wrapper.querySelector('.rdp-pane')?.remove();
+    wrapper.querySelector('.sc-pane')?.remove();
     // A pane being reused from a terminal session that ended: the
     // terminal view has to go, or the card lands under it.
     disposeTerminalView(session);
@@ -6882,42 +7196,34 @@ function mountRDPPane(session: Session, tab: Tab, profile: SessionProfile, launc
   }
 
   const pane = document.createElement('div');
-  pane.className = 'rdp-pane';
+  pane.className = 'sc-pane';
   // Focusable, so the R/D/Enter keys a stopped terminal answers to work
   // here too, where there is no terminal to receive them.
   pane.tabIndex = 0;
   const card = document.createElement('div');
-  card.className = 'rdp-card';
+  card.className = 'sc-card';
 
   const title = document.createElement('div');
-  title.className = 'rdp-title';
-  title.textContent = `🪟 Remote Desktop — ${rdpLabel(profile)}`;
+  title.className = 'sc-title';
+  title.textContent = opts.title;
+  card.appendChild(title);
 
-  const where = document.createElement('div');
-  where.className = 'rdp-line';
-  const account = profile.domain ? `${profile.domain}\\${profile.user ?? ''}` : (profile.user ?? '');
-  where.innerHTML = '';
-  where.append('Address: ');
-  const addr = document.createElement('b');
-  addr.textContent = rdpAddress(profile);
-  where.appendChild(addr);
-  if (account) {
-    where.append('   User: ');
-    const user = document.createElement('b');
-    user.textContent = account;
-    where.appendChild(user);
+  for (const line of opts.lines) {
+    const row = document.createElement('div');
+    row.className = 'sc-line';
+    row.append(`${line.label}: `);
+    const value = document.createElement('b');
+    value.textContent = line.value;
+    row.appendChild(value);
+    card.appendChild(row);
   }
-  const display = document.createElement('div');
-  display.className = 'rdp-line';
-  display.textContent = `Display: ${rdpDisplayLabel(profile)}${profile.adminSession ? ', console session' : ''}`;
 
   const state = document.createElement('div');
-  state.className = 'rdp-state';
+  state.className = 'sc-state';
   const note = document.createElement('div');
-  note.className = 'rdp-note';
+  note.className = 'sc-note';
   const actions = document.createElement('div');
-
-  card.append(title, where, display, state, note, actions);
+  card.append(state, note, actions);
   pane.appendChild(card);
   wrapper.appendChild(pane);
 
@@ -6930,9 +7236,25 @@ function mountRDPPane(session: Session, tab: Tab, profile: SessionProfile, launc
     e.preventDefault();
   });
 
-  rdpPanes.set(session, { card, state, note, actions });
-  setRDPPaneState(session, launch.tracked ? 'running' : 'launched', launch.client);
+  sessionCards.set(session, { card, state, note, actions, noun: opts.noun });
+  setSessionCardState(session, opts.tracked ? 'running' : 'launched', opts.client);
   pane.focus();
+}
+
+// The RDP-specific card: title, address, user (with domain), and the
+// display mode. Everything else about an RDP pane is the shared card.
+function mountRDPPane(session: Session, tab: Tab, profile: SessionProfile, launch: RDPLaunch) {
+  const account = profile.domain ? `${profile.domain}\\${profile.user ?? ''}` : (profile.user ?? '');
+  const lines = [{ label: 'Address', value: rdpAddress(profile) }];
+  if (account) lines.push({ label: 'User', value: account });
+  lines.push({ label: 'Display', value: `${rdpDisplayLabel(profile)}${profile.adminSession ? ', console session' : ''}` });
+  mountSessionCard(session, tab, {
+    title: `🪟 Remote Desktop — ${rdpLabel(profile)}`,
+    lines,
+    noun: 'Remote Desktop window',
+    client: launch.client,
+    tracked: launch.tracked,
+  });
 }
 
 // The RDP form in the New Session picker. Reads the same fields the
@@ -6953,6 +7275,152 @@ function rdpProfileFromPicker(): SessionProfile | null {
     width: display.width || undefined, height: display.height || undefined,
     adminSession: adminSession || undefined,
   };
+}
+
+// --- VNC sessions ---
+//
+// The VNC counterpart of the RDP flow above, and deliberately its twin:
+// saved beside SSH/serial/RDP, launched in whatever VNC viewer the
+// platform has, and shown in the shared session card. Simpler than RDP —
+// there is no domain, no display mode, no file, just a host and a port —
+// but the pane, the reconnect, the drop handling are the same code.
+
+let skipVNCSavePrompt = false;
+
+function vncAddress(s: SessionProfile): string {
+  const host = s.host ?? '';
+  const port = s.port && s.port !== 5900 ? `:${s.port}` : '';
+  return host.includes(':') && !host.startsWith('[') ? `[${host}]${port}` : host + port;
+}
+
+function vncLabel(s: SessionProfile): string {
+  return s.name || vncAddress(s);
+}
+
+async function useVNCSession(s: SessionProfile) {
+  await App.SaveSession({ ...s, lastUsed: new Date().toISOString() });
+  const paneTarget = targetEmptyFocusedPane();
+  if (paneTarget) {
+    pendingPaneTarget = paneTarget;
+  } else {
+    pendingPaneTarget = null;
+    ensurePendingTab();
+  }
+  markSessionProfile(paneTarget, s.id);
+  skipVNCSavePrompt = true;
+  await connectVNCInActiveTab(s);
+}
+
+function reportVNCError(message: string) {
+  const fields = document.getElementById('picker-vnc-fields')!;
+  const overlay = document.getElementById('session-picker-overlay')!;
+  if (overlay.classList.contains('open') && fields.style.display !== 'none') {
+    const el = document.getElementById('vnc-connect-error')!;
+    el.textContent = message;
+    el.style.display = 'block';
+    return;
+  }
+  flashStatus(message, true);
+}
+
+async function connectVNCInActiveTab(profile: SessionProfile) {
+  const ownerTab = tabs.get(activeTabId!)!;
+  const target: Session = pendingPaneTarget ?? ownerTab;
+  target.label = vncLabel(profile);
+
+  if (target.connecting) return;
+  target.connecting = true;
+
+  let launch: VNCLaunch;
+  try {
+    launch = await App.LaunchVNC(profile);
+  } catch (err) {
+    target.connecting = false;
+    reportVNCError(String(err));
+    return;
+  }
+  target.connecting = false;
+
+  target.mode = 'vnc';
+  target.backendId = launch.id;
+  target.status = 'connected';
+  target.stopped = false;
+  mountVNCPane(target, ownerTab, profile, launch);
+  wireVNCEvents(target, launch.id);
+  target.reconnect = () => reconnectVNC(target, profile);
+  target.duplicate = async (pane) => {
+    const previous = pendingPaneTarget;
+    pendingPaneTarget = pane;
+    skipVNCSavePrompt = true;
+    try {
+      await connectVNCInActiveTab(profile);
+    } finally {
+      pendingPaneTarget = previous;
+    }
+  };
+  switchToTab(ownerTab.id);
+  closeSessionPicker();
+  renderTabBar();
+  renderSessionList();
+
+  if (!skipVNCSavePrompt) {
+    const name = vncAddress(profile);
+    if (confirm(`Save this VNC session as "${name}"?`)) {
+      await App.SaveSession({ ...profile, id: '', name, type: 'vnc' });
+      renderSessionList();
+    }
+  }
+  skipVNCSavePrompt = false;
+}
+
+function wireVNCEvents(session: Session, id: string) {
+  runtime.EventsOn('vnc:closed:' + id, (payload: unknown) => {
+    markVNCEnded(session, (payload as SessionClosedEvent).message);
+  });
+}
+
+async function reconnectVNC(session: Session, profile: SessionProfile) {
+  if (session.backendId) runtime.EventsOff('vnc:closed:' + session.backendId);
+  let launch: VNCLaunch;
+  try {
+    launch = await App.LaunchVNC(profile);
+  } catch (err) {
+    markVNCEnded(session, String(err));
+    return;
+  }
+  session.backendId = launch.id;
+  session.status = 'connected';
+  session.stopped = false;
+  wireVNCEvents(session, launch.id);
+  setSessionCardState(session, launch.tracked ? 'running' : 'launched', launch.client);
+  renderTabBar();
+  renderSessionList();
+}
+
+function markVNCEnded(session: Session, message: string) {
+  session.stopped = true;
+  session.status = 'disconnected';
+  setSessionCardState(session, 'ended', message);
+  renderTabBar();
+  renderSessionList();
+}
+
+function mountVNCPane(session: Session, tab: Tab, profile: SessionProfile, launch: VNCLaunch) {
+  const lines = [{ label: 'Address', value: vncAddress(profile) }];
+  mountSessionCard(session, tab, {
+    title: `🖥 VNC — ${vncLabel(profile)}`,
+    lines,
+    noun: 'VNC viewer',
+    client: launch.client,
+    tracked: launch.tracked,
+  });
+}
+
+function vncProfileFromPicker(): SessionProfile | null {
+  const host = (document.getElementById('vnc-host') as HTMLInputElement).value.trim();
+  if (!host) return null;
+  const port = parseInt((document.getElementById('vnc-port') as HTMLInputElement).value, 10) || 5900;
+  return { id: '', name: '', type: 'vnc', host, port };
 }
 
 // SPE-100: whole row is the click target. The old row bound click to
@@ -7027,6 +7495,7 @@ function renderSessionRow(s: SessionProfile, depth: number, live: Map<string, Se
 function sidebarSessionHost(s: SessionProfile): string {
   if (s.type === 'serial') return s.serialPort ? `${s.serialPort}@${s.baud ?? 9600}` : 'serial';
   if (s.type === 'rdp') return (s.user ? `${s.user}@` : '') + rdpAddress(s);
+  if (s.type === 'vnc') return vncAddress(s) || 'vnc';
   if (!s.host) return '';
   const port = s.port && s.port !== 22 ? `:${s.port}` : '';
   return (s.user ? `${s.user}@` : '') + s.host + port;
@@ -7127,6 +7596,9 @@ function showSessionContextMenu(x: number, y: number, s: SessionProfile) {
   deleteItem.onmouseleave = () => { deleteItem.style.background = ''; };
   deleteItem.onclick = async () => {
     menu.remove();
+    // A deleted session leaves nothing to reach a stored password with,
+    // so forget it here rather than orphaning it in the keychain.
+    await App.DeleteSessionPassword(s.id).catch(() => {});
     await App.DeleteSession(s.id);
     renderSessionList();
   };
@@ -7134,6 +7606,21 @@ function showSessionContextMenu(x: number, y: number, s: SessionProfile) {
   menu.appendChild(pinItem);
   menu.appendChild(openItem);
   menu.appendChild(editItem);
+  // Only for SSH sessions, and only while the store is on: a password
+  // is the one thing this forgets, and the others never have one.
+  if (appSettings.passwordStoreEnabled && (!s.type || s.type === 'ssh')) {
+    const forgetItem = document.createElement('div');
+    forgetItem.textContent = 'Forget saved password';
+    forgetItem.style.cssText = 'padding:6px 12px;cursor:pointer;';
+    forgetItem.onmouseenter = () => { forgetItem.style.background = 'var(--hover)'; };
+    forgetItem.onmouseleave = () => { forgetItem.style.background = ''; };
+    forgetItem.onclick = async () => {
+      menu.remove();
+      await App.DeleteSessionPassword(s.id).catch((err) => flashStatus(String(err), true));
+      flashStatus(`Forgot the saved password for ${s.name}`);
+    };
+    menu.appendChild(forgetItem);
+  }
   menu.appendChild(deleteItem);
   document.body.appendChild(menu);
   attachMenuAutoClose(menu);
@@ -7159,22 +7646,27 @@ async function openSessionEditor(s: SessionProfile) {
   sessionEditorTarget = s;
   const isSerial = s.type === 'serial';
   const isRDP = s.type === 'rdp';
+  const isVNC = s.type === 'vnc';
 
   switchSessionEditorTab('basic');
 
   (document.getElementById('se-name') as HTMLInputElement).value = s.name;
 
-  document.getElementById('se-ssh-basic-fields')!.style.display = isSerial || isRDP ? 'none' : 'flex';
+  document.getElementById('se-ssh-basic-fields')!.style.display = isSerial || isRDP || isVNC ? 'none' : 'flex';
   document.getElementById('se-serial-basic-fields')!.style.display = isSerial ? 'flex' : 'none';
   document.getElementById('se-rdp-basic-fields')!.style.display = isRDP ? 'flex' : 'none';
+  document.getElementById('se-vnc-basic-fields')!.style.display = isVNC ? 'flex' : 'none';
   // Device kind / key path only apply to SSH sessions, serial always
   // shows its own icon (matches the pre-SPE-62 context menu behavior).
-  document.getElementById('se-ssh-advanced-fields')!.style.display = isSerial || isRDP ? 'none' : 'flex';
+  document.getElementById('se-ssh-advanced-fields')!.style.display = isSerial || isRDP || isVNC ? 'none' : 'flex';
   document.getElementById('se-rdp-advanced-fields')!.style.display = isRDP ? 'flex' : 'none';
 
   if (isSerial) {
     (document.getElementById('se-serial-port') as HTMLInputElement).value = s.serialPort ?? '';
     (document.getElementById('se-baud') as HTMLSelectElement).value = String(s.baud ?? 9600);
+  } else if (isVNC) {
+    (document.getElementById('se-vnc-host') as HTMLInputElement).value = s.host ?? '';
+    (document.getElementById('se-vnc-port') as HTMLInputElement).value = String(s.port ?? 5900);
   } else if (isRDP) {
     (document.getElementById('se-rdp-host') as HTMLInputElement).value = s.host ?? '';
     (document.getElementById('se-rdp-port') as HTMLInputElement).value = String(s.port ?? 3389);
@@ -7193,6 +7685,8 @@ async function openSessionEditor(s: SessionProfile) {
     const deviceKindSelect = document.getElementById('se-devicekind-select') as HTMLSelectElement;
     const current = s.deviceKind === 'switch' || s.deviceKind === 'firewall' ? s.deviceKind : 'host';
     deviceKindSelect.value = current;
+    (document.getElementById('se-jumphost') as HTMLInputElement).value = s.jumpHost ?? '';
+    (document.getElementById('se-termspeed') as HTMLSelectElement).value = s.terminalSpeed ? String(s.terminalSpeed) : '';
   }
 
   const groupSelect = document.getElementById('se-group') as HTMLSelectElement;
@@ -7246,6 +7740,9 @@ document.getElementById('se-save')!.addEventListener('click', async () => {
   if (s.type === 'serial') {
     updated.serialPort = (document.getElementById('se-serial-port') as HTMLInputElement).value.trim();
     updated.baud = parseInt((document.getElementById('se-baud') as HTMLSelectElement).value, 10);
+  } else if (s.type === 'vnc') {
+    updated.host = (document.getElementById('se-vnc-host') as HTMLInputElement).value.trim();
+    updated.port = parseInt((document.getElementById('se-vnc-port') as HTMLInputElement).value, 10) || 5900;
   } else if (s.type === 'rdp') {
     updated.host = (document.getElementById('se-rdp-host') as HTMLInputElement).value.trim();
     updated.port = parseInt((document.getElementById('se-rdp-port') as HTMLInputElement).value, 10) || 3389;
@@ -7265,6 +7762,8 @@ document.getElementById('se-save')!.addEventListener('click', async () => {
     updated.useAgent = (document.getElementById('se-use-ssh-agent') as HTMLInputElement).checked;
     updated.internalAgent = (document.getElementById('se-use-internal-agent') as HTMLInputElement).checked;
     updated.deviceKind = (document.getElementById('se-devicekind-select') as HTMLSelectElement).value as 'host' | 'switch' | 'firewall';
+    updated.jumpHost = (document.getElementById('se-jumphost') as HTMLInputElement).value.trim() || undefined;
+    updated.terminalSpeed = Number((document.getElementById('se-termspeed') as HTMLSelectElement).value) || undefined;
   }
 
   await App.SaveSession(updated);
@@ -8063,6 +8562,10 @@ async function disconnectSession(session: Session) {
     await App.CloseRDP(session.backendId);
     markRDPEnded(session, 'Disconnected.');
     return;
+  } else if (session.mode === 'vnc' && session.backendId) {
+    await App.CloseVNC(session.backendId);
+    markVNCEnded(session, 'Disconnected.');
+    return;
   } else {
     return; // nothing live to disconnect (pending or local shell sessions)
   }
@@ -8321,6 +8824,7 @@ function homeIsActive(): boolean {
 function homeSessionIcon(s: SessionProfile): string {
   if (s.type === 'serial') return '🔌';
   if (s.type === 'rdp') return '🪟';
+  if (s.type === 'vnc') return '🖥';
   if (s.deviceKind === 'switch') return '🔀';
   if (s.deviceKind === 'firewall') return '🛡️';
   return '🖥️';
@@ -8332,6 +8836,9 @@ function homeSessionSubtitle(s: SessionProfile): string {
   }
   if (s.type === 'rdp') {
     return s.host ? `RDP ${(s.user ? `${s.user}@` : '') + rdpAddress(s)}` : 'Remote Desktop';
+  }
+  if (s.type === 'vnc') {
+    return s.host ? `VNC ${vncAddress(s)}` : 'VNC';
   }
   if (!s.host) return 'SSH';
   const port = s.port && s.port !== 22 ? `:${s.port}` : '';
@@ -9256,7 +9763,7 @@ async function runConnect(req: ConnectRequest) {
     if (!skipSavePrompt) {
       const name = `${req.user}@${req.host}`;
       if (confirm(`Save this session as "${name}"?`)) {
-        await App.SaveSession({ id: '', name, host: req.host, port: req.port, user: req.user, keyPath: req.keyPath, useAgent: req.useAgent, internalAgent: req.internalAgent, x11: req.x11, deviceKind: currentDeviceKind() });
+        await App.SaveSession({ id: '', name, host: req.host, port: req.port, user: req.user, keyPath: req.keyPath, useAgent: req.useAgent, internalAgent: req.internalAgent, x11: req.x11, jumpHost: req.jumpHost, terminalSpeed: req.terminalSpeed, deviceKind: currentDeviceKind() });
         renderSessionList();
       }
     }
@@ -9272,6 +9779,12 @@ document.getElementById('connect')!.addEventListener('click', async () => {
   // host:port entry (SPE-99).
   const port = pendingQuickPort ?? 22;
 
+  // Jump host and terminal speed apply to both auth modes, so they are
+  // read once here. Empty/Default collapse to undefined, keeping the
+  // request and the saved profile clean for the common direct case.
+  const jumpHost = (document.getElementById('ssh-jumphost') as HTMLInputElement).value.trim() || undefined;
+  const terminalSpeed = Number((document.getElementById('ssh-termspeed') as HTMLSelectElement).value) || undefined;
+
   let req: ConnectRequest;
   if (authMode === 'key') {
     const keyPath = (document.getElementById('keyPath') as HTMLInputElement).value;
@@ -9279,10 +9792,10 @@ document.getElementById('connect')!.addEventListener('click', async () => {
     const useAgent = (document.getElementById('use-ssh-agent') as HTMLInputElement).checked;
     const internalAgent = (document.getElementById('use-internal-agent') as HTMLInputElement).checked;
     const x11 = (document.getElementById('x11-toggle') as HTMLInputElement).checked;
-    req = { host, port, user, keyPath, passphrase, useAgent, internalAgent, x11 };
+    req = { host, port, user, keyPath, passphrase, useAgent, internalAgent, x11, jumpHost, terminalSpeed };
   } else {
     const password = (document.getElementById('password') as HTMLInputElement).value;
-    req = { host, port, user, password };
+    req = { host, port, user, password, jumpHost, terminalSpeed };
   }
 
   // SPE-92: the same session connectActiveTab just used, a split pane
@@ -9301,6 +9814,15 @@ document.getElementById('connect')!.addEventListener('click', async () => {
 
       passwordCache.set(passwordCacheKey(host, 22, user), password);
 
+      // Persist to the OS keychain only when the person ticked the box
+      // on this prompt and the setting is on, and only for a saved
+      // session, which is the one thing with a stable id to file it
+      // under (pendingSessionId).
+      const remember = (document.getElementById('remember-password') as HTMLInputElement).checked;
+      if (remember && appSettings.passwordStoreEnabled && pendingSessionId) {
+        App.SetSessionPassword(pendingSessionId, password).catch((err) => flashStatus(`Could not save password: ${err}`, true));
+      }
+
     }
 
   }
@@ -9317,6 +9839,7 @@ document.getElementById('connect')!.addEventListener('click', async () => {
     pendingSessionName = null;
 
   }
+  pendingSessionId = null;
   // Bug fix: this used to unconditionally call closeSessionPicker()
   // here, but connectActiveTab legitimately returns early (still
   // "in progress" from the user's perspective) when it needs a
@@ -9888,6 +10411,24 @@ osc52Toggle.addEventListener('change', () => {
   localStorage.setItem('xpecter-osc52', osc52Enabled ? 'on' : 'off');
 });
 
+const passwordStoreToggle = document.getElementById('password-store-toggle') as HTMLInputElement;
+passwordStoreToggle.addEventListener('change', async () => {
+  appSettings.passwordStoreEnabled = passwordStoreToggle.checked;
+  await App.SaveSettings(appSettings);
+  if (!passwordStoreToggle.checked) {
+    // Turning it off forgets every password Xpecter saved. The keychain
+    // offers no listing, so the saved sessions are the enumeration:
+    // drop the stored password for each.
+    try {
+      const sessions = await App.ListSessions();
+      await Promise.all(sessions.map((s) => App.DeleteSessionPassword(s.id).catch(() => {})));
+      flashStatus('Saved passwords forgotten.');
+    } catch {
+      // Nothing listed means nothing to forget.
+    }
+  }
+});
+
 const copyOnSelectToggle = document.getElementById('copy-on-select-toggle') as HTMLInputElement;
 copyOnSelectToggle.checked = copyOnSelectEnabled;
 copyOnSelectToggle.addEventListener('change', () => {
@@ -10368,6 +10909,13 @@ function resetPickerView() {
   document.getElementById('picker-serial-fields')!.style.display = 'none';
   document.getElementById('picker-rdp-fields')!.style.display = 'none';
   document.getElementById('rdp-connect-error')!.style.display = 'none';
+  document.getElementById('picker-vnc-fields')!.style.display = 'none';
+  document.getElementById('vnc-connect-error')!.style.display = 'none';
+  document.getElementById('remember-password-row')!.style.display = 'none';
+  // A fresh New Session starts direct and at the default speed; a saved
+  // session that needs the password prompt re-fills these afterward.
+  (document.getElementById('ssh-jumphost') as HTMLInputElement).value = '';
+  (document.getElementById('ssh-termspeed') as HTMLSelectElement).value = '';
   pendingQuickPort = null;
 }
 // SPE-103: the picker is four choices, which is exactly the case where
@@ -10376,7 +10924,7 @@ function resetPickerView() {
 // only applies while the picker is actually open, and skipped once a
 // protocol has been chosen and its fields are showing, where digits
 // belong to whatever field has focus.
-const PICKER_ITEM_IDS = ['picker-ssh', 'picker-shell', 'picker-serial', 'picker-telnet', 'picker-rdp', 'picker-editor'];
+const PICKER_ITEM_IDS = ['picker-ssh', 'picker-shell', 'picker-serial', 'picker-telnet', 'picker-rdp', 'picker-vnc', 'picker-editor'];
 
 function pickerGridVisible(): boolean {
   const overlay = document.getElementById('session-picker-overlay')!;
@@ -10527,6 +11075,26 @@ document.getElementById('picker-rdp-fields')!.addEventListener('keydown', (e) =>
   if (e.key === 'Enter' && (e.target as HTMLElement).tagName === 'INPUT') {
     e.preventDefault();
     document.getElementById('rdp-connect')!.click();
+  }
+});
+document.getElementById('picker-vnc')!.addEventListener('click', () => {
+  document.getElementById('picker-grid')!.style.display = 'none';
+  document.getElementById('picker-vnc-fields')!.style.display = 'flex';
+  (document.getElementById('vnc-host') as HTMLInputElement).focus();
+});
+document.getElementById('vnc-connect')!.addEventListener('click', async () => {
+  const profile = vncProfileFromPicker();
+  if (!profile) {
+    reportVNCError('A host is required.');
+    return;
+  }
+  if (!pendingPaneTarget) ensurePendingTab();
+  await connectVNCInActiveTab(profile);
+});
+document.getElementById('picker-vnc-fields')!.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.target as HTMLElement).tagName === 'INPUT') {
+    e.preventDefault();
+    document.getElementById('vnc-connect')!.click();
   }
 });
 document.getElementById('picker-editor')!.addEventListener('click', () => {
@@ -10901,6 +11469,19 @@ document.getElementById('menu-import-mobaxterm')!.addEventListener('click', asyn
   }
 });
 
+document.getElementById('menu-import-sshconfig')!.addEventListener('click', async () => {
+  closeAllMenus();
+  try {
+    const result = await App.ImportSSHConfig();
+    if (result.path) {
+      await renderSessionList();
+      alert(`Imported ${result.count} host(s) from the SSH config, including any ProxyJump as a jump host.`);
+    }
+  } catch (err) {
+    alert(`SSH config import failed: ${err}`);
+  }
+});
+
 // --- Restore from automatic backup (SPE-87) ---
 // filenameToLabel parses the "xpecter-backup-YYYYMMDD-HHMMSS.json"
 // format written by config.BackupIfDue (Go side) into a readable local
@@ -11005,6 +11586,271 @@ document.getElementById('menu-tool-text-editor')!.addEventListener('click', () =
   closeAllMenus();
   newFileInEditor();
 });
+document.getElementById('menu-tool-forwarding')!.addEventListener('click', openForwardManager);
+document.getElementById('menu-tool-nettools')!.addEventListener('click', () => {
+  closeAllMenus();
+  document.getElementById('scan-results')!.innerHTML = '';
+  document.getElementById('nettools-overlay')!.classList.add('open');
+});
+document.getElementById('nettools-close')!.addEventListener('click', closeNetTools);
+document.getElementById('nettools-overlay')!.addEventListener('mousedown', (e) => {
+  if (e.target === document.getElementById('nettools-overlay')) closeNetTools();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.getElementById('nettools-overlay')!.classList.contains('open')) {
+    closeNetTools();
+  }
+});
+
+function closeNetTools() {
+  document.getElementById('nettools-overlay')!.classList.remove('open');
+}
+
+document.getElementById('wol-send')!.addEventListener('click', async () => {
+  const mac = (document.getElementById('wol-mac') as HTMLInputElement).value.trim();
+  const broadcast = (document.getElementById('wol-broadcast') as HTMLInputElement).value.trim();
+  if (!mac) { flashStatus('A MAC address is required', true); return; }
+  try {
+    await App.WakeOnLAN(mac, broadcast);
+    flashStatus(`Magic packet sent to ${mac}`);
+  } catch (err) {
+    flashStatus(`Wake-on-LAN failed: ${err}`, true);
+  }
+});
+
+// Turns "22,80,443,8000-8010" into a de-duplicated, sorted, capped list
+// of ports. A malformed piece is skipped rather than failing the whole
+// scan, and the 4096 cap matches what the backend will accept.
+function parsePortSpec(spec: string): number[] {
+  const ports = new Set<number>();
+  for (const piece of spec.split(',')) {
+    const part = piece.trim();
+    if (!part) continue;
+    const range = /^(\d+)\s*-\s*(\d+)$/.exec(part);
+    if (range) {
+      const lo = Number(range[1]);
+      const hi = Number(range[2]);
+      if (lo >= 1 && hi <= 65535 && lo <= hi) {
+        for (let p = lo; p <= hi && ports.size < 4096; p += 1) ports.add(p);
+      }
+      continue;
+    }
+    const one = Number(part);
+    if (Number.isInteger(one) && one >= 1 && one <= 65535) ports.add(one);
+  }
+  return Array.from(ports).sort((a, b) => a - b).slice(0, 4096);
+}
+
+document.getElementById('scan-run')!.addEventListener('click', async () => {
+  const host = (document.getElementById('scan-host') as HTMLInputElement).value.trim();
+  const ports = parsePortSpec((document.getElementById('scan-ports') as HTMLInputElement).value);
+  const results = document.getElementById('scan-results')!;
+  if (!host) { flashStatus('A host is required', true); return; }
+  if (ports.length === 0) { flashStatus('Enter ports to scan, e.g. 22,80,443', true); return; }
+  results.textContent = `Scanning ${ports.length} ${ports.length === 1 ? 'port' : 'ports'} on ${host}…`;
+  let open: number[];
+  try {
+    open = await App.ScanPorts(host, ports);
+  } catch (err) {
+    results.textContent = '';
+    flashStatus(`Scan failed: ${err}`, true);
+    return;
+  }
+  results.innerHTML = '';
+  const summary = document.createElement('div');
+  if (open.length === 0) {
+    summary.className = 'nt-none';
+    summary.textContent = `No open ports among the ${ports.length} scanned on ${host}.`;
+  } else {
+    summary.className = 'nt-open';
+    summary.textContent = `Open on ${host}: ${open.join(', ')}`;
+  }
+  results.appendChild(summary);
+});
+document.getElementById('forward-close')!.addEventListener('click', closeForwardManager);
+document.getElementById('forward-overlay')!.addEventListener('mousedown', (e) => {
+  if (e.target === document.getElementById('forward-overlay')) closeForwardManager();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.getElementById('forward-overlay')!.classList.contains('open')) {
+    closeForwardManager();
+  }
+});
+
+// --- Port forwarding: a visual manager over StartLocalForward ---
+//
+// The backend has always been able to bind a local port and tunnel it
+// through a live SSH session (App.StartLocalForward); this is the panel
+// that drives it. A forward is bound to a session, not saved: it lives
+// as long as the session does and is torn down with it, so there is
+// nothing to persist. The list is held here because the backend hands
+// back an opaque id and offers no enumeration of its own.
+type ActiveForward = {
+  id: string;
+  sessionBackendId: string;
+  sessionLabel: string;
+  localPort: number;
+  remoteHost: string;
+  remotePort: number;
+};
+const activeForwards: ActiveForward[] = [];
+
+function liveSSHSessions(): Session[] {
+  const out: Session[] = [];
+  for (const tab of tabs.values()) {
+    for (const s of allSessions(tab)) {
+      if (s.mode === 'ssh' && s.status === 'connected' && !s.stopped && s.backendId) out.push(s);
+    }
+  }
+  return out;
+}
+
+async function stopForwardsForSession(backendId: string) {
+  for (const fwd of activeForwards.filter((f) => f.sessionBackendId === backendId)) {
+    try {
+      await App.StopForward(fwd.id);
+    } catch {
+      // The session is going away regardless; a failed stop is not worth
+      // blocking its teardown.
+    }
+    const index = activeForwards.indexOf(fwd);
+    if (index >= 0) activeForwards.splice(index, 1);
+  }
+}
+
+function openForwardManager() {
+  closeAllMenus();
+  renderForwardManager();
+  document.getElementById('forward-overlay')!.classList.add('open');
+}
+
+function closeForwardManager() {
+  document.getElementById('forward-overlay')!.classList.remove('open');
+}
+
+function fwdInput(className: string, placeholder: string, numeric: boolean): HTMLInputElement {
+  const el = document.createElement('input');
+  el.className = `dialog-field ${className}`;
+  el.placeholder = placeholder;
+  if (numeric) el.type = 'number';
+  return el;
+}
+
+function renderForwardManager() {
+  const body = document.getElementById('forward-body')!;
+  body.innerHTML = '';
+  const sessions = liveSSHSessions();
+
+  if (sessions.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'fwd-empty';
+    empty.textContent = 'Connect an SSH session first — a forward is tunnelled through one.';
+    body.appendChild(empty);
+  } else {
+    const targetRow = document.createElement('div');
+    targetRow.className = 'fwd-target';
+    targetRow.append('Through: ');
+    const select = document.createElement('select');
+    select.className = 'dialog-field';
+    for (const s of sessions) {
+      const opt = document.createElement('option');
+      opt.value = s.backendId!;
+      opt.textContent = s.label;
+      select.appendChild(opt);
+    }
+    targetRow.appendChild(select);
+    body.appendChild(targetRow);
+
+    const form = document.createElement('div');
+    form.className = 'fwd-form';
+    const local = fwdInput('fwd-local', 'Local port', true);
+    const arrow = document.createElement('span');
+    arrow.className = 'sep';
+    arrow.textContent = '→';
+    const rhost = fwdInput('fwd-rhost', 'remote host', false);
+    const colon = document.createElement('span');
+    colon.className = 'sep';
+    colon.textContent = ':';
+    const rport = fwdInput('fwd-rport', 'port', true);
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'fwd-add';
+    add.textContent = 'Add forward';
+    add.onclick = () => { void addForward(select.value, local, rhost, rport); };
+    form.append(local, arrow, rhost, colon, rport, add);
+    body.appendChild(form);
+
+    const note = document.createElement('div');
+    note.className = 'fwd-note';
+    note.textContent = 'Binds 127.0.0.1:<local> and forwards it through the session to <remote host>:<port>. Reach a service on the far network as if it were local.';
+    body.appendChild(note);
+  }
+
+  const list = document.createElement('div');
+  list.className = 'fwd-list';
+  if (activeForwards.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'fwd-empty';
+    empty.textContent = 'No active forwards.';
+    list.appendChild(empty);
+  } else {
+    for (const fwd of activeForwards) {
+      const row = document.createElement('div');
+      row.className = 'fwd-row';
+      const desc = document.createElement('span');
+      desc.className = 'fwd-desc';
+      desc.append('localhost:');
+      const lp = document.createElement('b'); lp.textContent = String(fwd.localPort); desc.appendChild(lp);
+      desc.append(' → ');
+      const rt = document.createElement('b'); rt.textContent = `${fwd.remoteHost}:${fwd.remotePort}`; desc.appendChild(rt);
+      desc.append(`  via ${fwd.sessionLabel}`);
+      row.appendChild(desc);
+      const stop = document.createElement('span');
+      stop.className = 'fwd-stop';
+      stop.textContent = '✕';
+      stop.title = 'Stop this forward';
+      stop.onclick = () => { void stopForwardEntry(fwd.id); };
+      row.appendChild(stop);
+      list.appendChild(row);
+    }
+  }
+  body.appendChild(list);
+}
+
+async function addForward(sessionBackendId: string, local: HTMLInputElement, rhost: HTMLInputElement, rport: HTMLInputElement) {
+  const localPort = parseInt(local.value, 10);
+  const remoteHost = rhost.value.trim();
+  const remotePort = parseInt(rport.value, 10);
+  if (!localPort || localPort < 1 || localPort > 65535) { flashStatus('A valid local port is required', true); return; }
+  if (!remoteHost) { flashStatus('A remote host is required', true); return; }
+  if (!remotePort || remotePort < 1 || remotePort > 65535) { flashStatus('A valid remote port is required', true); return; }
+  const session = liveSSHSessions().find((s) => s.backendId === sessionBackendId);
+  if (!session) { flashStatus('That session is no longer connected', true); renderForwardManager(); return; }
+  let id: string;
+  try {
+    id = await App.StartLocalForward(sessionBackendId, localPort, remoteHost, remotePort);
+  } catch (err) {
+    flashStatus(`Could not start forward: ${err}`, true);
+    return;
+  }
+  activeForwards.push({ id, sessionBackendId, sessionLabel: session.label, localPort, remoteHost, remotePort });
+  local.value = '';
+  rhost.value = '';
+  rport.value = '';
+  flashStatus(`Forwarding localhost:${localPort} → ${remoteHost}:${remotePort}`);
+  renderForwardManager();
+}
+
+async function stopForwardEntry(id: string) {
+  try {
+    await App.StopForward(id);
+  } catch (err) {
+    flashStatus(`Could not stop forward: ${err}`, true);
+  }
+  const index = activeForwards.findIndex((f) => f.id === id);
+  if (index >= 0) activeForwards.splice(index, 1);
+  renderForwardManager();
+}
 
 renderSessionList();
 

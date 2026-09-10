@@ -27,11 +27,14 @@ import (
 	"xpecter/backend/config"
 	"xpecter/backend/fswatch"
 	"xpecter/backend/idgen"
+	"xpecter/backend/nettools"
 	"xpecter/backend/pty"
 	"xpecter/backend/rdpclient"
+	"xpecter/backend/secret"
 	"xpecter/backend/serialclient"
 	"xpecter/backend/sftpclient"
 	"xpecter/backend/sshclient"
+	"xpecter/backend/vncclient"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"golang.org/x/crypto/pbkdf2"
@@ -45,7 +48,10 @@ type App struct {
 	// Remote Desktop clients this app launched, by session id. Each is
 	// an external process; see backend/rdpclient for why the desktop is
 	// not drawn here.
-	rdps     map[string]*rdpclient.Session
+	rdps map[string]*rdpclient.Session
+	// VNC viewers this app launched, by session id — the same external
+	// process model as rdps.
+	vncs     map[string]*vncclient.Session
 	forwards map[string]net.Listener
 	// startupDir (SPE-86): a directory passed on the command line at
 	// launch, from Windows Explorer's "Open in Xpecter" context menu.
@@ -67,6 +73,7 @@ func NewApp(startupDir string) *App {
 		locals:     make(map[string]*pty.LocalTerminal),
 		serials:    make(map[string]*serialclient.Session),
 		rdps:       make(map[string]*rdpclient.Session),
+		vncs:       make(map[string]*vncclient.Session),
 		forwards:   make(map[string]net.Listener),
 		startupDir: startupDir,
 	}
@@ -120,7 +127,7 @@ func (a *App) shutdown(ctx context.Context) {
 	// pull it out from under them mid-task. The .rdp file each one was
 	// started from is removed by its own exit handler when the client
 	// eventually goes, and by the next launch's directory sweep if it
-	// never does.
+	// never does. VNC viewers are left running for the same reason.
 	for _, listener := range a.forwards {
 		listener.Close()
 	}
@@ -278,6 +285,49 @@ func (a *App) CloseRDP(id string) error {
 	return session.Close()
 }
 
+// VNCLaunch mirrors RDPLaunch: the pane's id, the viewer that was
+// started, and whether that process is the viewer itself (false on
+// macOS, where `open` hands off to Screen Sharing and returns).
+type VNCLaunch struct {
+	ID      string `json:"id"`
+	Client  string `json:"client"`
+	Tracked bool   `json:"tracked"`
+}
+
+// LaunchVNC starts the platform's VNC viewer for a saved (or just-typed)
+// session and tracks it. A VNC session reuses the profile's Host and
+// Port; no password is passed, the viewer asks.
+func (a *App) LaunchVNC(profile config.SessionProfile) (VNCLaunch, error) {
+	id := idgen.New()
+	session, err := vncclient.Launch(vncclient.Options{Host: profile.Host, Port: profile.Port}, func(exitErr error, deliberate bool) {
+		delete(a.vncs, id)
+		if deliberate || a.ctx == nil {
+			return
+		}
+		message := "VNC viewer closed"
+		if exitErr != nil {
+			message = "VNC viewer exited: " + exitErr.Error()
+		}
+		runtime.EventsEmit(a.ctx, "vnc:closed:"+id, SessionClosedEvent{EOF: exitErr == nil, Message: message})
+	})
+	if err != nil {
+		return VNCLaunch{}, err
+	}
+	a.vncs[id] = session
+	return VNCLaunch{ID: id, Client: session.Client, Tracked: session.Tracked}, nil
+}
+
+// CloseVNC ends the viewer Xpecter launched for id. Deliberate, so no
+// vnc:closed event follows; the frontend draws the stopped state itself.
+func (a *App) CloseVNC(id string) error {
+	session, ok := a.vncs[id]
+	if !ok {
+		return nil
+	}
+	delete(a.vncs, id)
+	return session.Close()
+}
+
 func (a *App) CloseSerial(id string) error {
 	sc, ok := a.serials[id]
 	if !ok {
@@ -305,6 +355,10 @@ type ConnectRequest struct {
 	UseAgent      bool   `json:"useAgent,omitempty"`
 	InternalAgent bool   `json:"internalAgent,omitempty"`
 	X11           bool   `json:"x11,omitempty"`
+	// JumpHost tunnels this connection through a bastion ("[user@]host[:port]").
+	JumpHost string `json:"jumpHost,omitempty"`
+	// TerminalSpeed sets the PTY baud (ispeed/ospeed); 0 is the default.
+	TerminalSpeed int `json:"terminalSpeed,omitempty"`
 	// IgnoreKeyPermWarning: user already saw and accepted the SPE-65
 	// KeyPermissionWarning once for this attempt, skip the check.
 	IgnoreKeyPermWarning bool `json:"ignoreKeyPermWarning,omitempty"`
@@ -346,6 +400,8 @@ func (a *App) Connect(req ConnectRequest) (ConnectResult, error) {
 		UseAgent:             req.UseAgent,
 		InternalAgent:        req.InternalAgent,
 		X11:                  req.X11,
+		JumpHost:             req.JumpHost,
+		TerminalSpeed:        req.TerminalSpeed,
 		IgnoreKeyPermWarning: req.IgnoreKeyPermWarning,
 		DisableKeepalive:     settings.SSHKeepaliveDisabled,
 	})
@@ -1335,6 +1391,138 @@ func (a *App) ImportMobaXtermSessions() (MobaImportResult, error) {
 	return MobaImportResult{Path: path, Count: len(profiles)}, nil
 }
 
+// ImportSSHConfig reads an OpenSSH client config (~/.ssh/config and the
+// like) and turns each concrete Host entry into a saved SSH session,
+// carrying across HostName, User, Port, IdentityFile and ProxyJump — the
+// last mapping straight onto Xpecter's own jump-host support. Password
+// material never appears in an SSH config, so there is nothing to ignore.
+func (a *App) ImportSSHConfig() (MobaImportResult, error) {
+	def := ""
+	if home, err := os.UserHomeDir(); err == nil {
+		def = filepath.Join(home, ".ssh")
+	}
+	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title:            "Import SSH config",
+		DefaultDirectory: def,
+	})
+	if err != nil || path == "" {
+		return MobaImportResult{Path: path}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return MobaImportResult{}, err
+	}
+	profiles := parseSSHConfig(string(data))
+	if len(profiles) == 0 {
+		return MobaImportResult{}, fmt.Errorf("no host entries found in that SSH config")
+	}
+	existing, err := config.LoadSessions()
+	if err != nil {
+		return MobaImportResult{}, err
+	}
+	existing = append(existing, profiles...)
+	if err := config.SaveSessions(existing); err != nil {
+		return MobaImportResult{}, err
+	}
+	return MobaImportResult{Path: path, Count: len(profiles)}, nil
+}
+
+// parseSSHConfig turns an OpenSSH client config into session profiles.
+// A Host block whose only patterns are wildcards (Host *) is a rule that
+// applies to other hosts rather than a host of its own, so it is skipped;
+// a block that lists several patterns is named by its first concrete one.
+// Directives are matched case-insensitively, and both "Key value" and
+// "Key=value" spellings are accepted, matching ssh(1).
+func parseSSHConfig(data string) []config.SessionProfile {
+	var profiles []config.SessionProfile
+	var current *config.SessionProfile
+	flush := func() {
+		if current != nil && current.Host != "" {
+			if current.Port == 0 {
+				current.Port = 22
+			}
+			current.ID = idgen.New()
+			profiles = append(profiles, *current)
+		}
+		current = nil
+	}
+	for _, raw := range strings.Split(data, "\n") {
+		line := strings.TrimSpace(strings.TrimSuffix(raw, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value := splitSSHConfigLine(line)
+		switch strings.ToLower(key) {
+		case "host":
+			flush()
+			name := firstConcreteHostPattern(value)
+			if name == "" {
+				continue // a wildcard-only block, not a host of its own
+			}
+			// Host defaults to the alias; a later HostName overrides it.
+			current = &config.SessionProfile{Name: name, Host: name, Type: "ssh"}
+		case "hostname":
+			if current != nil {
+				current.Host = value
+			}
+		case "user":
+			if current != nil {
+				current.User = value
+			}
+		case "port":
+			if current != nil {
+				if p, err := strconv.Atoi(value); err == nil {
+					current.Port = p
+				}
+			}
+		case "identityfile":
+			if current != nil {
+				current.KeyPath = expandLeadingHome(value)
+			}
+		case "proxyjump":
+			if current != nil && value != "" && !strings.EqualFold(value, "none") {
+				current.JumpHost = value
+			}
+		}
+	}
+	flush()
+	return profiles
+}
+
+// splitSSHConfigLine splits a config line into its keyword and value,
+// accepting either whitespace or a single '=' as the separator.
+func splitSSHConfigLine(line string) (key, value string) {
+	if i := strings.IndexAny(line, " \t="); i >= 0 {
+		return line[:i], strings.TrimSpace(strings.TrimLeft(line[i:], " \t="))
+	}
+	return line, ""
+}
+
+// firstConcreteHostPattern returns the first Host pattern that is a real
+// name rather than a wildcard or negation, or "" when every pattern is
+// one of those.
+func firstConcreteHostPattern(value string) string {
+	for _, pat := range strings.Fields(value) {
+		if pat == "" || strings.ContainsAny(pat, "*?") || strings.HasPrefix(pat, "!") {
+			continue
+		}
+		return strings.Trim(pat, `"`)
+	}
+	return ""
+}
+
+// expandLeadingHome turns a leading ~ into the user's home directory, the
+// one path shorthand an SSH config commonly uses for IdentityFile.
+func expandLeadingHome(p string) string {
+	p = strings.Trim(strings.TrimSpace(p), `"`)
+	if p == "~" || strings.HasPrefix(p, "~/") || strings.HasPrefix(p, `~\`) {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(p[1:], "/"))
+		}
+	}
+	return p
+}
+
 func parseMobaSessions(data string) []config.SessionProfile {
 	var profiles []config.SessionProfile
 	var current config.SessionProfile
@@ -1537,6 +1725,81 @@ func (a *App) CloseSSH(id string) error {
 	}
 	delete(a.sessions, id)
 	return sess.Close()
+}
+
+// --- Saved passwords, in the OS credential store (opt-in) ---
+//
+// A saved SSH session can remember its password in the operating
+// system's own keychain, off by default and only when the user turns it
+// on. The account is the session's stable id, so a password follows the
+// session it belongs to and nothing else. See backend/secret for why
+// this is the only password Xpecter stores and where it goes.
+
+func sessionSecretAccount(profileID string) string {
+	return "session:" + profileID
+}
+
+// SetSessionPassword remembers a password for a saved session. Requires
+// a session id: an unsaved, just-typed connection has nothing stable to
+// file the password under, and remembering one for it would strand it in
+// the keychain with no session to reach it.
+func (a *App) SetSessionPassword(profileID string, password string) error {
+	if strings.TrimSpace(profileID) == "" {
+		return errors.New("only a saved session can remember its password")
+	}
+	return secret.Set(sessionSecretAccount(profileID), password)
+}
+
+// GetSessionPassword returns a saved session's remembered password, or
+// "" when none is stored.
+func (a *App) GetSessionPassword(profileID string) (string, error) {
+	if strings.TrimSpace(profileID) == "" {
+		return "", nil
+	}
+	return secret.Get(sessionSecretAccount(profileID))
+}
+
+// HasSessionPassword reports whether a password is stored for a session,
+// for the UI to show a saved-password affordance without handing the
+// secret itself back to do it.
+func (a *App) HasSessionPassword(profileID string) bool {
+	value, err := a.GetSessionPassword(profileID)
+	return err == nil && value != ""
+}
+
+// DeleteSessionPassword forgets a saved session's password. Forgetting
+// one that was never saved is not an error.
+func (a *App) DeleteSessionPassword(profileID string) error {
+	if strings.TrimSpace(profileID) == "" {
+		return nil
+	}
+	return secret.Delete(sessionSecretAccount(profileID))
+}
+
+// WakeOnLAN sends a Wake-on-LAN magic packet to a MAC address. broadcast
+// is optional: empty uses the limited broadcast 255.255.255.255, which
+// reaches the local segment; a subnet's directed broadcast reaches
+// further. No live session is involved.
+func (a *App) WakeOnLAN(mac string, broadcast string) error {
+	return nettools.SendMagicPacket(mac, broadcast)
+}
+
+// ScanPorts reports which of the given TCP ports on host are open. The
+// caller supplies the explicit list (the frontend expands a range into
+// it and caps the count), so a scan can never be told to probe more than
+// was asked for. A fixed short timeout keeps a closed host from hanging.
+func (a *App) ScanPorts(host string, ports []int) ([]int, error) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return nil, errors.New("a host is required")
+	}
+	if len(ports) == 0 {
+		return nil, errors.New("no ports to scan")
+	}
+	if len(ports) > 4096 {
+		return nil, fmt.Errorf("too many ports at once (%d); scan 4096 or fewer", len(ports))
+	}
+	return nettools.ScanPorts(host, ports, 800*time.Millisecond), nil
 }
 
 // StartLocalForward binds a local TCP port and forwards each connection

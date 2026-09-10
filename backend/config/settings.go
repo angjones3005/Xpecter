@@ -62,6 +62,12 @@ type Settings struct {
 	// when set. Empty keeps logging disabled.
 	SessionLogDirectory string `json:"sessionLogDirectory,omitempty"`
 
+	// PasswordStoreEnabled turns on remembering SSH passwords in the OS
+	// credential store (see backend/secret). Off by default, and
+	// deliberately so: it is the one setting that causes Xpecter to keep
+	// a password at all, and the zero value is the safe one.
+	PasswordStoreEnabled bool `json:"passwordStoreEnabled,omitempty"`
+
 	// ScrollbackLines is how many lines of output a terminal keeps after
 	// they have scrolled off the top. 0 means "use the default", which
 	// the frontend sets well above xterm.js's own 1000: a single verbose
