@@ -15,21 +15,30 @@ import (
 )
 
 type SessionProfile struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	Type          string   `json:"type,omitempty"` // "" or "ssh" (default), or "serial"
-	Host          string   `json:"host,omitempty"`
-	Port          int      `json:"port,omitempty"`
-	User          string   `json:"user,omitempty"`
-	KeyPath       string   `json:"keyPath,omitempty"`
-	UseAgent      bool     `json:"useAgent,omitempty"`
-	InternalAgent bool     `json:"internalAgent,omitempty"`
-	X11           bool     `json:"x11,omitempty"`
-	SerialPort    string   `json:"serialPort,omitempty"`
-	Baud          int      `json:"baud,omitempty"`
-	GroupID       string   `json:"groupId,omitempty"`
-	Tags          []string `json:"tags,omitempty"`
-	LastUsed      string   `json:"lastUsed,omitempty"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Type          string `json:"type,omitempty"` // "" or "ssh" (default), "serial", or "rdp"
+	Host          string `json:"host,omitempty"`
+	Port          int    `json:"port,omitempty"`
+	User          string `json:"user,omitempty"`
+	KeyPath       string `json:"keyPath,omitempty"`
+	UseAgent      bool   `json:"useAgent,omitempty"`
+	InternalAgent bool   `json:"internalAgent,omitempty"`
+	X11           bool   `json:"x11,omitempty"`
+	SerialPort    string `json:"serialPort,omitempty"`
+	Baud          int    `json:"baud,omitempty"`
+	// RDP sessions reuse Host, Port and User, and add these. The same
+	// no-password rule applies: the Remote Desktop client prompts, and
+	// what it does with the answer (Credential Manager, Keychain) is its
+	// business rather than this file's.
+	Domain       string   `json:"domain,omitempty"`
+	Fullscreen   bool     `json:"fullscreen,omitempty"`
+	Width        int      `json:"width,omitempty"`
+	Height       int      `json:"height,omitempty"`
+	AdminSession bool     `json:"adminSession,omitempty"`
+	GroupID      string   `json:"groupId,omitempty"`
+	Tags         []string `json:"tags,omitempty"`
+	LastUsed     string   `json:"lastUsed,omitempty"`
 	// Pinned keeps a session at the top of the sidebar and on Home
 	// regardless of when it was last used. Recents only help once
 	// you have connected recently; this is what makes the panel

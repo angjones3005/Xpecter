@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
+    "prepare-assets": "node scripts/copy-pdfjs-assets.mjs",
+    "dev": "npm run prepare-assets && vite",
+    "build": "npm run prepare-assets && vite build",
     "lint": "eslint src"
   },
   "dependencies": {
@@ -20,7 +21,8 @@
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-webgl": "^0.18.0",
     "@xterm/xterm": "^5.5.0",
-    "monaco-editor": "^0.50.0"
+    "monaco-editor": "^0.50.0",
+    "pdfjs-dist": "^5.6.205"
   },
   "devDependencies": {
     "@eslint/js": "^9.9.0",

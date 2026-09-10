@@ -70,6 +70,48 @@ func ReadFile(client *ssh.Client, filePath string) (string, error) {
 	return buf.String(), nil
 }
 
+// ReadFileBytes reads a remote file into memory as raw bytes, for the
+// callers that need the file itself rather than its text: ReadFile
+// above converts to a string, which is the right thing for the editor
+// and destroys anything that isn't UTF-8. The caller is expected to
+// have decided the file is small enough to hold, since this is the
+// version with no streaming and no temporary copy on disk.
+func ReadFileBytes(client *ssh.Client, filePath string) ([]byte, error) {
+	c, err := sftp.NewClient(client)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = c.Close() }()
+
+	f, err := c.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, f); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// StatFile reports a remote file's size without reading it, so a caller
+// can refuse an unreasonably large one before pulling it over the wire.
+func StatFile(client *ssh.Client, filePath string) (int64, error) {
+	c, err := sftp.NewClient(client)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = c.Close() }()
+
+	info, err := c.Stat(filePath)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
 // DownloadFile copies a remote file to a caller-owned local path without
 // interpreting its contents as text. This is used for handing files to the
 // operating system's default application.
@@ -196,6 +238,37 @@ func Rename(client *ssh.Client, oldPath string, newName string) (string, error) 
 		return "", err
 	}
 	return target, nil
+}
+
+// Remove deletes a remote file or directory. A directory is only walked
+// when recursive is set: over SFTP there is no trash to fish anything
+// back out of, so whether a folder full of work is about to go with it
+// is something the caller has to have decided in front of the user,
+// not something discovered halfway through the deletion.
+func Remove(client *ssh.Client, target string, recursive bool) error {
+	c, err := sftp.NewClient(client)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = c.Close() }()
+
+	// Lstat, not Stat: a symlink pointing at a directory answers Stat as
+	// a directory, and a recursive delete would then empty whatever it
+	// points at rather than removing the link that was clicked on.
+	info, err := c.Lstat(target)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return c.Remove(target)
+	}
+	if recursive {
+		return c.RemoveAll(target)
+	}
+	// RemoveDirectory rather than Remove: Remove retries a failed file
+	// deletion as a directory one, which would make this quietly succeed
+	// on the non-empty directory the caller was refusing to walk.
+	return c.RemoveDirectory(target)
 }
 
 // UploadFile writes raw bytes to a remote path, used for binary-safe

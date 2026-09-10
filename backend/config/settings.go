@@ -61,6 +61,17 @@ type Settings struct {
 	// SessionLogDirectory enables continuous per-session terminal logging
 	// when set. Empty keeps logging disabled.
 	SessionLogDirectory string `json:"sessionLogDirectory,omitempty"`
+
+	// ScrollbackLines is how many lines of output a terminal keeps after
+	// they have scrolled off the top. 0 means "use the default", which
+	// the frontend sets well above xterm.js's own 1000: a single verbose
+	// command can push more than that out of reach, and output you
+	// cannot scroll back to might as well not have been printed.
+	//
+	// A line count rather than a preset name, because what it costs is
+	// linear and worth being able to see: every retained line is held in
+	// memory, per terminal, for as long as that session is open.
+	ScrollbackLines int `json:"scrollbackLines,omitempty"`
 }
 
 func settingsPath() (string, error) {

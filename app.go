@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -27,6 +28,7 @@ import (
 	"xpecter/backend/fswatch"
 	"xpecter/backend/idgen"
 	"xpecter/backend/pty"
+	"xpecter/backend/rdpclient"
 	"xpecter/backend/serialclient"
 	"xpecter/backend/sftpclient"
 	"xpecter/backend/sshclient"
@@ -40,6 +42,10 @@ type App struct {
 	sessions map[string]*sshclient.Session
 	locals   map[string]*pty.LocalTerminal
 	serials  map[string]*serialclient.Session
+	// Remote Desktop clients this app launched, by session id. Each is
+	// an external process; see backend/rdpclient for why the desktop is
+	// not drawn here.
+	rdps     map[string]*rdpclient.Session
 	forwards map[string]net.Listener
 	// startupDir (SPE-86): a directory passed on the command line at
 	// launch, from Windows Explorer's "Open in Xpecter" context menu.
@@ -60,6 +66,7 @@ func NewApp(startupDir string) *App {
 		sessions:   make(map[string]*sshclient.Session),
 		locals:     make(map[string]*pty.LocalTerminal),
 		serials:    make(map[string]*serialclient.Session),
+		rdps:       make(map[string]*rdpclient.Session),
 		forwards:   make(map[string]net.Listener),
 		startupDir: startupDir,
 	}
@@ -108,6 +115,12 @@ func (a *App) shutdown(ctx context.Context) {
 	for _, sc := range a.serials {
 		sc.Close()
 	}
+	// Deliberately NOT closed: the Remote Desktop window is the user's
+	// session with that machine, and Xpecter quitting is no reason to
+	// pull it out from under them mid-task. The .rdp file each one was
+	// started from is removed by its own exit handler when the client
+	// eventually goes, and by the next launch's directory sweep if it
+	// never does.
 	for _, listener := range a.forwards {
 		listener.Close()
 	}
@@ -201,6 +214,68 @@ func (a *App) WriteSerial(id string, data string) error {
 		return fmt.Errorf("no such serial session: %s", id)
 	}
 	return sc.Write([]byte(data))
+}
+
+// RDPLaunch is what the frontend gets back for a Remote Desktop session:
+// the id its pane is keyed by, the name of the client that was started,
+// and whether the process is the client itself. It is not on macOS,
+// where `open` returns as soon as it has handed the file to Windows App,
+// so the pane there says "handed over" rather than watching for an exit
+// that would mean nothing.
+type RDPLaunch struct {
+	ID      string `json:"id"`
+	Client  string `json:"client"`
+	Tracked bool   `json:"tracked"`
+}
+
+// LaunchRDP starts the platform's Remote Desktop client for a saved (or
+// just-typed) session. Options come in as a SessionProfile rather than a
+// separate request type so the Sessions panel, the picker and the editor
+// all hand over the same object they already hold.
+func (a *App) LaunchRDP(profile config.SessionProfile) (RDPLaunch, error) {
+	id := idgen.New()
+	opts := rdpclient.Options{
+		Host:         profile.Host,
+		Port:         profile.Port,
+		User:         profile.User,
+		Domain:       profile.Domain,
+		Fullscreen:   profile.Fullscreen,
+		Width:        profile.Width,
+		Height:       profile.Height,
+		AdminSession: profile.AdminSession,
+	}
+	session, err := rdpclient.Launch(opts, rdpclient.TempDir(), func(exitErr error, deliberate bool) {
+		delete(a.rdps, id)
+		if deliberate || a.ctx == nil {
+			return
+		}
+		// A clean exit is the user closing the Remote Desktop window,
+		// which is the ordinary way an RDP session ends and is reported
+		// as such rather than as a failure.
+		message := "Remote Desktop window closed"
+		if exitErr != nil {
+			message = "Remote Desktop client exited: " + exitErr.Error()
+		}
+		runtime.EventsEmit(a.ctx, "rdp:closed:"+id, SessionClosedEvent{EOF: exitErr == nil, Message: message})
+	})
+	if err != nil {
+		return RDPLaunch{}, err
+	}
+	a.rdps[id] = session
+	return RDPLaunch{ID: id, Client: session.Client, Tracked: session.Tracked}, nil
+}
+
+// CloseRDP ends the client Xpecter launched for id, which closes the
+// Remote Desktop window. A deliberate close, so no rdp:closed event
+// follows it; the frontend draws the stopped state itself, the same
+// contract CloseSSH and CloseSerial keep.
+func (a *App) CloseRDP(id string) error {
+	session, ok := a.rdps[id]
+	if !ok {
+		return nil
+	}
+	delete(a.rdps, id)
+	return session.Close()
 }
 
 func (a *App) CloseSerial(id string) error {
@@ -516,10 +591,150 @@ func (a *App) SelectFileIn(defaultDir string) (string, error) {
 // support in the editor pane, alongside the existing remote
 // (ReadRemoteFile/WriteRemoteFile) and SaveTextFile (used here for
 // local Save As, prompts for a destination) paths.
-func (a *App) ReadLocalFile(path string) (string, error) {
+// The editor opens anything it is pointed at, which means it also has to
+// be able to say no. Two things it cannot usefully show:
+//
+//   - A file that is not text. Reading one as a string hands Monaco a
+//     screenful of replacement characters, and saving that back would
+//     write the mojibake over the original. UTF-16 lands here too: it
+//     is real text, but Go's []byte-to-string conversion cannot decode
+//     it, so the honest answer is the same one VS Code gives — binary,
+//     or an encoding this editor does not read.
+//   - A file large enough that loading it is the problem. Monaco starts
+//     struggling well below this; the cap is here to stop a stray click
+//     on a multi-gigabyte capture from taking the window with it.
+const maxEditableFileBytes = 50 << 20 // 50 MiB
+
+// looksBinary uses git's heuristic: a NUL byte anywhere near the front.
+// It is not exact and does not need to be — every real text file lacks
+// one, and every format that has them (executables, archives, images,
+// UTF-16) is one this editor cannot show either way.
+func looksBinary(data []byte) bool {
+	head := data
+	if len(head) > 8000 {
+		head = head[:8000]
+	}
+	return bytes.IndexByte(head, 0) >= 0
+}
+
+// ClassifyLocalFile answers what the editor should do with a path before
+// it commits to reading the whole thing: "text" to open it, "binary" to
+// offer the system application instead, "large" to say why not.
+//
+// A separate call rather than an error out of ReadLocalFile because the
+// frontend acts differently on each answer, and telling them apart by
+// matching on the text of an error message is the kind of thing that
+// works until someone rewords it.
+func (a *App) ClassifyLocalFile(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("%s is a directory", filepath.Base(path))
+	}
+	if info.Size() > maxEditableFileBytes {
+		return "large", nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	head := make([]byte, 8000)
+	n, err := f.Read(head)
+	// io.EOF with n == 0 is an empty file, which is text as far as this
+	// is concerned: there is nothing in it to be binary.
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	if looksBinary(head[:n]) {
+		return "binary", nil
+	}
+	return "text", nil
+}
+
+// A viewer holds the whole file in memory, base64-encodes it to cross
+// the Wails bridge, and decodes it again on the other side, so the peak
+// cost of opening one is several times its size. 64 MiB is far above
+// any PDF anyone opens on purpose and far below the point where that
+// arithmetic becomes a problem.
+const maxViewableFileBytes = 64 << 20 // 64 MiB
+
+// ReadLocalFileBase64 returns a file's raw bytes, base64-encoded. The
+// editor's ReadLocalFile cannot serve this: it converts to a string,
+// which is exactly right for text and destroys everything else. Used by
+// the PDF viewer, which needs the bytes intact.
+func (a *App) ReadLocalFileBase64(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.Size() > maxViewableFileBytes {
+		return "", fmt.Errorf("%s is too large to open in Xpecter (%d MB, limit %d MB)",
+			filepath.Base(path), info.Size()>>20, maxViewableFileBytes>>20)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(data), nil
+}
+
+// ReadRemoteFileBase64 is the same thing over SFTP, so a PDF on a host
+// opens in the same viewer as one on this machine rather than having to
+// be downloaded first. Sized before it is fetched: the point of the
+// limit is not to pull 400 MB across an SSH connection to find out.
+func (a *App) ReadRemoteFileBase64(id string, path string) (string, error) {
+	sess, ok := a.sessions[id]
+	if !ok {
+		return "", fmt.Errorf("no such session: %s", id)
+	}
+	size, err := sftpclient.StatFile(sess.SSHClient(), path)
+	if err != nil {
+		return "", err
+	}
+	if size > maxViewableFileBytes {
+		return "", fmt.Errorf("%s is too large to open in Xpecter (%d MB, limit %d MB)",
+			path, size>>20, maxViewableFileBytes>>20)
+	}
+	data, err := sftpclient.ReadFileBytes(sess.SSHClient(), path)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(data), nil
+}
+
+// OpenLocalPathExternally hands a local path to the operating system's
+// default handler, the local counterpart of OpenRemoteFile's last step.
+// This is how a file the editor cannot show still opens from the tree,
+// and how the editor's Run button opens an HTML file in a browser.
+func (a *App) OpenLocalPathExternally(path string) error {
+	if _, err := os.Stat(path); err != nil {
+		return err
+	}
+	return openExternalPath(path)
+}
+
+func (a *App) ReadLocalFile(path string) (string, error) {
+	// Checked here as well as in ClassifyLocalFile, because this is
+	// reached by Reload From Disk too, and a file that has turned into
+	// something unreadable since it was opened must not be allowed to
+	// replace the buffer holding the last good copy of it.
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.Size() > maxEditableFileBytes {
+		return "", fmt.Errorf("%s is too large to open in the editor (%d MB, limit %d MB)",
+			filepath.Base(path), info.Size()>>20, maxEditableFileBytes>>20)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	if looksBinary(data) {
+		return "", fmt.Errorf("%s is a binary file, or uses a text encoding Xpecter cannot read", filepath.Base(path))
 	}
 	return string(data), nil
 }
@@ -658,6 +873,60 @@ func (a *App) RenameLocalEntry(oldPath string, newName string) (string, error) {
 		return "", err
 	}
 	return target, nil
+}
+
+// deletableLocalPath refuses the handful of paths that a delete button
+// should never be able to reach, whatever the frontend asks for. None
+// of these are things the tree can offer today: it only ever lists
+// entries inside an opened folder, and the workspace root itself has no
+// row. They are checked here anyway because this is the layer that
+// actually removes files, and a guard that lives in the caller is one
+// refactor away from not existing.
+func deletableLocalPath(target string) (string, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", errors.New("nothing to delete")
+	}
+	clean := filepath.Clean(target)
+	// A filesystem root is its own parent: "/" on Unix, `C:\` on
+	// Windows. Nothing good is on the other side of deleting one.
+	if filepath.Dir(clean) == clean {
+		return "", fmt.Errorf("%s is a filesystem root", clean)
+	}
+	if home, err := os.UserHomeDir(); err == nil && filepath.Clean(home) == clean {
+		return "", errors.New("that is your home directory")
+	}
+	return clean, nil
+}
+
+// DeleteLocalEntry removes a file, or a directory. Recursive is passed
+// rather than inferred so that "delete this folder" and "delete this
+// folder and the 200 files in it" are two different questions, asked
+// separately: the caller counts the directory first and puts the number
+// in front of the user, and this only walks a tree once that has been
+// answered. There is no undo and, deliberately, no trash: an OS recycle
+// bin is a per-platform API this app does not otherwise touch, and a
+// half-supported one would be worse than none, because it would read as
+// a safety net on the platforms where it silently isn't one.
+func (a *App) DeleteLocalEntry(target string, recursive bool) error {
+	clean, err := deletableLocalPath(target)
+	if err != nil {
+		return err
+	}
+	// Lstat, not Stat: a symlink to a directory answers Stat as a
+	// directory, and the recursive branch would then empty what it
+	// points at instead of removing the link itself.
+	info, err := os.Lstat(clean)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() && recursive {
+		return os.RemoveAll(clean)
+	}
+	// os.Remove on a non-empty directory fails, which is the answer
+	// wanted for the non-recursive case, and unlinks a symlink without
+	// following it.
+	return os.Remove(clean)
 }
 
 // LocalFile mirrors RemoteFile for the local filesystem, so the
@@ -1404,6 +1673,28 @@ func (a *App) RenameRemoteEntry(id string, oldPath string, newName string) (stri
 		return "", err
 	}
 	return sftpclient.Rename(sess.SSHClient(), oldPath, newName)
+}
+
+// DeleteRemoteEntry is DeleteLocalEntry's counterpart on the host, and
+// splits recursion the same way and for the same reason. The guard list
+// is shorter because a remote home directory is not something this can
+// identify without another round trip, and the browser cannot navigate
+// above the login directory to offer one anyway.
+func (a *App) DeleteRemoteEntry(id string, target string, recursive bool) error {
+	sess, ok := a.sessions[id]
+	if !ok {
+		return fmt.Errorf("no such session: %s", id)
+	}
+	target = strings.TrimSpace(target)
+	// "." is how the browser spells the directory it opened in, so it
+	// arrives as a real path rather than as an obvious mistake.
+	if target == "" || target == "." || target == ".." {
+		return errors.New("nothing to delete")
+	}
+	if target == "/" {
+		return errors.New("/ is the root of the remote filesystem")
+	}
+	return sftpclient.Remove(sess.SSHClient(), target, recursive)
 }
 
 func (a *App) ReadRemoteFile(id string, path string) (string, error) {

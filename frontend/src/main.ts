@@ -1,4 +1,12 @@
 import { Terminal } from '@xterm/xterm';
+import type { ILink } from '@xterm/xterm';
+import * as pdfjs from 'pdfjs-dist';
+import type { PDFDocumentProxy } from 'pdfjs-dist';
+// Vite emits the worker as its own asset and hands back the URL it was
+// emitted at. PDF.js parses and rasterises off the main thread, and
+// without a worker it falls back to doing all of that on it, which
+// stalls the whole window on every page of a large document.
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import * as monaco from 'monaco-editor';
@@ -30,7 +38,7 @@ import '@fontsource/victor-mono/400.css';
 import '@fontsource/victor-mono/700.css';
 import '@fontsource/ubuntu-mono/400.css';
 import '@fontsource/ubuntu-mono/700.css';
-import type { RemoteFile, LocalFile, Folder, ConnectRequest, SessionProfile, SessionGroup, SessionClosedEvent, Settings, UpdateInfo, LocalShellProfile } from '../wailsjs.d.ts';
+import type { RemoteFile, LocalFile, Folder, ConnectRequest, SessionProfile, SessionGroup, SessionClosedEvent, Settings, UpdateInfo, LocalShellProfile, RDPLaunch } from '../wailsjs.d.ts';
 
 
 // The app was renamed from Specter to Xpecter, and every localStorage
@@ -182,10 +190,28 @@ function fontStack(fontId: string): string {
 // Xpecter's palette instead of VS Code's inside a Xpecter window. The
 // syntax colors themselves are inherited, there's no reason to
 // re-invent those.
+// Colours for the plain-text tokenizer registered further down, which
+// reads a .txt or .log file with the same vocabulary the terminal
+// highlighter uses. Kept in the same relationships as the terminal's
+// palette (outcomes in green/red/amber, addresses violet, interfaces
+// teal, log tags and URLs cyan, paths blue, timestamps grey) so a
+// colour means the same thing whichever pane it is in, but picked
+// against an editor background rather than a terminal one.
+//
+// Strings and numbers are deliberately absent: the base theme already
+// colours those, and borrowing its answer keeps a log file looking like
+// the rest of the editor rather than like a second application.
+function textTokenRules(dark: boolean): monaco.editor.ITokenThemeRule[] {
+  const palette = dark
+    ? { good: '3fb950', bad: 'f85149', warn: 'd29922', iface: '2aa198', addr: 'd2a8ff', meta: '56d4dd', path: '79c0ff', time: '8b949e', config: '569cd6' }
+    : { good: '1a7f37', bad: 'cf222e', warn: '9a6700', iface: '1b7c83', addr: '8250df', meta: '0e7490', path: '0550ae', time: '6e7781', config: '0000c0' };
+  return Object.entries(palette).map(([token, foreground]) => ({ token: `${token}.text`, foreground }));
+}
+
 monaco.editor.defineTheme('xpecter-dark', {
   base: 'vs-dark',
   inherit: true,
-  rules: [],
+  rules: textTokenRules(true),
   colors: {
     'editor.background': '#1e1e1e',
     'editorGutter.background': '#1e1e1e',
@@ -201,7 +227,7 @@ monaco.editor.defineTheme('xpecter-dark', {
 monaco.editor.defineTheme('xpecter-light', {
   base: 'vs',
   inherit: true,
-  rules: [],
+  rules: textTokenRules(false),
   colors: {
     'editor.background': '#ffffff',
     'editorGutter.background': '#ffffff',
@@ -231,7 +257,7 @@ function wallpaperTheme(base: 'vs-dark' | 'vs', ink: string): monaco.editor.ISta
   return {
     base,
     inherit: true,
-    rules: [],
+    rules: textTokenRules(dark),
     colors: {
       'editor.background': '#00000000',
       'editorGutter.background': '#00000000',
@@ -1108,6 +1134,43 @@ function applyFontSize(size: number) {
 // prompt off the bottom of a short one.
 const TERMINAL_COLS = 200;
 
+// How far back a terminal remembers. xterm.js defaults to 1000 lines,
+// which is roughly four screenfuls on a tall window: a `show tech`, a
+// package upgrade or a verbose build scrolls straight past it, and by
+// the time you reach for the top of it the top is gone. 10,000 is the
+// default here instead, and the ceiling is offered in Settings for the
+// people who genuinely need to page back through a long capture.
+//
+// This is not free, and the cost is why it is a setting rather than
+// simply a bigger number: xterm holds every retained line in memory, per
+// terminal, for as long as the session is open, so a window full of
+// panes at 100,000 lines is paying for all of them at once.
+const SCROLLBACK_DEFAULT = 10000;
+const SCROLLBACK_OPTIONS = [1000, 5000, 10000, 25000, 50000, 100000];
+
+function activeScrollback(): number {
+  const saved = appSettings.scrollbackLines;
+  return saved && saved > 0 ? saved : SCROLLBACK_DEFAULT;
+}
+
+// Applies to every live terminal, not just the focused one: scrollback
+// is a global preference like the font and the colour scheme, and a
+// setting that only took effect on the next session opened would look
+// like it had not taken effect at all.
+//
+// Lowering it discards what is already above the new limit, which is
+// xterm's own behaviour on the option and the honest one: the lines are
+// gone, and pretending otherwise until the next write would be worse.
+function applyScrollback(lines: number) {
+  appSettings.scrollbackLines = lines;
+  for (const tab of tabs.values()) {
+    for (const s of allSessions(tab)) {
+      if (s.term) s.term.options.scrollback = lines;
+    }
+  }
+  App.SaveSettings(appSettings);
+}
+
 // SPE-132: auto-wrap (DECAWM), decided per session kind, because the two kinds
 // want opposite things.
 //
@@ -1415,6 +1478,36 @@ async function loadSettingsAndApply() {
   const fontSizeSelect = document.getElementById('font-size-select') as HTMLSelectElement;
   fontSizeSelect.value = String(initialSize);
 
+  // Filled from SCROLLBACK_OPTIONS rather than written out in the
+  // markup, unlike the font size list above it, so the sizes offered and
+  // the sizes the code knows about cannot drift apart. A settings.json
+  // carrying a size that isn't on the list (hand-edited, or written by a
+  // later version) still applies; it just shows as the nearest option
+  // rather than leaving the control blank.
+  const scrollbackSelect = document.getElementById('scrollback-select') as HTMLSelectElement;
+  if (scrollbackSelect.options.length === 0) {
+    for (const lines of SCROLLBACK_OPTIONS) {
+      const option = document.createElement('option');
+      option.value = String(lines);
+      option.textContent = `${lines.toLocaleString()} lines`;
+      scrollbackSelect.appendChild(option);
+    }
+  }
+  const scrollback = activeScrollback();
+  scrollbackSelect.value = String(
+    SCROLLBACK_OPTIONS.includes(scrollback)
+      ? scrollback
+      : SCROLLBACK_OPTIONS.reduce((best, lines) =>
+        Math.abs(lines - scrollback) < Math.abs(best - scrollback) ? lines : best),
+  );
+  // Terminals built before this async settings load resolved started on
+  // the default, the same race the font size below is guarding against.
+  for (const tab of tabs.values()) {
+    for (const s of allSessions(tab)) {
+      if (s.term) s.term.options.scrollback = scrollback;
+    }
+  }
+
   // In case a tab was created before this async load resolved (race:
   // GetSettings is an IPC round-trip), reapply font to whatever's live.
   // refreshAllTerminalThemes (called by applyWallpaperVisual above)
@@ -1520,12 +1613,19 @@ const runtime = window.runtime;
 // same file (see the SPE-96 sidebar-position removal history).
 const platformPromise = App.GetPlatform();
 
+// The same answer without awaiting, for the handful of places that need
+// it while building DOM and cannot be async. Resolved during startup,
+// long before an editor pane exists to ask; anything that acts on it
+// rather than merely draws with it awaits platformPromise instead.
+let platformName = '';
+platformPromise.then((name) => { platformName = name; });
+
 // --- Tab model ---
 // Each tab owns its own xterm.js Terminal + backend session (SSH session ID
 // or local terminal ID). 'pending' tabs show the connect form instead of a
 // live terminal, until Connect/StartLocalTerminal resolves them.
 
-type TabMode = 'pending' | 'local' | 'ssh' | 'serial' | 'editor';
+type TabMode = 'pending' | 'local' | 'ssh' | 'serial' | 'editor' | 'rdp';
 type TabStatus = 'connecting' | 'connected' | 'disconnected';
 
 // SPE-92: Session describes everything a single live terminal needs.
@@ -1742,7 +1842,7 @@ function renderTabBar() {
     }
 
     const label = document.createElement('span');
-      label.textContent = tab.isHome ? '⌂ Home' : tab.mode === 'editor' ? editorTabLabel(tab) : (tab.mode === 'local' ? '💻 ' : tab.mode === 'ssh' ? '🌐 ' : tab.mode === 'serial' ? '🔌 ' : '') + tab.label + editorDirtyMarker(tab);
+      label.textContent = tab.isHome ? '⌂ Home' : tab.mode === 'editor' ? editorTabLabel(tab) : (tab.mode === 'local' ? '💻 ' : tab.mode === 'ssh' ? '🌐 ' : tab.mode === 'serial' ? '🔌 ' : tab.mode === 'rdp' ? '🪟 ' : '') + tab.label + editorDirtyMarker(tab);
     el.appendChild(label);
 
       if (!tab.isHome) {
@@ -1783,7 +1883,7 @@ function renderTabBar() {
       if (!wrapper) return;
       const labelEl = wrapper.querySelector('.pane-header-label');
       if (labelEl) {
-        labelEl.textContent = (s.mode === 'local' ? '💻 ' : s.mode === 'ssh' ? '🌐 ' : s.mode === 'serial' ? '🔌 ' : '') + s.label;
+        labelEl.textContent = (s.mode === 'local' ? '💻 ' : s.mode === 'ssh' ? '🌐 ' : s.mode === 'serial' ? '🔌 ' : s.mode === 'rdp' ? '🪟 ' : '') + s.label;
       }
       wrapper.classList.toggle('focused', active.layout !== 'single' && i === active.focusedPaneIndex);
     });
@@ -1876,6 +1976,15 @@ async function closeSessionBackend(s: Session) {
   if (s.mode === 'serial' && s.backendId) {
     await App.CloseSerial(s.backendId);
     runtime.EventsOff('serial:data:' + s.backendId, 'serial:closed:' + s.backendId);
+  }
+  if (s.mode === 'rdp' && s.backendId) {
+    // The pane is the session: closing it closes the Remote Desktop
+    // window, the way closing a shell pane ends the shell. The
+    // "still connected" confirmation on the way here is what stands
+    // between a stray click and a desktop vanishing mid-task.
+    await App.CloseRDP(s.backendId);
+    runtime.EventsOff('rdp:closed:' + s.backendId);
+    rdpPanes.delete(s);
   }
   s.disposeScrollbar?.();
   s.disposeScrollbar = null;
@@ -2521,6 +2630,161 @@ function disposeTerminalView(session: Session) {
   termFrame?.remove();
 }
 
+// --- Clickable links in terminal output ---
+//
+// The highlighter has always coloured URLs (the `meta` rule), but colour
+// on its own says nothing about whether a thing can be acted on. In an
+// editor pane, Monaco underlines a URL under the pointer and offers to
+// follow it; in a terminal pane, the same URL was just cyan text. That
+// gap is what this closes: hover underlines the link and names it, and
+// Ctrl+click (Cmd+click on macOS) opens it, exactly the gesture the
+// editor beside it already answers to.
+//
+// Done with xterm's own registerLinkProvider rather than the web-links
+// addon, which is a dependency this doesn't need: the addon opens links
+// on a bare click, and the point here is to match the editor, not to
+// introduce a second convention inside the same window.
+//
+// Schemes are deliberately narrower than the highlighter's rule, which
+// also colours ssh://, telnet:// and friends. Those are worth colouring
+// and not worth handing to the OS: on most desktops nothing is
+// registered for them, so "clicking" one would be a link that reports
+// success and does nothing.
+const TERMINAL_LINK_RE = /(?:https?|ftps?):\/\/[^\s"'`<>\\^{}|]+/g;
+
+// Trailing punctuation is almost never part of the URL and almost always
+// part of the sentence around it: "see https://example.com/docs." and
+// "(https://example.com)". Closing brackets are only trimmed when the
+// link has no matching opener, so a real one, as in Wikipedia's
+// parenthesised article titles, survives.
+function trimLinkTail(url: string): string {
+  let end = url.length;
+  while (end > 0) {
+    const ch = url[end - 1];
+    if ('.,;:!?'.includes(ch)) { end -= 1; continue; }
+    const opener = { ')': '(', ']': '[', '}': '{' }[ch];
+    if (opener) {
+      const body = url.slice(0, end);
+      if (body.split(ch).length > body.split(opener).length) { end -= 1; continue; }
+    }
+    break;
+  }
+  return url.slice(0, end);
+}
+
+// One row of the buffer is not one line of output: anything the terminal
+// wrapped is several rows carrying one logical line, and a URL that
+// crosses the edge of the pane has to be found and underlined as a
+// whole. So the logical line is reassembled from its rows, and every
+// character in it remembers the cell it came from.
+//
+// Character by character rather than translateToString plus arithmetic
+// because the two do not line up: a wide glyph occupies two cells and
+// one string index, a combining mark occupies one cell and several. Off
+// by any of those and the underline lands on the wrong text.
+function logicalLineAt(term: Terminal, bufferLineNumber: number): { text: string; at: { x: number; y: number }[] } {
+  const buffer = term.buffer.active;
+  let first = bufferLineNumber - 1;
+  while (first > 0 && buffer.getLine(first)?.isWrapped) first -= 1;
+
+  let text = '';
+  const at: { x: number; y: number }[] = [];
+  const cell = buffer.getNullCell();
+  for (let row = first; row < buffer.length; row += 1) {
+    const line = buffer.getLine(row);
+    if (!line) break;
+    if (row > first && !line.isWrapped) break;
+    for (let x = 0; x < term.cols; x += 1) {
+      if (!line.getCell(x, cell)) break;
+      // Width 0 is the second half of a wide glyph: the character was
+      // already taken from the cell before it.
+      if (cell.getWidth() === 0) continue;
+      const chars = cell.getChars() || ' ';
+      text += chars;
+      for (let i = 0; i < chars.length; i += 1) at.push({ x, y: row });
+    }
+  }
+  return { text, at };
+}
+
+// One tooltip at a time, held here rather than per terminal: only one
+// link can be under the pointer, and a second pane's leftover tooltip
+// would have nothing to dismiss it.
+let linkTooltip: HTMLDivElement | null = null;
+
+function hideLinkTooltip() {
+  linkTooltip?.remove();
+  linkTooltip = null;
+}
+
+// Inside term.element and carrying .xterm-hover, which is what stops the
+// tooltip from swallowing its own link: xterm treats an element with
+// that class as part of the terminal surface rather than as something
+// the pointer has moved onto instead.
+function showLinkTooltip(term: Terminal, event: MouseEvent, url: string) {
+  hideLinkTooltip();
+  const host = term.element;
+  if (!host) return;
+  const tip = document.createElement('div');
+  tip.className = 'xterm-hover term-link-hover';
+  const target = document.createElement('div');
+  target.className = 'term-link-url';
+  target.textContent = url;
+  const hint = document.createElement('div');
+  hint.className = 'term-link-hint';
+  hint.textContent = `${SHORTCUT_MOD} + click to open`;
+  tip.append(target, hint);
+  host.appendChild(tip);
+
+  // Above the pointer where there is room, below it where there isn't,
+  // and never off the side of the pane: a tooltip that has to be chased
+  // off the edge of the window is worse than none.
+  const bounds = host.getBoundingClientRect();
+  const left = Math.max(0, Math.min(event.clientX - bounds.left, bounds.width - tip.offsetWidth - 4));
+  const above = event.clientY - bounds.top - tip.offsetHeight - 8;
+  tip.style.left = `${left}px`;
+  tip.style.top = `${above >= 0 ? above : event.clientY - bounds.top + 16}px`;
+  linkTooltip = tip;
+}
+
+function registerTerminalLinks(term: Terminal) {
+  term.registerLinkProvider({
+    provideLinks(bufferLineNumber, callback) {
+      const { text, at } = logicalLineAt(term, bufferLineNumber);
+      if (!text) { callback(undefined); return; }
+      const links: ILink[] = [];
+      TERMINAL_LINK_RE.lastIndex = 0;
+      for (let match = TERMINAL_LINK_RE.exec(text); match; match = TERMINAL_LINK_RE.exec(text)) {
+        const url = trimLinkTail(match[0]);
+        if (!url) continue;
+        const start = at[match.index];
+        const end = at[match.index + url.length - 1];
+        if (!start || !end) continue;
+        links.push({
+          // 1-based, both axes, and inclusive of the end cell.
+          range: { start: { x: start.x + 1, y: start.y + 1 }, end: { x: end.x + 1, y: end.y + 1 } },
+          text: url,
+          decorations: { pointerCursor: true, underline: true },
+          activate: (event, target) => {
+            // The modifier is the whole point: a bare click in a
+            // terminal is how you focus a pane and how you finish a
+            // selection, and neither should be able to launch a
+            // browser. Without it the hover has already said what to
+            // press, so silence here is an answer rather than a
+            // dead control.
+            if (!event.ctrlKey && !event.metaKey) return;
+            hideLinkTooltip();
+            runtime.BrowserOpenURL(target);
+          },
+          hover: (event, target) => showLinkTooltip(term, event, target),
+          leave: hideLinkTooltip,
+        });
+      }
+      callback(links.length ? links : undefined);
+    },
+  });
+}
+
 // SPE-92: creates (or fills in) the live xterm.js Terminal for one
 // Session, whether that's a tab's own primary session (the original,
 // unchanged behavior) or a split pane. If `session.container` already
@@ -2575,11 +2839,15 @@ function createTerminalForSession(session: Session, tab: Tab) {
     allowTransparency: true,
     fontFamily: fontStack(appSettings.fontFamily || FONT_OPTIONS[0].value),
     fontSize: appSettings.fontSize || FONT_SIZE_DEFAULT,
+    scrollback: activeScrollback(),
     theme: activeXtermTheme(),
   });
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
   term.open(container);
+  // After open(): the provider needs term.element to hang its hover on,
+  // and that only exists once the terminal has a home in the DOM.
+  registerTerminalLinks(term);
   const webglAddon = wallpaperActive() ? null : createSessionWebglAddon(session);
   // Starts at the pinned width rather than a measured one. xterm's own
   // default happens to be 80x24 too, so this is really just saying so
@@ -2802,6 +3070,15 @@ interface EditorDoc {
   // saving goes back out over SFTP.
   isLocal: boolean;
   remoteSessionId: string | null;
+  // What kind of thing this document is. 'text' is everything Monaco
+  // edits; 'pdf' is a document that is looked at rather than edited, and
+  // carries a viewer instead of a buffer. A pdf document still has a
+  // model, an empty one that is never shown: it keeps every path that
+  // reads doc.model valid, and the handful that would *write* through it
+  // are guarded by kind instead. The guards are the important half —
+  // saving an empty buffer over a PDF would destroy the file.
+  kind: 'text' | 'pdf';
+  pdf: PdfView | null;
   model: monaco.editor.ITextModel;
   viewState: monaco.editor.ICodeEditorViewState | null;
   // model.getAlternativeVersionId() as of the last open or save. Monaco
@@ -2828,6 +3105,8 @@ interface EditorPane {
   // SPE-105: the folder opened as this pane's workspace, and the tree
   // showing it. null when the pane is just holding loose files.
   folder: string | null;
+  // The area the Monaco host, the empty state and any PDF viewers share.
+  body: HTMLDivElement;
   tree: HTMLDivElement;
   expanded: Set<string>;
   // One listing per directory, so collapsing and re-expanding a folder
@@ -2958,10 +3237,21 @@ function languageForPath(path: string | null): string {
   }
   if (!name.includes('.')) return 'plaintext';
   const ext = name.slice(name.lastIndexOf('.'));
+  // Two languages claim .txt: Monaco's own plaintext, which has no
+  // tokenizer at all, and the 'text' language registered further down,
+  // which reads a log the way the terminal does. Monaco's is registered
+  // first and would win a plain first-match loop, so plaintext is
+  // treated as the fallback it is rather than as a candidate.
+  let fallback: string | null = null;
   for (const lang of languages) {
-    if (lang.extensions?.some((entry) => entry.toLowerCase() === ext)) return lang.id;
+    if (!lang.extensions?.some((entry) => entry.toLowerCase() === ext)) continue;
+    if (lang.id === 'plaintext') {
+      fallback = lang.id;
+      continue;
+    }
+    return lang.id;
   }
-  return 'plaintext';
+  return fallback ?? 'plaintext';
 }
 
 function languageLabel(id: string): string {
@@ -3142,6 +3432,7 @@ function createEditorForSession(session: Session, tab: Tab) {
     activeDocId: null,
     root,
     docBar,
+    body,
     folder: null,
     tree,
     expanded: new Set<string>(),
@@ -3229,7 +3520,11 @@ function focusedEditorPane(): EditorPane | null {
 }
 
 
+// A PDF is never dirty: there is no buffer to have changed, and saying
+// otherwise would put a close-confirmation in front of a document that
+// has nothing to lose.
 function isDocDirty(doc: EditorDoc): boolean {
+  if (doc.kind === 'pdf') return false;
   return doc.model.getAlternativeVersionId() !== doc.savedVersionId;
 }
 
@@ -3285,6 +3580,403 @@ function editorPaneForOpening(): EditorPane {
   return newEditorTabPane();
 }
 
+// --- PDF documents ---
+//
+// A PDF opened here used to be handed straight to whatever the OS uses
+// for one, which is a reasonable answer for a spreadsheet and a poor one
+// for the file you are actually working with: the datasheet next to the
+// switch you are configuring, the runbook you are following, the report
+// you just generated on a host. Sending those to another window loses
+// the one thing this app is for, which is having everything in front of
+// you at once.
+//
+// So a PDF is a document like any other. It gets a tab, it sits in the
+// same pane, it opens from the workspace tree and from the SFTP browser,
+// and a PDF on a host opens without being downloaded first.
+//
+// Rendered with PDF.js rather than by handing the bytes to the webview's
+// own viewer. Xpecter runs on three platforms and only two of them have
+// one: WebKitGTK ships no PDF support at all, so the built-in route
+// would have been a feature that silently did nothing on Linux.
+pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+
+// PDF.js fetches these for a document that names one of the 14 standard
+// fonts without embedding it. Resolved against the document base rather
+// than written as an absolute path, so it survives being served from
+// whichever scheme and root each platform's webview uses.
+const PDF_STANDARD_FONTS = new URL('pdfjs/standard_fonts/', document.baseURI).href;
+
+const PDF_MIN_SCALE = 0.25;
+const PDF_MAX_SCALE = 6;
+
+type PdfView = {
+  file: PDFDocumentProxy;
+  container: HTMLDivElement;
+  pagesBox: HTMLDivElement;
+  zoomLabel: HTMLSpanElement;
+  pageLabel: HTMLSpanElement;
+  scale: number;
+  // Page one's size at scale 1, used to size the placeholder boxes for
+  // pages that have not been rendered yet. A document whose pages differ
+  // in size will have its later placeholders slightly wrong until they
+  // are rendered, at which point each takes its own real size.
+  baseWidth: number;
+  baseHeight: number;
+  // Bumped on every zoom. A render already in flight when the scale
+  // changed discards its result rather than painting a page at the size
+  // nothing else on screen is using any more.
+  generation: number;
+  observer: IntersectionObserver;
+  // A pinch or ctrl-wheel accumulates here and is applied once per
+  // frame, so a fast gesture is one re-render per frame rather than one
+  // per event. null between frames; see queuePdfZoom.
+  pendingZoom: { factor: number; x: number; y: number } | null;
+};
+
+// Pages are rendered as they come into view rather than all at once. A
+// 400-page manual is otherwise several hundred canvases and a few
+// seconds of frozen window before anything appears.
+function observePdfPages(view: PdfView) {
+  for (const box of Array.from(view.pagesBox.children) as HTMLElement[]) {
+    view.observer.unobserve(box);
+    view.observer.observe(box);
+  }
+}
+
+async function renderPdfPage(view: PdfView, box: HTMLElement) {
+  if (box.dataset.rendering === 'yes' || box.firstElementChild) return;
+  box.dataset.rendering = 'yes';
+  const generation = view.generation;
+  try {
+    const page = await view.file.getPage(Number(box.dataset.page));
+    if (generation !== view.generation) return;
+    // Rendered at the display's real pixel density and then scaled back
+    // down in CSS, so text is sharp on a HiDPI screen instead of being
+    // drawn at a third of the resolution the monitor has.
+    const ratio = window.devicePixelRatio || 1;
+    const viewport = page.getViewport({ scale: view.scale * ratio });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.floor(viewport.width));
+    canvas.height = Math.max(1, Math.floor(viewport.height));
+    canvas.style.width = `${Math.floor(viewport.width / ratio)}px`;
+    canvas.style.height = `${Math.floor(viewport.height / ratio)}px`;
+    await page.render({ canvas, viewport }).promise;
+    if (generation !== view.generation) return;
+    box.replaceChildren(canvas);
+    box.style.width = canvas.style.width;
+    box.style.height = canvas.style.height;
+  } catch (err) {
+    // One page that will not draw is not a reason to lose the document.
+    // It says so in place, which is more use than an empty rectangle.
+    if (generation === view.generation) {
+      const note = document.createElement('div');
+      note.className = 'pdf-page-error';
+      note.textContent = `Page ${box.dataset.page} could not be drawn: ${err}`;
+      box.replaceChildren(note);
+    }
+  } finally {
+    delete box.dataset.rendering;
+  }
+}
+
+function setPdfScale(view: PdfView, scale: number) {
+  const next = Math.min(PDF_MAX_SCALE, Math.max(PDF_MIN_SCALE, scale));
+  if (Math.abs(next - view.scale) < 0.001) return;
+  view.scale = next;
+  view.generation += 1;
+  view.zoomLabel.textContent = `${Math.round(next * 100)}%`;
+  for (const box of Array.from(view.pagesBox.children) as HTMLElement[]) {
+    box.replaceChildren();
+    delete box.dataset.rendering;
+    box.style.width = `${view.baseWidth * next}px`;
+    box.style.height = `${view.baseHeight * next}px`;
+  }
+  observePdfPages(view);
+}
+
+// Zooms by a multiplier while keeping the point under (clientX, clientY)
+// pinned, which is what makes a pinch feel like it is pulling the page
+// rather than jumping to the middle. The content point beneath the
+// cursor is found before the scale changes and put back under it after,
+// treating the layout as scaling uniformly — the fixed inter-page gaps
+// make that an approximation, but a small enough one to be invisible at
+// any single step.
+function zoomPdfAt(view: PdfView, factor: number, clientX: number, clientY: number) {
+  const rect = view.pagesBox.getBoundingClientRect();
+  const px = clientX - rect.left;
+  const py = clientY - rect.top;
+  const contentX = view.pagesBox.scrollLeft + px;
+  const contentY = view.pagesBox.scrollTop + py;
+  const before = view.scale;
+  setPdfScale(view, before * factor);
+  const ratio = view.scale / before;
+  if (ratio === 1) return; // clamped at a limit, nothing moved
+  view.pagesBox.scrollLeft = contentX * ratio - px;
+  view.pagesBox.scrollTop = contentY * ratio - py;
+  updatePdfPageLabel(view);
+}
+
+// Collects the zoom deltas that arrive within one frame — a trackpad
+// pinch fires a burst of them — into a single application, so the page
+// is re-rendered at most once per frame no matter how fast the gesture.
+function queuePdfZoom(view: PdfView, factor: number, clientX: number, clientY: number) {
+  if (view.pendingZoom) {
+    view.pendingZoom.factor *= factor;
+    view.pendingZoom.x = clientX;
+    view.pendingZoom.y = clientY;
+    return;
+  }
+  view.pendingZoom = { factor, x: clientX, y: clientY };
+  requestAnimationFrame(() => {
+    const z = view.pendingZoom;
+    view.pendingZoom = null;
+    if (z) zoomPdfAt(view, z.factor, z.x, z.y);
+  });
+}
+
+function pdfTouchDistance(a: Touch, b: Touch): number {
+  return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+}
+
+// Pinch-to-zoom, from both the trackpad and a touchscreen. Chromium (and
+// so WebView2) delivers a trackpad pinch as a wheel event with ctrlKey
+// set, which is also how a mouse's Ctrl+wheel arrives — both should zoom
+// the document, and preventDefault stops the webview zooming its whole
+// self instead. A touchscreen sends real two-finger touch events, which
+// the wheel path never sees.
+function wirePdfZoomGestures(view: PdfView) {
+  view.pagesBox.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey) return; // an ordinary scroll; leave it to the box
+    e.preventDefault();
+    // exp keeps the step multiplicative and symmetric, so zooming in
+    // then out by the same gesture returns to where it started.
+    queuePdfZoom(view, Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY);
+  }, { passive: false });
+
+  let pinch = 0;
+  view.pagesBox.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 2) pinch = pdfTouchDistance(e.touches[0], e.touches[1]);
+  }, { passive: true });
+  view.pagesBox.addEventListener('touchmove', (e) => {
+    if (e.touches.length !== 2) return;
+    e.preventDefault(); // this is a zoom, not a pan
+    const distance = pdfTouchDistance(e.touches[0], e.touches[1]);
+    if (pinch > 0) {
+      const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+      const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+      queuePdfZoom(view, distance / pinch, midX, midY);
+    }
+    pinch = distance;
+  }, { passive: false });
+  view.pagesBox.addEventListener('touchend', (e) => {
+    if (e.touches.length < 2) pinch = 0;
+  }, { passive: true });
+}
+
+// The scale that puts a page across the width available, which is what
+// most people want from a PDF most of the time and what the viewer opens
+// at. Guarded against being called before the pane has been laid out,
+// where clientWidth is 0 and the answer would be a page of no width.
+function pdfFitWidthScale(view: PdfView): number {
+  const available = view.pagesBox.clientWidth - 40;
+  if (available < 80) return view.scale;
+  return available / view.baseWidth;
+}
+
+// Which page you are looking at: the last one whose top edge is at or
+// above the middle of the viewport. Cheaper and steadier than asking the
+// observer, which reports several pages at once during a fast scroll.
+function updatePdfPageLabel(view: PdfView) {
+  // offsetTop is measured from the positioned ancestor, which is the
+  // viewer container and includes the toolbar above the scroll box;
+  // scrollTop is measured from the scroll box's own content. Subtracting
+  // the box's own offset puts both in the same space.
+  const origin = view.pagesBox.offsetTop;
+  const middle = view.pagesBox.scrollTop + view.pagesBox.clientHeight / 2;
+  let current = 1;
+  for (const box of Array.from(view.pagesBox.children) as HTMLElement[]) {
+    if (box.offsetTop - origin <= middle) current = Number(box.dataset.page);
+    else break;
+  }
+  view.pageLabel.textContent = `Page ${current} of ${view.file.numPages}`;
+}
+
+function pdfBarButton(label: string, title: string, run: () => void): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'pdf-bar-btn';
+  button.textContent = label;
+  button.title = title;
+  button.onclick = run;
+  return button;
+}
+
+async function buildPdfView(pane: EditorPane, doc: EditorDoc, bytes: Uint8Array): Promise<PdfView> {
+  const file = await pdfjs.getDocument({ data: bytes, standardFontDataUrl: PDF_STANDARD_FONTS }).promise;
+  let base;
+  try {
+    const first = await file.getPage(1);
+    base = first.getViewport({ scale: 1 });
+  } catch (err) {
+    // getDocument parsed the header and getPage did not. Destroying the
+    // document takes the worker with it; without this a damaged file
+    // would leave one running for the rest of the session.
+    void file.destroy();
+    throw err;
+  }
+
+  const container = document.createElement('div');
+  container.className = 'editor-pdf';
+  const bar = document.createElement('div');
+  bar.className = 'pdf-bar';
+  const pagesBox = document.createElement('div');
+  pagesBox.className = 'pdf-pages';
+  const zoomLabel = document.createElement('span');
+  zoomLabel.className = 'pdf-bar-zoom';
+  const pageLabel = document.createElement('span');
+  pageLabel.className = 'pdf-bar-page';
+
+  const view: PdfView = {
+    file,
+    container,
+    pagesBox,
+    zoomLabel,
+    pageLabel,
+    scale: 1,
+    baseWidth: base.width,
+    baseHeight: base.height,
+    generation: 0,
+    pendingZoom: null,
+    observer: new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) void renderPdfPage(view, entry.target as HTMLElement);
+      }
+      // Deliberately outside the loop: the observer fires in bursts
+      // during a scroll and the label only needs the final answer.
+    }, { root: pagesBox, rootMargin: '300px 0px' }),
+  };
+
+  bar.append(
+    pdfBarButton('−', 'Zoom out', () => setPdfScale(view, view.scale / 1.2)),
+    zoomLabel,
+    pdfBarButton('+', 'Zoom in', () => setPdfScale(view, view.scale * 1.2)),
+    pdfBarButton('Fit', 'Fit the page to the width of the pane', () => setPdfScale(view, pdfFitWidthScale(view))),
+    pdfBarButton('100%', 'Actual size', () => setPdfScale(view, 1)),
+    pageLabel,
+  );
+  if (doc.path) {
+    const external = pdfBarButton('Open outside', 'Open in the application your system uses for PDFs', () => {
+      void openPdfExternally(doc);
+    });
+    external.classList.add('pdf-bar-right');
+    bar.appendChild(external);
+  }
+
+  for (let n = 1; n <= file.numPages; n += 1) {
+    const box = document.createElement('div');
+    box.className = 'pdf-page';
+    box.dataset.page = String(n);
+    pagesBox.appendChild(box);
+  }
+
+  container.append(bar, pagesBox);
+  pane.body.appendChild(container);
+  pagesBox.addEventListener('scroll', () => updatePdfPageLabel(view));
+  wirePdfZoomGestures(view);
+
+  zoomLabel.textContent = '100%';
+  for (const box of Array.from(pagesBox.children) as HTMLElement[]) {
+    box.style.width = `${base.width}px`;
+    box.style.height = `${base.height}px`;
+  }
+  // Not fitted to the pane here: this container is still display:none
+  // until applyActiveDoc shows it, so every width on it measures zero.
+  // fitPdfToWidth is called once it is on screen.
+  return view;
+}
+
+// Sizes the document to the pane, which is what a viewer should open at
+// and what the Fit button repeats. Reading clientWidth forces the layout
+// that has been pending since the container was shown, so this is
+// accurate as soon as the viewer is visible and not before.
+function fitPdfToWidth(view: PdfView) {
+  const fitted = pdfFitWidthScale(view);
+  if (Math.abs(fitted - view.scale) > 0.001) setPdfScale(view, fitted);
+  else observePdfPages(view);
+  updatePdfPageLabel(view);
+}
+
+function destroyPdfView(view: PdfView) {
+  view.observer.disconnect();
+  view.container.remove();
+  // Tears down the worker's copy of the document as well as this side's.
+  // Without it a PDF closed and reopened all afternoon leaks both.
+  void view.file.destroy();
+}
+
+async function openPdfExternally(doc: EditorDoc) {
+  if (!doc.path) return;
+  try {
+    if (doc.isLocal) {
+      await App.OpenLocalPathExternally(doc.path);
+    } else if (doc.remoteSessionId) {
+      await App.OpenRemoteFile(doc.remoteSessionId, doc.path);
+    }
+    flashStatus(`Opened ${doc.title} outside Xpecter`);
+  } catch (err) {
+    flashStatus(`Could not open ${doc.title}: ${err}`, true);
+  }
+}
+
+// atob gives back a string of char codes, one per byte, which is the
+// only shape the bridge can carry binary in. Copied out a byte at a
+// time because there is no faster primitive for it that every webview
+// this ships on agrees about.
+function base64ToBytes(encoded: string): Uint8Array {
+  const binary = atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+async function openPdfFile(path: string, isLocal: boolean, remoteSessionId: string | null, into?: EditorPane) {
+  const already = findOpenDoc(path, isLocal, remoteSessionId);
+  if (already) {
+    revealDoc(already);
+    return;
+  }
+  const name = baseName(path);
+  flashStatus(`Opening ${name}…`);
+  let encoded: string;
+  try {
+    encoded = isLocal
+      ? await App.ReadLocalFileBase64(path)
+      : await App.ReadRemoteFileBase64(remoteSessionId!, path);
+  } catch (err) {
+    flashStatus(`Open failed: ${err}`, true);
+    return;
+  }
+
+  const pane = into ?? editorPaneForOpening();
+  const doc = createDoc(pane, { title: name, path, isLocal, remoteSessionId, content: '', kind: 'pdf' });
+  try {
+    doc.pdf = await buildPdfView(pane, doc, base64ToBytes(encoded));
+  } catch (err) {
+    // A password-protected or damaged file lands here. The tab is taken
+    // back rather than left open on nothing, and the offer to hand it to
+    // the system viewer is worth making: it may well open there.
+    discardDoc(doc);
+    flashStatus(`${name} could not be opened as a PDF: ${err}`, true);
+    return;
+  }
+  if (isLocal) rememberRecentFile(path);
+  // Shown first, then sized: the fit is measured off a laid-out pane.
+  setActiveDoc(pane, doc.id);
+  fitPdfToWidth(doc.pdf);
+  renderDocBar(pane);
+  flashStatus(`Opened ${name}`);
+}
+
 // --- Documents ---
 
 function createDoc(pane: EditorPane, opts: {
@@ -3293,6 +3985,7 @@ function createDoc(pane: EditorPane, opts: {
   isLocal: boolean;
   remoteSessionId: string | null;
   content: string;
+  kind?: 'text' | 'pdf';
 }): EditorDoc {
   editorDocCounter += 1;
   const model = monaco.editor.createModel(opts.content, languageForPath(opts.path));
@@ -3302,6 +3995,8 @@ function createDoc(pane: EditorPane, opts: {
     path: opts.path,
     isLocal: opts.isLocal,
     remoteSessionId: opts.remoteSessionId,
+    kind: opts.kind ?? 'text',
+    pdf: null,
     model,
     viewState: null,
     savedVersionId: model.getAlternativeVersionId(),
@@ -3352,6 +4047,14 @@ function applyActiveDoc(pane: EditorPane) {
     pane.editor.setModel(null);
     renderRecentFiles(pane);
   }
+  // Each PDF keeps its own viewer in the pane, built once and hidden
+  // rather than torn down, so switching away from a 300-page document
+  // and back does not re-render it or lose where you had scrolled to.
+  for (const id of pane.docIds) {
+    const other = editorDocs.get(id);
+    if (other?.pdf) other.pdf.container.style.display = other === doc ? 'flex' : 'none';
+  }
+  pane.root.classList.toggle('viewing-pdf', doc?.kind === 'pdf');
   // Drives both the pane header and, for a whole editor tab, the tab
   // bar entry, so the filename is visible wherever the editor is.
   pane.session.label = doc ? doc.title : 'Editor';
@@ -3392,6 +4095,55 @@ function newUntitledDoc(pane: EditorPane): EditorDoc {
   return doc;
 }
 
+// --- What happens to a file the editor cannot show ---
+//
+// The tree lists everything in a folder, the way a file browser should,
+// and every row is clickable. That only works if clicking a row that
+// isn't text does something sensible instead of filling the editor with
+// replacement characters, so anything the editor can't show is handed to
+// the operating system that can.
+//
+// Two lists rather than one. The first is decided by extension before
+// anything is read, because these are formats nobody wants to see the
+// bytes of and the answer is known from the name alone. The second is
+// the subset of those that are programs: handing a PDF to the OS shows
+// it, handing an .exe to the OS runs it, and a single click in a file
+// tree should not be able to start a program without saying so first.
+const OPENS_EXTERNALLY = new Set([
+  '.exe', '.msi', '.com', '.scr', '.cpl', '.dll', '.sys', '.so', '.dylib', '.o', '.a', '.lib', '.class', '.jar',
+  '.zip', '.7z', '.rar', '.gz', '.bz2', '.xz', '.tar', '.tgz', '.iso', '.dmg', '.deb', '.rpm', '.cab',
+  // .pdf is deliberately absent: those open in Xpecter's own viewer now.
+  '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.ods', '.odp', '.rtf',
+  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.ico', '.tif', '.tiff', '.psd', '.svgz',
+  '.mp3', '.wav', '.flac', '.ogg', '.m4a', '.mp4', '.mkv', '.avi', '.mov', '.webm',
+  '.ttf', '.otf', '.woff', '.woff2', '.eot',
+  '.db', '.sqlite', '.sqlite3', '.pyc', '.pyo', '.pdb', '.bin', '.dat',
+]);
+
+const RUNS_WHEN_OPENED = new Set(['.exe', '.msi', '.com', '.scr', '.cpl']);
+
+// Returns true when it dealt with the file, false when the editor
+// should go ahead and open it.
+async function openWithSystemApp(path: string, reason?: string): Promise<boolean> {
+  const name = baseName(path);
+  if (RUNS_WHEN_OPENED.has(extensionOf(path))) {
+    // Explorer needs a double-click to launch something; a tree row here
+    // takes one. That difference is the whole reason for this prompt:
+    // starting a program is not what a single click anywhere else in
+    // this app does.
+    if (!confirm(`Run ${name}?\n\nXpecter cannot show this file, so opening it means handing it to Windows to execute.`)) return true;
+  } else if (reason && !confirm(`${reason}\n\nOpen ${name} with the application your system uses for it instead?`)) {
+    return true;
+  }
+  try {
+    await App.OpenLocalPathExternally(path);
+    flashStatus(`Opened ${name} outside Xpecter`);
+  } catch (err) {
+    flashStatus(`Could not open ${name}: ${err}`, true);
+  }
+  return true;
+}
+
 async function openLocalFile(path?: string, into?: EditorPane) {
   // Opens in the workspace when there is one, so Open File inside a
   // folder doesn't start wherever the OS dialog was last.
@@ -3401,6 +4153,34 @@ async function openLocalFile(path?: string, into?: EditorPane) {
   const already = findOpenDoc(target, true, null);
   if (already) {
     revealDoc(already);
+    return;
+  }
+  if (extensionOf(target) === '.pdf') {
+    await openPdfFile(target, true, null, into);
+    return;
+  }
+  if (OPENS_EXTERNALLY.has(extensionOf(target))) {
+    await openWithSystemApp(target);
+    return;
+  }
+  // Everything else is attempted, whatever its extension: an unknown
+  // suffix is not a reason to refuse a file, and most of them are text.
+  // The classification is what catches the ones that aren't, before the
+  // bytes reach a buffer that could later be saved back over the
+  // original.
+  let kind: string;
+  try {
+    kind = await App.ClassifyLocalFile(target);
+  } catch (err) {
+    flashStatus(`Open failed: ${err}`, true);
+    return;
+  }
+  if (kind === 'binary') {
+    await openWithSystemApp(target, `${baseName(target)} is a binary file, or uses a text encoding Xpecter cannot read.`);
+    return;
+  }
+  if (kind === 'large') {
+    flashStatus(`${baseName(target)} is too large to open in the editor`, true);
     return;
   }
   let content: string;
@@ -3426,6 +4206,13 @@ async function openRemoteFile(sessionId: string, path: string) {
   const already = findOpenDoc(path, false, sessionId);
   if (already) {
     revealDoc(already);
+    return;
+  }
+  // Straight into the viewer, without the download-to-temp step the
+  // system-application route needs: a datasheet on a jump host is worth
+  // reading without first putting a copy of it on this machine.
+  if (extensionOf(path) === '.pdf') {
+    await openPdfFile(path, false, sessionId);
     return;
   }
   const content = await App.ReadRemoteFile(sessionId, path);
@@ -3480,6 +4267,14 @@ function retargetDoc(doc: EditorDoc, to: { path: string; isLocal: boolean; remot
 }
 
 async function saveDoc(doc: EditorDoc): Promise<boolean> {
+  // The guard that matters most in this file. Every save path writes
+  // doc.model.getValue(), and a PDF's model is an empty buffer it never
+  // shows: without this, Ctrl+S on a PDF tab would replace the file with
+  // nothing. Refused rather than made a no-op, so it says so.
+  if (doc.kind === 'pdf') {
+    flashStatus(`${doc.title} is open for reading; Xpecter does not edit PDFs`, true);
+    return false;
+  }
   // Nothing written anywhere yet (Untitled), so Save behaves like Save
   // As rather than silently doing nothing, matching every editor's
   // convention.
@@ -3498,6 +4293,10 @@ async function saveDoc(doc: EditorDoc): Promise<boolean> {
 }
 
 async function saveDocAs(doc: EditorDoc): Promise<boolean> {
+  if (doc.kind === 'pdf') {
+    flashStatus(`${doc.title} is open for reading; Xpecter does not edit PDFs`, true);
+    return false;
+  }
   const pane = editorPanes.get(doc.ownerPaneId);
   const suggested = doc.path ? baseName(doc.path) : (doc.title.includes('.') ? doc.title : `${doc.title}.txt`);
   // The pane's workspace first, then wherever this file already lives,
@@ -3515,6 +4314,10 @@ async function saveDocAs(doc: EditorDoc): Promise<boolean> {
 // Save As, but onto a host: the replacement for the old editor pane's
 // "Save As -> Remote path" menu, now a command like everything else.
 async function saveDocToRemote(doc: EditorDoc): Promise<boolean> {
+  if (doc.kind === 'pdf') {
+    flashStatus(`${doc.title} is open for reading; Xpecter does not edit PDFs`, true);
+    return false;
+  }
   const sessionId = doc.remoteSessionId ?? remoteTargetSessionId();
   if (!sessionId) {
     alert('No connected SSH session to save to. Connect one first, then try again.');
@@ -3553,6 +4356,16 @@ function remoteTargetSessionId(): string | null {
 async function reloadDoc(doc: EditorDoc) {
   if (!doc.path) return;
   if (!doc.isLocal && !doc.remoteSessionId) return;
+  // A PDF is re-read by closing and reopening it: the viewer holds a
+  // parsed document and a worker rather than a buffer, and swapping
+  // those under a live view is more machinery than the case is worth.
+  if (doc.kind === 'pdf') {
+    const pane = editorPanes.get(doc.ownerPaneId);
+    const target = { path: doc.path, isLocal: doc.isLocal, remoteSessionId: doc.remoteSessionId };
+    discardDoc(doc);
+    await openPdfFile(target.path, target.isLocal, target.remoteSessionId, pane);
+    return;
+  }
   if (doc.dirty && !confirm(`Reload ${doc.title} from disk? Unsaved changes will be lost.`)) return;
   try {
     const content = doc.isLocal
@@ -3619,6 +4432,10 @@ function discardDoc(doc: EditorDoc) {
   // disposing a model that's still attached leaves Monaco holding a
   // dead reference.
   doc.model.dispose();
+  if (doc.pdf) {
+    destroyPdfView(doc.pdf);
+    doc.pdf = null;
+  }
   if (!pane) return;
   renderDocBar(pane);
   renderTabBar();
@@ -3639,22 +4456,212 @@ function reorderDocs(pane: EditorPane, draggedId: string, targetId: string) {
   renderDocBar(pane);
 }
 
+// --- Running the file you are editing ---
+//
+// The editor could write a script onto a host and never do anything
+// with it: to see it run you left the pane, found a terminal, and typed
+// the path back in by hand. This is the button that closes that loop,
+// the same one VS Code puts in the corner of an editor.
+//
+// Two shapes of "run", because the file types asked for do not share
+// one. A page is run by looking at it, so HTML goes to whichever
+// browser the OS already associates with it. A script is run by a
+// command, so those open a shell in the file's own directory and type
+// it there.
+//
+// The shell is the user's own rather than the interpreter as the root
+// process, deliberately: a PTY whose only process is the script dies
+// the moment the script does, taking the output with it. Typing into a
+// live shell leaves the result on screen, and leaves Up-Enter as the
+// way to run it again.
+
+type RunAction = { how: 'browser' } | { how: 'shell'; command: string };
+
+function extensionOf(path: string): string {
+  const name = baseName(path).toLowerCase();
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(dot) : '';
+}
+
+// Both PowerShell and POSIX shells read a double-quoted path as a single
+// argument, which is the whole requirement here: paths with spaces in
+// them are ordinary on every platform this runs on. The quote itself
+// cannot appear in a Windows filename, and is escaped for the shells
+// where it can.
+function quoteForShell(path: string): string {
+  return `"${path.replace(/"/g, '\\"')}"`;
+}
+
+function runActionFor(path: string, windows: boolean): RunAction | null {
+  const file = quoteForShell(path);
+  switch (extensionOf(path)) {
+    case '.html': case '.htm':
+      return { how: 'browser' };
+    case '.py': case '.pyw':
+      // python3 off Windows, where plain `python` is either absent or
+      // still Python 2 on the older distributions.
+      return { how: 'shell', command: `${windows ? 'python' : 'python3'} ${file}` };
+    case '.ps1':
+      // -ExecutionPolicy Bypass applies to this one process and changes
+      // nothing about the machine's policy. Without it Windows' default
+      // Restricted policy refuses every unsigned local script, which is
+      // to say it refuses the file the user just wrote and pressed Run
+      // on. Scoped like this it is the narrowest way to make the button
+      // mean what it says.
+      return { how: 'shell', command: `${windows ? 'powershell' : 'pwsh'} -ExecutionPolicy Bypass -File ${file}` };
+    case '.js': case '.mjs': case '.cjs':
+      return { how: 'shell', command: `node ${file}` };
+    case '.sh': case '.bash':
+      return { how: 'shell', command: `bash ${file}` };
+    case '.bat': case '.cmd':
+      return windows ? { how: 'shell', command: `cmd /c ${file}` } : null;
+    default:
+      return null;
+  }
+}
+
+// What the button should offer for a document, or null when it has
+// nothing to offer. A remote file has no local browser to be opened in,
+// so HTML on a host is the one runnable extension with no answer here;
+// saying why is left to runDoc, which the palette reaches whether or not
+// the button is shown.
+function runPlanFor(doc: EditorDoc | null): RunAction | null {
+  if (!doc?.path) return null;
+  const action = runActionFor(doc.path, platformName === 'windows');
+  if (!action) return null;
+  if (!doc.isLocal && action.how === 'browser') return null;
+  return action;
+}
+
+function sessionByBackendId(id: string): Session | null {
+  for (const tab of tabs.values()) {
+    for (const session of allSessions(tab)) {
+      if (session.backendId === id) return session;
+    }
+  }
+  return null;
+}
+
+// The directory a local path sits in, kept in whichever separator the
+// path itself uses: this is handed to a shell as its working directory,
+// so it has to stay the shape the OS gave it.
+function parentDirOf(path: string): string {
+  const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  if (cut < 0) return '';
+  // A file directly under a root needs the separator kept: "/" rather
+  // than "", and "C:\" rather than "C:", which Windows reads as "the
+  // current directory on C:" and not as the root at all.
+  if (cut === 0) return path.slice(0, 1);
+  if (path[cut - 1] === ':') return path.slice(0, cut + 1);
+  return path.slice(0, cut);
+}
+
+async function runDoc(pane: EditorPane, doc: EditorDoc) {
+  // Saved first, always. Running the last saved copy of a file you have
+  // since edited is the kind of confusion that costs ten minutes before
+  // anyone suspects the tool, and every editor with a Run button saves
+  // first for that reason. saveDoc turns an untitled buffer into Save
+  // As, which is also what has to happen: there is nothing on disk yet.
+  if ((doc.dirty || !doc.path) && !(await saveDoc(doc))) return;
+  if (!doc.path) return;
+
+  const windows = (await platformPromise) === 'windows';
+  const action = runActionFor(doc.path, windows);
+  if (!action) {
+    flashStatus(`No run command for ${extensionOf(doc.path) || 'a file with no extension'}`, true);
+    return;
+  }
+
+  if (!doc.isLocal) {
+    if (action.how === 'browser') {
+      flashStatus('An HTML file on a host has no local browser to open it in; save a copy locally first', true);
+      return;
+    }
+    // Run it where it lives. The session the buffer was opened from is
+    // already a shell on that host, so this is the same gesture as the
+    // local case: type the command at a prompt that is already there.
+    const session = doc.remoteSessionId ? sessionByBackendId(doc.remoteSessionId) : null;
+    if (!session) {
+      flashStatus('The session this file came from is no longer connected', true);
+      return;
+    }
+    switchToTab(session.ownerTabId);
+    sendTextToSession(session, `${action.command}\n`);
+    flashStatus(`Running ${doc.title} on ${session.label}`);
+    return;
+  }
+
+  if (action.how === 'browser') {
+    try {
+      await App.OpenLocalPathExternally(doc.path);
+      flashStatus(`Opened ${doc.title} in your browser`);
+    } catch (err) {
+      flashStatus(`Could not open ${doc.title}: ${err}`, true);
+    }
+    return;
+  }
+
+  // In the file's own directory, so a script that reads something
+  // beside it finds it, and so the command is short enough to read.
+  const send = (session: Session) => sendTextToSession(session, `${action.command}\n`);
+  const paneTarget = targetEmptyFocusedPane();
+  if (paneTarget) {
+    pendingPaneTarget = paneTarget;
+    await startLocalShellInActiveTab('', `Run ${doc.title}`, parentDirOf(doc.path), send);
+  } else {
+    await newLocalShellTab('', `Run ${doc.title}`, parentDirOf(doc.path), send);
+  }
+}
+
+function buildRunButton(pane: EditorPane, doc: EditorDoc, action: RunAction): HTMLDivElement {
+  const button = document.createElement('div');
+  button.className = 'doc-run';
+  const glyph = document.createElement('span');
+  glyph.className = 'doc-run-glyph';
+  glyph.textContent = '▶';
+  const label = document.createElement('span');
+  label.textContent = 'Run';
+  button.append(glyph, label);
+  button.title = action.how === 'browser'
+    ? `Open ${doc.title} in your browser`
+    : `Run: ${action.command}`;
+  button.onclick = (e) => {
+    e.stopPropagation();
+    void runDoc(pane, doc);
+  };
+  return button;
+}
+
 // --- Editor pane rendering ---
 
 function renderDocBar(pane: EditorPane) {
   pane.docBar.innerHTML = '';
   pane.docBar.appendChild(buildFolderButton(pane));
+  // The tabs scroll, the controls either side of them do not. A run
+  // button that slides out of reach once enough files are open is the
+  // same as not having one, and the folder button was already being
+  // scrolled away from for that reason.
+  const strip = document.createElement('div');
+  strip.className = 'doc-strip';
   for (const docId of pane.docIds) {
     const doc = editorDocs.get(docId);
     if (!doc) continue;
-    pane.docBar.appendChild(buildDocTab(pane, doc, docId === pane.activeDocId));
+    strip.appendChild(buildDocTab(pane, doc, docId === pane.activeDocId));
   }
   const add = document.createElement('div');
   add.className = 'doc-add';
   add.textContent = '+';
   add.title = 'New file (Ctrl+N)';
   add.onclick = () => { newUntitledDoc(pane); };
-  pane.docBar.appendChild(add);
+  strip.appendChild(add);
+  pane.docBar.appendChild(strip);
+
+  // Shown only for a file something can actually be done with, rather
+  // than greyed out on every other one. The palette lists Run either
+  // way, which is where the answer for the rest lives.
+  const active = pane.activeDocId ? editorDocs.get(pane.activeDocId) : null;
+  const action = runPlanFor(active ?? null);
+  if (active && action) pane.docBar.appendChild(buildRunButton(pane, active, action));
   refreshTreeHighlights(pane);
 }
 
@@ -3783,6 +4790,15 @@ function renderEditorStatusBar(pane: EditorPane) {
   }
   pane.statusBar.appendChild(path);
   if (!doc) return;
+
+  // A PDF has none of the things the rest of this bar reports: no
+  // cursor, no indentation, no line endings, no language to change. It
+  // gets the one fact that is true of it instead.
+  if (doc.kind === 'pdf') {
+    const pages = doc.pdf ? doc.pdf.file.numPages : 0;
+    statusItem(pane, `PDF · ${pages} ${pages === 1 ? 'page' : 'pages'}`, 'Open in the application your system uses for PDFs', () => { void openPdfExternally(doc); });
+    return;
+  }
 
   pane.positionEl = statusItem(pane, '', 'Go to line (Ctrl+G)', () => runEditorAction(pane, 'editor.action.gotoLine'));
   updateStatusPosition(pane);
@@ -3960,6 +4976,125 @@ async function renameInTree(pane: EditorPane, path: string, isDir: boolean) {
   flashStatus(`Renamed to ${baseName(renamed)}`);
 }
 
+// --- Deleting files and folders ---
+//
+// The workspace tree, the remote browser and the editor could all
+// create and rename, and none of them could remove. The only way to
+// take a file back off a host was to leave the file UI, find the
+// terminal pane and type rm, which is both the least safe way to do it
+// and the reason the file surfaces read as half a file manager.
+//
+// Everything below is deliberately loud. There is no recycle bin here:
+// a local delete does not go to the OS trash, and SFTP has no such
+// concept at all, so the confirmation is a danger dialog that names the
+// full path and, for a folder, how much is going with it, rather than
+// the one-line confirm() used for things that can be undone.
+
+// True when `candidate` sits inside `dir`. Both separators are checked
+// on every platform: local paths on Windows use one, remote paths
+// always use the other, and this is asked about both.
+function isPathUnder(candidate: string, dir: string): boolean {
+  return candidate.startsWith(`${dir}/`) || candidate.startsWith(`${dir}\\`);
+}
+
+// What a directory holds, so the confirmation can say it. A listing that
+// fails answers null rather than 0: a folder that cannot be read is
+// exactly the one whose contents must not be described as "empty".
+async function countChildren(list: Promise<unknown[]>): Promise<number | null> {
+  try {
+    return (await list).length;
+  } catch {
+    return null;
+  }
+}
+
+function confirmDelete(opts: { path: string; isDir: boolean; children: number | null; label: string }): Promise<boolean> {
+  const name = baseName(opts.path);
+  return new Promise((resolve) => {
+    buildDialog({
+      title: opts.isDir ? 'Delete folder' : 'Delete file',
+      tone: 'danger',
+      onDismiss: () => resolve(false),
+      fill: (body) => {
+        if (!opts.isDir) {
+          dialogText(body, `${name} will be deleted.`, 'danger');
+        } else if (opts.children === null) {
+          dialogText(body, `${name} and everything inside it will be deleted. The folder could not be read, so there is no saying how much that is.`, 'danger');
+        } else if (opts.children === 0) {
+          dialogText(body, `${name} will be deleted. It is empty.`, 'danger');
+        } else {
+          const count = `${opts.children} ${opts.children === 1 ? 'entry' : 'entries'}`;
+          dialogText(body, `${name} will be deleted, along with the ${count} inside it and anything nested deeper.`, 'danger');
+        }
+        dialogField(body, opts.label, opts.path);
+        dialogText(body, 'This is permanent. Nothing is moved to a recycle bin, and there is nothing to restore it from afterwards.');
+      },
+      actions: [
+        { label: 'Delete', kind: 'danger', run: () => resolve(true) },
+        { label: 'Cancel', kind: 'secondary', run: () => resolve(false) },
+      ],
+    });
+  });
+}
+
+// Open buffers on something that has just been deleted. An unmodified
+// one is closed: it is a view of a file that no longer exists, and
+// leaving it open invites a Ctrl+S that quietly recreates what was just
+// removed. A modified one is kept open on purpose, because its contents
+// are now the only copy left of that work, and Save is the thing that
+// would rescue them. Returns how many were kept, so the caller can say
+// so rather than leaving it to be noticed.
+function closeDocsUnder(target: string, isDir: boolean, isLocal: boolean, remoteSessionId: string | null): number {
+  let kept = 0;
+  for (const doc of Array.from(editorDocs.values())) {
+    if (!doc.path || doc.isLocal !== isLocal) continue;
+    if (!isLocal && doc.remoteSessionId !== remoteSessionId) continue;
+    if (doc.path !== target && !(isDir && isPathUnder(doc.path, target))) continue;
+    if (doc.dirty) {
+      kept += 1;
+      continue;
+    }
+    discardDoc(doc);
+  }
+  return kept;
+}
+
+// Says what happened, folding in the "your unsaved work is still here"
+// case so it arrives with the deletion rather than as a surprise later.
+function flashDeleted(name: string, kept: number) {
+  if (kept === 0) {
+    flashStatus(`Deleted ${name}`);
+    return;
+  }
+  const buffers = kept === 1 ? 'buffer' : 'buffers';
+  flashStatus(`Deleted ${name}; ${kept} unsaved ${buffers} left open, holding the only copy of that work`);
+}
+
+async function deleteInTree(pane: EditorPane, path: string, isDir: boolean) {
+  const children = isDir ? await countChildren(App.ListLocalDir(path)) : null;
+  if (!(await confirmDelete({ path, isDir, children, label: isDir ? 'Folder' : 'File' }))) return;
+  try {
+    // An empty folder is removed without the recursive flag, so a
+    // folder that gained a file between the count above and this call
+    // is refused rather than silently taking it: the question that was
+    // answered was about an empty folder.
+    await App.DeleteLocalEntry(path, isDir && children !== 0);
+  } catch (err) {
+    flashStatus(String(err), true);
+    return;
+  }
+  const kept = closeDocsUnder(path, isDir, true, null);
+  if (isDir) {
+    // Expanded paths under a folder that no longer exists would keep
+    // the tree trying to list it on every render.
+    for (const entry of Array.from(pane.expanded)) {
+      if (entry === path || isPathUnder(entry, path)) pane.expanded.delete(entry);
+    }
+  }
+  await refreshFolder(pane);
+  flashDeleted(baseName(path), kept);
+}
+
 async function renderEditorTree(pane: EditorPane) {
   pane.tree.innerHTML = '';
   const folder = pane.folder;
@@ -3987,9 +5122,9 @@ async function renderEditorTree(pane: EditorPane) {
   syncWatchedDirs();
 }
 
-function treeAction(glyph: string, title: string, run: () => void): HTMLSpanElement {
+function treeAction(glyph: string, title: string, run: () => void, tone?: 'danger'): HTMLSpanElement {
   const el = document.createElement('span');
-  el.className = 'act';
+  el.className = tone ? `act ${tone}` : 'act';
   el.textContent = glyph;
   el.title = title;
   // Stopped as well as run: on a folder row this click would otherwise
@@ -4043,6 +5178,7 @@ async function appendTreeLevel(pane: EditorPane, parent: HTMLElement, dir: strin
       row.appendChild(treeAction('⊞', `New folder in ${entry.name}`, () => { void createInTree(pane, entry.path, 'folder'); }));
     }
     row.appendChild(treeAction('✎', `Rename ${entry.name}`, () => { void renameInTree(pane, entry.path, entry.isDir); }));
+    row.appendChild(treeAction('\u{1F5D1}', `Delete ${entry.name}`, () => { void deleteInTree(pane, entry.path, entry.isDir); }, 'danger'));
     row.onclick = () => {
       if (!entry.isDir) {
         void openLocalFile(entry.path, pane);
@@ -4337,6 +5473,10 @@ function buildFolderButton(pane: EditorPane): HTMLDivElement {
   const glyph = document.createElement('span');
   glyph.textContent = '\u{1F4C1}';
   const label = document.createElement('span');
+  // Named so the CSS can ellipsise it: the doc bar stopped scrolling as
+  // a whole when the run button was pinned to its far end, so a long
+  // folder name now has to give way rather than squeeze the tabs.
+  label.className = 'doc-folder-name';
   label.textContent = pane.folder ? baseName(pane.folder) : 'Open Folder';
   const caret = document.createElement('span');
   caret.className = 'caret';
@@ -4696,13 +5836,26 @@ function openCommandPalette(pane: EditorPane) {
       { label: 'Close Folder', detail: pane.folder, run: () => closeFolder(pane) },
     );
   }
-  if (doc) {
+  // A PDF answers to the handful of these that are about the file
+  // rather than about a buffer. Listing the rest would be listing
+  // commands that exist only to refuse.
+  if (doc?.kind === 'pdf') {
+    items.push(
+      { label: 'Reload From Disk', detail: doc.path ?? 'nothing to reload from', run: () => { void reloadDoc(doc); } },
+      { label: 'Close File', hint: 'Ctrl+W', run: () => { void closeDoc(doc); } },
+      { label: 'Open Outside Xpecter', detail: 'the application your system uses for PDFs', run: () => { void openPdfExternally(doc); } },
+      { label: 'Delete File…', detail: doc.path ?? 'never saved, so there is nothing to delete', run: () => { void deleteOpenDoc(pane, doc); } },
+      { label: 'Copy File Path', run: () => { if (doc.path) void navigator.clipboard.writeText(doc.path); } },
+    );
+  } else if (doc) {
     items.push(
       { label: 'Save', hint: 'Ctrl+S', run: () => { void saveDoc(doc); } },
       { label: 'Save As…', hint: 'Ctrl+Shift+S', run: () => { void saveDocAs(doc); } },
       { label: 'Save to Remote Host…', detail: 'write this buffer over SFTP', run: () => { void saveDocToRemote(doc); } },
       { label: 'Reload From Disk', detail: doc.path ?? 'nothing to reload from', run: () => { void reloadDoc(doc); } },
       { label: 'Close File', hint: 'Ctrl+W', run: () => { void closeDoc(doc); } },
+      { label: 'Run File', detail: runCommandLabel(doc), run: () => { void runDoc(pane, doc); } },
+      { label: 'Delete File…', detail: doc.path ?? 'never saved, so there is nothing to delete', run: () => { void deleteOpenDoc(pane, doc); } },
       { label: 'Copy File Path', run: () => { if (doc.path) void navigator.clipboard.writeText(doc.path); } },
       { label: 'Find', hint: 'Ctrl+F', run: () => runEditorAction(pane, 'actions.find') },
       { label: 'Replace', hint: 'Ctrl+H', run: () => runEditorAction(pane, 'editor.action.startFindReplaceAction') },
@@ -4729,6 +5882,34 @@ function openCommandPalette(pane: EditorPane) {
     { label: 'All Editor Commands…', detail: "Monaco's own palette, everything not listed here", hint: 'F1', run: () => runEditorAction(pane, 'editor.action.quickCommand') },
   );
   openQuickPick('Editor command', items);
+}
+
+// The palette lists Run for every document, including the ones it
+// cannot run, because "why is there no Run button on this file" is a
+// question worth answering in the place people go looking.
+function runCommandLabel(doc: EditorDoc): string {
+  if (!doc.path) return 'saves first, then runs';
+  const action = runActionFor(doc.path, platformName === 'windows');
+  if (!action) return `no run command for ${extensionOf(doc.path) || 'this kind of file'}`;
+  if (action.how === 'browser') {
+    return doc.isLocal ? 'open in your browser' : 'no local browser for a file on a host';
+  }
+  return action.command;
+}
+
+// Deleting the file you are looking at, from the editor rather than
+// from a tree, which is where you are when you decide a scratch file
+// has served its purpose. Routed through the same two functions the
+// tree and the browser use, so it asks the same question and treats an
+// open buffer the same way. Always a file, never a folder: a document
+// is one.
+async function deleteOpenDoc(pane: EditorPane, doc: EditorDoc) {
+  if (!doc.path) {
+    flashStatus(`${doc.title} has never been saved, so there is nothing to delete`, true);
+    return;
+  }
+  if (doc.isLocal) await deleteInTree(pane, doc.path, false);
+  else if (doc.remoteSessionId) await deleteRemote(doc.remoteSessionId, doc.path, false);
 }
 
 // Monaco has no built-in action for this, and it's the one cleanup that
@@ -5045,6 +6226,7 @@ function renderFileList(entries: RemoteFile[], path: string, id: string) {
       };
     }
     div.appendChild(remoteAction('✎', `Rename ${e.name}`, () => { void renameRemote(id, e.path, e.name); }));
+    div.appendChild(remoteAction('\u{1F5D1}', `Delete ${e.name}`, () => { void deleteRemote(id, e.path, e.isDir); }, 'danger'));
     list.appendChild(div);
   }
 }
@@ -5055,11 +6237,12 @@ function renderFileList(entries: RemoteFile[], path: string, id: string) {
 // a file to the host you are looking at was the last thing that made
 // the browser feel read-only next to the local tree.
 
-function remoteAction(glyph: string, title: string, run: () => void): HTMLSpanElement {
+function remoteAction(glyph: string, title: string, run: () => void, tone?: 'danger'): HTMLSpanElement {
   const el = document.createElement('span');
-  // 'neutral' keeps it off the danger colour that .side-row .act uses
-  // for the delete affordances elsewhere in the sidebar.
-  el.className = 'act neutral';
+  // 'neutral' keeps an ordinary action off the danger colour that
+  // .side-row .act uses by default; the delete action is the one row
+  // action that wants it, and asks for it by name.
+  el.className = tone === 'danger' ? 'act' : 'act neutral';
   el.textContent = glyph;
   el.title = title;
   // Stopped as well as run: the row underneath either navigates into a
@@ -5114,6 +6297,32 @@ async function renameRemote(id: string, oldPath: string, currentName: string) {
     flashStatus(`Renamed to ${baseName(renamed)}`);
   }
   await refreshFileList(currentRemotePath, id);
+}
+
+// The remote counterpart of deleteInTree, and permanent in a stronger
+// sense: a local delete at least leaves the file recoverable by whatever
+// backup or filesystem snapshot the machine has, while this is a
+// deletion on somebody else's host, done over a protocol with no trash
+// and no undo. Same confirmation, same treatment of open buffers.
+async function deleteRemote(id: string, target: string, isDir: boolean) {
+  // A round trip just to count, paid because "delete this folder" and
+  // "delete this folder and the 200 files in it" are different
+  // questions and the browser has no other way to tell them apart.
+  const children = isDir ? await countChildren(App.ListRemoteDir(id, target)) : null;
+  if (!(await confirmDelete({ path: target, isDir, children, label: isDir ? 'Remote folder' : 'Remote file' }))) return;
+  try {
+    await App.DeleteRemoteEntry(id, target, isDir && children !== 0);
+  } catch (err) {
+    flashStatus(String(err), true);
+    return;
+  }
+  const kept = closeDocsUnder(target, isDir, false, id);
+  flashDeleted(baseName(target), kept);
+  // Only when the browser is actually looking at this host. Called from
+  // a row it always is, but the editor's Delete File reaches here for
+  // whichever session its buffer came from, and refreshing then would
+  // yank the sidebar over to a host the user was not browsing.
+  if (currentRemoteSessionId === id) await refreshFileList(currentRemotePath, id);
 }
 
 // The remote browser gets the same treatment as the workspace tree, on a
@@ -5299,6 +6508,10 @@ async function useSession(s: SessionProfile) {
     await useSerialSession(s);
     return;
   }
+  if (s.type === 'rdp') {
+    await useRDPSession(s);
+    return;
+  }
   await useSSHSession(s);
 }
 
@@ -5418,6 +6631,330 @@ async function useSerialSession(s: SessionProfile) {
   await connectSerialInActiveTab(s.serialPort ?? '', s.baud ?? 9600);
 }
 
+// --- Remote Desktop sessions ---
+//
+// RDP is a session type here in every way the Sessions panel can see:
+// saved in sessions.json beside SSH and serial, pinned, grouped, tagged,
+// filtered, opened with a click, shown live in the sidebar while it is
+// up. What it is not is drawn in this window. Xpecter's one surface is
+// a webview, and a remote desktop wants a native client; the pure-Go RDP
+// implementations that exist could not be made to work to a standard
+// worth shipping without a server to test them against, and a Remote
+// Desktop that mostly connects is worse than one that always does.
+//
+// So connecting writes the session out as a .rdp file and hands it to
+// the client the platform already has — Remote Desktop Connection on
+// Windows, Windows App on macOS, FreeRDP or Remmina on Linux — with the
+// address, user, domain and display settings filled in, and the pane in
+// Xpecter stands for the session: it says where it went, watches the
+// process, reports when the window closes, and offers the same R/D/Enter
+// a dropped terminal does. The password is never written anywhere; the
+// client asks, as it always has.
+
+type RDPPaneState = 'running' | 'launched' | 'ended';
+
+type RDPPaneView = {
+  card: HTMLDivElement;
+  state: HTMLDivElement;
+  note: HTMLDivElement;
+  actions: HTMLDivElement;
+};
+
+// One card per live RDP pane, keyed by the Session it stands for. A
+// WeakMap rather than a field on Session, which is shared by every
+// session kind and would otherwise grow a slot only this one uses.
+const rdpPanes = new WeakMap<Session, RDPPaneView>();
+
+let skipRDPSavePrompt = false;
+
+function rdpAddress(s: SessionProfile): string {
+  const host = s.host ?? '';
+  const port = s.port && s.port !== 3389 ? `:${s.port}` : '';
+  return host.includes(':') && !host.startsWith('[') ? `[${host}]${port}` : host + port;
+}
+
+// A pane label the width of a tab: the saved name when there is one,
+// the address when the session was typed into the picker.
+function rdpLabel(s: SessionProfile): string {
+  return s.name || rdpAddress(s);
+}
+
+// What the picker's display dropdown and the editor's say, as the three
+// fields the profile stores. "window" leaves the size to the client.
+function rdpDisplayFromChoice(choice: string): { fullscreen: boolean; width: number; height: number } {
+  if (choice === 'fullscreen') return { fullscreen: true, width: 0, height: 0 };
+  const match = /^(\d+)x(\d+)$/.exec(choice);
+  if (!match) return { fullscreen: false, width: 0, height: 0 };
+  return { fullscreen: false, width: Number(match[1]), height: Number(match[2]) };
+}
+
+function rdpChoiceFromProfile(s: SessionProfile): string {
+  if (s.fullscreen) return 'fullscreen';
+  if (s.width && s.height) return `${s.width}x${s.height}`;
+  return 'window';
+}
+
+function rdpDisplayLabel(s: SessionProfile): string {
+  if (s.fullscreen) return 'full screen';
+  if (s.width && s.height) return `${s.width} × ${s.height} window`;
+  return 'resizable window';
+}
+
+async function useRDPSession(s: SessionProfile) {
+  await App.SaveSession({ ...s, lastUsed: new Date().toISOString() });
+  const paneTarget = targetEmptyFocusedPane();
+  if (paneTarget) {
+    pendingPaneTarget = paneTarget;
+  } else {
+    pendingPaneTarget = null;
+    ensurePendingTab();
+  }
+  markSessionProfile(paneTarget, s.id);
+  skipRDPSavePrompt = true;
+  await connectRDPInActiveTab(s);
+}
+
+// Errors go where the person is looking: into the picker while its RDP
+// form is up, otherwise the status bar, since a saved session launched
+// from the sidebar has no form open to put them in.
+function reportRDPError(message: string) {
+  const fields = document.getElementById('picker-rdp-fields')!;
+  const overlay = document.getElementById('session-picker-overlay')!;
+  if (overlay.classList.contains('open') && fields.style.display !== 'none') {
+    const el = document.getElementById('rdp-connect-error')!;
+    el.textContent = message;
+    el.style.display = 'block';
+    return;
+  }
+  flashStatus(message, true);
+}
+
+async function connectRDPInActiveTab(profile: SessionProfile) {
+  const ownerTab = tabs.get(activeTabId!)!;
+  const target: Session = pendingPaneTarget ?? ownerTab;
+  target.label = rdpLabel(profile);
+
+  // The same one-launch-at-a-time guard the SSH and serial paths keep:
+  // a second click before the first has resolved would start a second
+  // client for the same pane.
+  if (target.connecting) return;
+  target.connecting = true;
+
+  let launch: RDPLaunch;
+  try {
+    launch = await App.LaunchRDP(profile);
+  } catch (err) {
+    target.connecting = false;
+    reportRDPError(String(err));
+    return;
+  }
+  target.connecting = false;
+
+  target.mode = 'rdp';
+  target.backendId = launch.id;
+  target.status = 'connected';
+  target.stopped = false;
+  mountRDPPane(target, ownerTab, profile, launch);
+  wireRDPEvents(target, launch.id);
+  target.reconnect = () => reconnectRDP(target, profile);
+  // Same session, its own client window, in the target pane.
+  target.duplicate = async (pane) => {
+    const previous = pendingPaneTarget;
+    pendingPaneTarget = pane;
+    skipRDPSavePrompt = true;
+    try {
+      await connectRDPInActiveTab(profile);
+    } finally {
+      pendingPaneTarget = previous;
+    }
+  };
+  switchToTab(ownerTab.id);
+  closeSessionPicker();
+  renderTabBar();
+  renderSessionList();
+
+  if (!skipRDPSavePrompt) {
+    const name = rdpAddress(profile);
+    if (confirm(`Save this Remote Desktop session as "${name}"?`)) {
+      await App.SaveSession({ ...profile, id: '', name, type: 'rdp' });
+      renderSessionList();
+    }
+  }
+  skipRDPSavePrompt = false;
+}
+
+function wireRDPEvents(session: Session, id: string) {
+  runtime.EventsOn('rdp:closed:' + id, (payload: unknown) => {
+    markRDPEnded(session, (payload as SessionClosedEvent).message);
+  });
+}
+
+async function reconnectRDP(session: Session, profile: SessionProfile) {
+  if (session.backendId) runtime.EventsOff('rdp:closed:' + session.backendId);
+  let launch: RDPLaunch;
+  try {
+    launch = await App.LaunchRDP(profile);
+  } catch (err) {
+    markRDPEnded(session, String(err));
+    return;
+  }
+  session.backendId = launch.id;
+  session.status = 'connected';
+  session.stopped = false;
+  wireRDPEvents(session, launch.id);
+  setRDPPaneState(session, launch.tracked ? 'running' : 'launched', launch.client);
+  renderTabBar();
+  renderSessionList();
+}
+
+// The client went away on its own, or Disconnect ended it. Either way
+// the pane stays, the same as a dropped terminal's does, with what
+// happened written on it and R to start again.
+function markRDPEnded(session: Session, message: string) {
+  session.stopped = true;
+  session.status = 'disconnected';
+  setRDPPaneState(session, 'ended', message);
+  renderTabBar();
+  renderSessionList();
+}
+
+function setRDPPaneState(session: Session, state: RDPPaneState, detail: string) {
+  const view = rdpPanes.get(session);
+  if (!view) return;
+  view.card.classList.remove('running', 'launched', 'ended');
+  view.card.classList.add(state);
+  view.state.className = `rdp-state ${state}`;
+  if (state === 'running') {
+    view.state.textContent = `● Open in ${detail}`;
+    view.note.textContent = 'The desktop is in that window. This pane follows it: it will say so when the window closes, and Disconnect closes it from here.';
+  } else if (state === 'launched') {
+    view.state.textContent = `● Handed to ${detail}`;
+    view.note.textContent = 'On this platform the client is opened and not watched, so this pane cannot tell when the window closes. Close the pane when you are done with the session.';
+  } else {
+    view.state.textContent = `■ ${detail}`;
+    view.note.textContent = 'Press R to open it again, or Enter to close this pane.';
+  }
+  renderRDPActions(session, view, state);
+}
+
+function renderRDPActions(session: Session, view: RDPPaneView, state: RDPPaneState) {
+  view.actions.innerHTML = '';
+  const ownerTab = tabs.get(session.ownerTabId)!;
+  const actions: { key: string; label: string; run: () => void; enabled: boolean }[] = [
+    { key: 'R', label: state === 'ended' ? 'open again' : 'open another window', run: () => { void reconnectSession(session); }, enabled: !!session.reconnect },
+    { key: 'D', label: 'disconnect (close the Remote Desktop window)', run: () => { void disconnectSession(session); }, enabled: state === 'running' },
+    { key: 'Enter', label: 'close this pane', run: () => closePane(ownerTab, paneIndexOf(ownerTab, session)), enabled: true },
+  ];
+  for (const action of actions) {
+    if (!action.enabled) continue;
+    const row = document.createElement('div');
+    row.className = 'disconnect-action';
+    const key = document.createElement('span');
+    key.className = 'disconnect-key';
+    key.textContent = action.key;
+    const label = document.createElement('span');
+    label.textContent = action.label;
+    row.append(key, label);
+    row.onclick = action.run;
+    view.actions.appendChild(row);
+  }
+}
+
+// Builds (or rebuilds) the card that is this pane's whole content. The
+// wrapper, header and drag handling are the same ones a terminal pane
+// gets; only what sits under the header differs.
+function mountRDPPane(session: Session, tab: Tab, profile: SessionProfile, launch: RDPLaunch) {
+  ensurePaneGrid(tab);
+  let wrapper = session.container;
+  if (wrapper) {
+    wrapper.querySelector('.pane-landing')?.remove();
+    wrapper.querySelector('.rdp-pane')?.remove();
+    // A pane being reused from a terminal session that ended: the
+    // terminal view has to go, or the card lands under it.
+    disposeTerminalView(session);
+  } else {
+    wrapper = document.createElement('div');
+    wrapper.className = 'pane-wrapper';
+    wrapper.appendChild(buildPaneHeader(session, tab));
+    preparePaneWrapper(wrapper, session, tab);
+    tab.paneGrid!.appendChild(wrapper);
+    session.container = wrapper;
+  }
+
+  const pane = document.createElement('div');
+  pane.className = 'rdp-pane';
+  // Focusable, so the R/D/Enter keys a stopped terminal answers to work
+  // here too, where there is no terminal to receive them.
+  pane.tabIndex = 0;
+  const card = document.createElement('div');
+  card.className = 'rdp-card';
+
+  const title = document.createElement('div');
+  title.className = 'rdp-title';
+  title.textContent = `🪟 Remote Desktop — ${rdpLabel(profile)}`;
+
+  const where = document.createElement('div');
+  where.className = 'rdp-line';
+  const account = profile.domain ? `${profile.domain}\\${profile.user ?? ''}` : (profile.user ?? '');
+  where.innerHTML = '';
+  where.append('Address: ');
+  const addr = document.createElement('b');
+  addr.textContent = rdpAddress(profile);
+  where.appendChild(addr);
+  if (account) {
+    where.append('   User: ');
+    const user = document.createElement('b');
+    user.textContent = account;
+    where.appendChild(user);
+  }
+  const display = document.createElement('div');
+  display.className = 'rdp-line';
+  display.textContent = `Display: ${rdpDisplayLabel(profile)}${profile.adminSession ? ', console session' : ''}`;
+
+  const state = document.createElement('div');
+  state.className = 'rdp-state';
+  const note = document.createElement('div');
+  note.className = 'rdp-note';
+  const actions = document.createElement('div');
+
+  card.append(title, where, display, state, note, actions);
+  pane.appendChild(card);
+  wrapper.appendChild(pane);
+
+  pane.addEventListener('keydown', (e) => {
+    const key = e.key.toLowerCase();
+    if (key === 'enter') closePane(tab, paneIndexOf(tab, session));
+    else if (key === 'r') void reconnectSession(session);
+    else if (key === 'd' && !session.stopped) void disconnectSession(session);
+    else return;
+    e.preventDefault();
+  });
+
+  rdpPanes.set(session, { card, state, note, actions });
+  setRDPPaneState(session, launch.tracked ? 'running' : 'launched', launch.client);
+  pane.focus();
+}
+
+// The RDP form in the New Session picker. Reads the same fields the
+// saved-session editor writes, so a session typed here and one saved
+// there launch identically.
+function rdpProfileFromPicker(): SessionProfile | null {
+  const host = (document.getElementById('rdp-host') as HTMLInputElement).value.trim();
+  if (!host) return null;
+  const port = parseInt((document.getElementById('rdp-port') as HTMLInputElement).value, 10) || 3389;
+  const user = (document.getElementById('rdp-user') as HTMLInputElement).value.trim();
+  const domain = (document.getElementById('rdp-domain') as HTMLInputElement).value.trim();
+  const display = rdpDisplayFromChoice((document.getElementById('rdp-display') as HTMLSelectElement).value);
+  const adminSession = (document.getElementById('rdp-admin') as HTMLInputElement).checked;
+  return {
+    id: '', name: '', type: 'rdp', host, port,
+    user: user || undefined, domain: domain || undefined,
+    fullscreen: display.fullscreen || undefined,
+    width: display.width || undefined, height: display.height || undefined,
+    adminSession: adminSession || undefined,
+  };
+}
+
 // SPE-100: whole row is the click target. The old row bound click to
 // its label <span> only, so most of the row was dead space, and it kept
 // a delete X visible at half opacity on every row forever. Actions now
@@ -5489,6 +7026,7 @@ function renderSessionRow(s: SessionProfile, depth: number, live: Map<string, Se
 
 function sidebarSessionHost(s: SessionProfile): string {
   if (s.type === 'serial') return s.serialPort ? `${s.serialPort}@${s.baud ?? 9600}` : 'serial';
+  if (s.type === 'rdp') return (s.user ? `${s.user}@` : '') + rdpAddress(s);
   if (!s.host) return '';
   const port = s.port && s.port !== 22 ? `:${s.port}` : '';
   return (s.user ? `${s.user}@` : '') + s.host + port;
@@ -5620,20 +7158,30 @@ document.querySelectorAll('#session-editor .editor-tab').forEach((el) => {
 async function openSessionEditor(s: SessionProfile) {
   sessionEditorTarget = s;
   const isSerial = s.type === 'serial';
+  const isRDP = s.type === 'rdp';
 
   switchSessionEditorTab('basic');
 
   (document.getElementById('se-name') as HTMLInputElement).value = s.name;
 
-  document.getElementById('se-ssh-basic-fields')!.style.display = isSerial ? 'none' : 'flex';
+  document.getElementById('se-ssh-basic-fields')!.style.display = isSerial || isRDP ? 'none' : 'flex';
   document.getElementById('se-serial-basic-fields')!.style.display = isSerial ? 'flex' : 'none';
+  document.getElementById('se-rdp-basic-fields')!.style.display = isRDP ? 'flex' : 'none';
   // Device kind / key path only apply to SSH sessions, serial always
   // shows its own icon (matches the pre-SPE-62 context menu behavior).
-  document.getElementById('se-ssh-advanced-fields')!.style.display = isSerial ? 'none' : 'flex';
+  document.getElementById('se-ssh-advanced-fields')!.style.display = isSerial || isRDP ? 'none' : 'flex';
+  document.getElementById('se-rdp-advanced-fields')!.style.display = isRDP ? 'flex' : 'none';
 
   if (isSerial) {
     (document.getElementById('se-serial-port') as HTMLInputElement).value = s.serialPort ?? '';
     (document.getElementById('se-baud') as HTMLSelectElement).value = String(s.baud ?? 9600);
+  } else if (isRDP) {
+    (document.getElementById('se-rdp-host') as HTMLInputElement).value = s.host ?? '';
+    (document.getElementById('se-rdp-port') as HTMLInputElement).value = String(s.port ?? 3389);
+    (document.getElementById('se-rdp-user') as HTMLInputElement).value = s.user ?? '';
+    (document.getElementById('se-rdp-domain') as HTMLInputElement).value = s.domain ?? '';
+    (document.getElementById('se-rdp-display') as HTMLSelectElement).value = rdpChoiceFromProfile(s);
+    (document.getElementById('se-rdp-admin') as HTMLInputElement).checked = !!s.adminSession;
   } else {
     (document.getElementById('se-host') as HTMLInputElement).value = s.host ?? '';
     (document.getElementById('se-port') as HTMLInputElement).value = String(s.port ?? 22);
@@ -5698,6 +7246,16 @@ document.getElementById('se-save')!.addEventListener('click', async () => {
   if (s.type === 'serial') {
     updated.serialPort = (document.getElementById('se-serial-port') as HTMLInputElement).value.trim();
     updated.baud = parseInt((document.getElementById('se-baud') as HTMLSelectElement).value, 10);
+  } else if (s.type === 'rdp') {
+    updated.host = (document.getElementById('se-rdp-host') as HTMLInputElement).value.trim();
+    updated.port = parseInt((document.getElementById('se-rdp-port') as HTMLInputElement).value, 10) || 3389;
+    updated.user = (document.getElementById('se-rdp-user') as HTMLInputElement).value.trim() || undefined;
+    updated.domain = (document.getElementById('se-rdp-domain') as HTMLInputElement).value.trim() || undefined;
+    const display = rdpDisplayFromChoice((document.getElementById('se-rdp-display') as HTMLSelectElement).value);
+    updated.fullscreen = display.fullscreen || undefined;
+    updated.width = display.width || undefined;
+    updated.height = display.height || undefined;
+    updated.adminSession = (document.getElementById('se-rdp-admin') as HTMLInputElement).checked || undefined;
   } else {
     updated.host = (document.getElementById('se-host') as HTMLInputElement).value.trim();
     updated.port = parseInt((document.getElementById('se-port') as HTMLInputElement).value, 10) || 22;
@@ -6029,6 +7587,121 @@ function wordPattern(words: string[]): string {
   return String.raw`\b(?:${sorted.join('|')})\b`;
 }
 
+// --- The same reading, in the editor (plain text files) ---
+//
+// A .txt or .log file opened here is almost never prose. It is a `show
+// tech`, a syslog extract, an installer log, a capture somebody pasted
+// out of a session — the same material the terminal highlighter was
+// written for, sitting still instead of scrolling past. Monaco has no
+// tokenizer for plain text at all, so all of it arrived as one
+// undifferentiated grey wall.
+//
+// So the editor reads it the way the terminal does, off the same
+// vocabulary: the word lists above are the ones the terminal colours,
+// and the patterns below are the same patterns. Learning what a colour
+// means in one pane should teach you what it means in the other.
+//
+// The rules are ordered the way Monarch needs rather than the way
+// HIGHLIGHT_RULES is: Monarch anchors every rule at the current
+// position, so "specific before general" is the whole of the ordering
+// story here, and the terminal's lookbehind on the bare-clock rule
+// (which keeps it off the front of a MAC address) is replaced by
+// putting the MAC rule ahead of it plus a lookahead of its own.
+registerLanguage({
+  id: 'text',
+  // .txt is also claimed by Monaco's own plaintext, which has no
+  // tokenizer; languageForPath prefers whichever match is not that.
+  extensions: ['.txt', '.log', '.out', '.err', '.text'],
+  aliases: ['Text', 'Log', 'text', 'log'],
+  configuration: {
+    // No comment syntax and no brackets to pair: this is output, not
+    // source. Word characters include the hyphen so err-disabled and
+    // full-duplex are one word to double-click and one word to match.
+    wordPattern: /[A-Za-z0-9_][-A-Za-z0-9_.]*/,
+  },
+  tokenizer: {
+    defaultToken: '',
+    tokenPostfix: '.text',
+    ignoreCase: true,
+    good: GOOD_WORDS,
+    bad: BAD_WORDS,
+    warn: WARN_WORDS,
+    config: CONFIG_WORDS,
+    tokenizer: {
+      root: [
+        // Dated timestamps first: the ISO and syslog shapes start with
+        // digits or a month name and would otherwise be eaten piecemeal
+        // by the number and word rules at the bottom.
+        [/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/, 'time'],
+        [/\*?[A-Z][a-z]{2} {1,2}\d{1,2} \d{2}:\d{2}:\d{2}(?:\.\d+)?/, 'time'],
+
+        // Hardware addresses before the clock, and the clock before
+        // IPv6. All three are digits separated by colons, and each of
+        // these two orderings settles one of the collisions: a MAC
+        // whose leading octets are decimal would read as a time, and a
+        // time reads as a three-group IPv6 fragment. The lookahead on
+        // the clock rule is the other half of the MAC guard, for the
+        // case where the address is longer than the rule that matched.
+        [/[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}/, 'addr'],
+        [/(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}/, 'addr'],
+        [/\d{2}:\d{2}:\d{2}(?:\.\d+)?(?![0-9a-f:])/, 'time'],
+        // The :: forms first, and they are the reason there are three
+        // IPv6 rules rather than one: the run-length rule below cannot
+        // express a compressed address, because the zero-length group
+        // that :: stands for is exactly what {1,4} refuses to match. A
+        // literal :: is required by both, which is also what keeps them
+        // clear of a timestamp and a MAC address, neither of which has
+        // one.
+        [/[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*)?(?:\/\d{1,3})?/, 'addr'],
+        [/::[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*(?:\/\d{1,3})?/, 'addr'],
+        [/(?:[0-9a-f]{1,4}:){2,7}(?::|[0-9a-f]{1,4})(?:\/\d{1,3})?/, 'addr'],
+        [/(?:\d{1,3}\.){3}\d{1,3}(?:\/\d{1,2})?/, 'addr'],
+
+        // URLs and the %FACILITY-severity-MNEMONIC tag that leads every
+        // IOS log line. Ahead of the path rules, which would otherwise
+        // claim the // after a scheme.
+        [/(?:https?|ftps?|ssh|sftp|tftp|telnet|scp|rsync):\/\/[^\s"'<>]+/, 'meta'],
+        [/%[A-Z][A-Z0-9_]*-\d-[A-Z0-9_]+/, 'meta'],
+
+        // Filesystem paths, both conventions, two segments minimum so
+        // this does not fight the interface names over 1/0/1.
+        [/[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n ]+\\?)+/, 'path'],
+        [/~?\/[\w.@+-]+(?:\/[\w.@+-]+)+\/?/, 'path'],
+
+        // Interface names, long form and the abbreviations everybody
+        // types. Before the word rules: these are words too.
+        [/(?:Ten|Twenty|Forty|Fifty|Hundred|Gigabit|Fast|Ten-?Gigabit|Twenty-?Five|Four-?Hundred)?Ethernet\d+(?:\/\d+)*(?:\.\d+)?/, 'iface'],
+        [/(?:Port-channel|Bundle-Ether|Loopback|Tunnel|Serial|Vlan|Management|Multilink|Dialer|Async)\d+(?:\.\d+)?/, 'iface'],
+        [/(?:Gi|Te|Twe|Fo|Fi|Hu|Fa|Eth|Et|Po|Vl|Lo|Tu|Se|Ma|Bu)\d+(?:\/\d+)*(?:\.\d+)?/, 'iface'],
+        [/(?:eth|ens|enp|eno|wlan|wlp|bond|br|docker|veth|tun|tap|virbr)\d+[\w.]*/, 'iface'],
+
+        [/"[^"\n]{0,200}"/, 'string'],
+
+        // Sizes, rates and percentages read as one unit rather than a
+        // number followed by some letters, so they go before the plain
+        // number rule.
+        [/\d+(?:\.\d+)?\s?(?:[KMGTP]i?[Bb]|[KMGT]?bps|[KMGT]?pps|[num]?s)\b/, 'number'],
+        [/\d+(?:\.\d+)?%/, 'number'],
+        [/0x[0-9a-f]+/, 'number'],
+        [/\d+(?:\.\d+)?/, 'number'],
+
+        // The outcome words, last, so anything above that happens to be
+        // spelled like one keeps the more specific colour. Hyphens are
+        // inside the word: err-disabled and half-duplex are each one.
+        [/[A-Za-z][-A-Za-z0-9_]*/, {
+          cases: {
+            '@good': 'good',
+            '@bad': 'bad',
+            '@warn': 'warn',
+            '@config': 'config',
+            '@default': '',
+          },
+        }],
+      ],
+    },
+  },
+});
+
 type HighlightCategory =
   | 'good' | 'bad' | 'warn' | 'iface' | 'addr' | 'number'
   | 'string' | 'keyword' | 'meta' | 'path' | 'time';
@@ -6061,6 +7734,13 @@ const HIGHLIGHT_RULES: { category: HighlightCategory; pattern: string }[] = [
   // Hardware and network addresses.
   { category: 'addr', pattern: String.raw`\b[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}\b` },
   { category: 'addr', pattern: String.raw`\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b` },
+  // The compressed forms, which the run-length rule after them cannot
+  // reach: :: stands for a group of zero length, and {1,4} will not
+  // match one, so fe80::1 and ::1 were both being left uncoloured. Both
+  // require a literal ::, which is what keeps them off a timestamp and
+  // off a MAC address, neither of which contains one.
+  { category: 'addr', pattern: String.raw`\b[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*)?(?:\/\d{1,3})?` },
+  { category: 'addr', pattern: String.raw`::[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*(?:\/\d{1,3})?` },
   { category: 'addr', pattern: String.raw`\b(?:[0-9a-f]{1,4}:){2,7}(?::|[0-9a-f]{1,4})(?:\/\d{1,3})?` },
   { category: 'addr', pattern: String.raw`\b(?:\d{1,3}\.){3}\d{1,3}(?:\/\d{1,2})?\b` },
 
@@ -6379,6 +8059,10 @@ async function disconnectSession(session: Session) {
     await App.CloseSSH(session.backendId);
   } else if (session.mode === 'serial' && session.backendId) {
     await App.CloseSerial(session.backendId);
+  } else if (session.mode === 'rdp' && session.backendId) {
+    await App.CloseRDP(session.backendId);
+    markRDPEnded(session, 'Disconnected.');
+    return;
   } else {
     return; // nothing live to disconnect (pending or local shell sessions)
   }
@@ -6636,6 +8320,7 @@ function homeIsActive(): boolean {
 
 function homeSessionIcon(s: SessionProfile): string {
   if (s.type === 'serial') return '🔌';
+  if (s.type === 'rdp') return '🪟';
   if (s.deviceKind === 'switch') return '🔀';
   if (s.deviceKind === 'firewall') return '🛡️';
   return '🖥️';
@@ -6644,6 +8329,9 @@ function homeSessionIcon(s: SessionProfile): string {
 function homeSessionSubtitle(s: SessionProfile): string {
   if (s.type === 'serial') {
     return s.serialPort ? `${s.serialPort} @ ${s.baud ?? 9600}` : 'Serial';
+  }
+  if (s.type === 'rdp') {
+    return s.host ? `RDP ${(s.user ? `${s.user}@` : '') + rdpAddress(s)}` : 'Remote Desktop';
   }
   if (!s.host) return 'SSH';
   const port = s.port && s.port !== 22 ? `:${s.port}` : '';
@@ -7649,7 +9337,13 @@ document.getElementById('connect')!.addEventListener('click', async () => {
 // confusing for a first impression. Creates the terminal container up
 // front so there's always somewhere to show the message, reuses the
 // same disconnect panel SPE-59 built rather than a separate error UI.
-async function startLocalShellInActiveTab(shell: string, label: string, dir = '') {
+// onReady, when given, is called once the shell has produced its first
+// output. That is the only signal a PTY offers that anything is
+// listening on the other end: there is no "prompt drawn" event to wait
+// for, and writing at the moment of spawn races the shell's own
+// initialisation, which on PowerShell includes clearing the line it
+// would have been typed on. Used by the editor's Run button.
+async function startLocalShellInActiveTab(shell: string, label: string, dir = '', onReady?: (session: Session) => void) {
   const ownerTab = tabs.get(activeTabId!)!;
   const target: Session = pendingPaneTarget ?? ownerTab;
   target.label = label;
@@ -7694,10 +9388,19 @@ async function startLocalShellInActiveTab(shell: string, label: string, dir = ''
     }
   };
   renderTabBar();
-  runtime.EventsOn('local:data:' + id, (data: unknown) => writeToTerminal(target, data as string));
+  let greeted = false;
+  runtime.EventsOn('local:data:' + id, (data: unknown) => {
+    writeToTerminal(target, data as string);
+    if (greeted || !onReady) return;
+    greeted = true;
+    // A beat after the first write, not on it: a prompt usually arrives
+    // in more than one chunk, and typing between two of them lands in
+    // the middle of the line the shell is still drawing.
+    setTimeout(() => onReady(target), 250);
+  });
 }
 
-async function newLocalShellTab(shell: string, label: string, dir = '') {
+async function newLocalShellTab(shell: string, label: string, dir = '', onReady?: (session: Session) => void) {
   // SPE-92: always targets the fresh tab just created here, not a
   // pendingPaneTarget left over from an earlier split (this entry
   // point doesn't go through the session picker, the one place that
@@ -7705,7 +9408,7 @@ async function newLocalShellTab(shell: string, label: string, dir = '') {
   pendingPaneTarget = null;
   const tab = createPendingTab();
   switchToTab(tab.id);
-  await startLocalShellInActiveTab(shell, label, dir);
+  await startLocalShellInActiveTab(shell, label, dir, onReady);
 }
 
 async function newMoshSession() {
@@ -8222,6 +9925,11 @@ keepOpenToggle.addEventListener('change', () => {
   App.SaveSettings(appSettings);
 });
 
+const scrollbackSelect = document.getElementById('scrollback-select') as HTMLSelectElement;
+scrollbackSelect.addEventListener('change', () => {
+  applyScrollback(Number(scrollbackSelect.value));
+});
+
 document.getElementById('session-log-browse')!.addEventListener('click', async () => {
   const directory = await App.SelectDirectory();
   if (!directory) return;
@@ -8658,6 +10366,8 @@ function resetPickerView() {
   document.getElementById('picker-grid')!.style.display = 'grid';
   document.getElementById('picker-ssh-fields')!.style.display = 'none';
   document.getElementById('picker-serial-fields')!.style.display = 'none';
+  document.getElementById('picker-rdp-fields')!.style.display = 'none';
+  document.getElementById('rdp-connect-error')!.style.display = 'none';
   pendingQuickPort = null;
 }
 // SPE-103: the picker is four choices, which is exactly the case where
@@ -8666,7 +10376,7 @@ function resetPickerView() {
 // only applies while the picker is actually open, and skipped once a
 // protocol has been chosen and its fields are showing, where digits
 // belong to whatever field has focus.
-const PICKER_ITEM_IDS = ['picker-ssh', 'picker-shell', 'picker-serial', 'picker-telnet', 'picker-editor'];
+const PICKER_ITEM_IDS = ['picker-ssh', 'picker-shell', 'picker-serial', 'picker-telnet', 'picker-rdp', 'picker-editor'];
 
 function pickerGridVisible(): boolean {
   const overlay = document.getElementById('session-picker-overlay')!;
@@ -8789,6 +10499,35 @@ document.getElementById('picker-serial')!.addEventListener('click', () => {
 document.getElementById('picker-telnet')!.addEventListener('click', () => {
   closeSessionPicker();
   newTelnetSession();
+});
+document.getElementById('picker-rdp')!.addEventListener('click', () => {
+  document.getElementById('picker-grid')!.style.display = 'none';
+  document.getElementById('picker-rdp-fields')!.style.display = 'flex';
+  // The OS username, the same default the SSH form offers and for the
+  // same reason: on a domain it is usually the right answer, and it is
+  // never written over something already typed.
+  const userField = document.getElementById('rdp-user') as HTMLInputElement;
+  if (!userField.value) {
+    App.GetOSUsername().then((name) => {
+      if (name && !userField.value) userField.value = name;
+    }).catch(() => {});
+  }
+  (document.getElementById('rdp-host') as HTMLInputElement).focus();
+});
+document.getElementById('rdp-connect')!.addEventListener('click', async () => {
+  const profile = rdpProfileFromPicker();
+  if (!profile) {
+    reportRDPError('A host is required.');
+    return;
+  }
+  if (!pendingPaneTarget) ensurePendingTab();
+  await connectRDPInActiveTab(profile);
+});
+document.getElementById('picker-rdp-fields')!.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.target as HTMLElement).tagName === 'INPUT') {
+    e.preventDefault();
+    document.getElementById('rdp-connect')!.click();
+  }
 });
 document.getElementById('picker-editor')!.addEventListener('click', () => {
   closeSessionPicker();

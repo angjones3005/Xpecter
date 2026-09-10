@@ -48,6 +48,14 @@ export interface SessionProfile {
   x11?: boolean;
   serialPort?: string;
   baud?: number;
+  // RDP sessions (type 'rdp') reuse host/port/user and add these. No
+  // password field, by the same policy as SSH: the Remote Desktop
+  // client prompts for it.
+  domain?: string;
+  fullscreen?: boolean;
+  width?: number;
+  height?: number;
+  adminSession?: boolean;
   groupId?: string;
   tags?: string[];
   lastUsed?: string;
@@ -104,6 +112,15 @@ export interface SessionClosedEvent {
   eof: boolean;
   message: string;
 }
+// What LaunchRDP hands back: the id the pane is keyed by, the name of
+// the client that was started, and whether that process is the client
+// itself. On macOS it is not (`open` returns once it has handed the
+// file to Windows App), so the pane there cannot know when it closes.
+export interface RDPLaunch {
+  id: string;
+  client: string;
+  tracked: boolean;
+}
 // Global terminal personalization (SPE-61): wallpaper, color scheme,
 // and font, one set for the whole app, not per-session/per-tab.
 export interface Settings {
@@ -126,6 +143,9 @@ export interface Settings {
   sshKeepaliveDisabled?: boolean;
   sessionLogDirectory?: string;
   keepOpenOnLastTab?: boolean;
+  // Lines of output a terminal keeps after they scroll off the top.
+  // Absent or 0 means SCROLLBACK_DEFAULT, not xterm.js's own 1000.
+  scrollbackLines?: number;
 }
 // Check-for-updates: a GitHub releases API check on launch. Includes an
 // in-app download+launch flow (DownloadAndInstallUpdate below), the
@@ -169,6 +189,23 @@ export interface AppBindings {
   // Renames in place and returns the new path. A name already taken is
   // refused rather than overwritten.
   RenameLocalEntry(oldPath: string, newName: string): Promise<string>;
+  // Permanent: no trash, no undo. A directory is only walked when
+  // recursive is set, so the caller has to have counted what is inside
+  // it and asked, rather than finding out afterwards.
+  DeleteLocalEntry(path: string, recursive: boolean): Promise<void>;
+  // "text", "binary" or "large": what the editor should do with a path
+  // before committing to reading all of it. A separate call rather than
+  // an error out of ReadLocalFile, so the three answers stay
+  // distinguishable without matching on message text.
+  ClassifyLocalFile(path: string): Promise<string>;
+  // Hands a local path to the OS default handler. Used for files the
+  // editor cannot show, and by the Run button for HTML.
+  OpenLocalPathExternally(path: string): Promise<void>;
+  // Raw bytes, base64-encoded, for the viewers that need the file
+  // intact rather than as text. Both refuse a file too large to hold in
+  // memory on both sides of the bridge at once.
+  ReadLocalFileBase64(path: string): Promise<string>;
+  ReadRemoteFileBase64(id: string, path: string): Promise<string>;
   // Makes the watched set exactly `dirs` and emits "fs:changed" with the
   // directories whose listings changed. Pass [] to drop every watch.
   WatchLocalDirs(dirs: string[]): Promise<void>;
@@ -202,6 +239,11 @@ export interface AppBindings {
   ListBackups(): Promise<string[]>;
   RestoreBackup(filename: string): Promise<void>;
   ConnectSerial(portName: string, baud: number): Promise<string>;
+  // Starts the platform's Remote Desktop client for a profile and tracks
+  // it; "rdp:closed:<id>" fires when a tracked client exits on its own.
+  LaunchRDP(profile: SessionProfile): Promise<RDPLaunch>;
+  // Deliberate: closes the Remote Desktop window, no rdp:closed follows.
+  CloseRDP(id: string): Promise<void>;
   WriteSerial(id: string, data: string): Promise<void>;
   CloseSerial(id: string): Promise<void>;
   ListSerialPorts(): Promise<string[]>;
@@ -232,6 +274,9 @@ export interface AppBindings {
   CreateRemoteFile(id: string, dir: string, name: string): Promise<string>;
   CreateRemoteDir(id: string, dir: string, name: string): Promise<string>;
   RenameRemoteEntry(id: string, oldPath: string, newName: string): Promise<string>;
+  // Same split as DeleteLocalEntry, and the same absence of a trash to
+  // recover from.
+  DeleteRemoteEntry(id: string, path: string, recursive: boolean): Promise<void>;
 }
 interface WailsRuntime {
   EventsOn(eventName: string, callback: (...data: unknown[]) => void): () => void;

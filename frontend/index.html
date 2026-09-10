@@ -171,6 +171,14 @@
     .pane-term-host { height: 100%; position: relative; }
     .term-wallpaper-layer { display: none; }
     .term-instance .xterm, .term-instance .xterm-viewport, .term-instance .xterm-screen, .term-instance canvas { background: transparent !important; background-color: transparent !important; }
+    /* The hover shown over a URL in terminal output, the counterpart to
+       Monaco's own link hover in an editor pane. Positioned by script
+       against the terminal it belongs to; .xterm-hover is xterm's own
+       class and is what keeps the pointer counted as still being on the
+       link rather than on the box describing it. */
+    .term-link-hover { position: absolute; z-index: 30; max-width: 460px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--bg-alt); color: var(--text); font-size: 11.5px; line-height: 1.5; pointer-events: none; box-shadow: 0 4px 14px rgba(0,0,0,0.35); }
+    .term-link-hover .term-link-url { color: var(--accent-ink); word-break: break-all; font-family: Menlo, Consolas, monospace; }
+    .term-link-hover .term-link-hint { color: var(--text-dim); font-size: 10.5px; margin-top: 2px; }
     .pane-landing { flex: 1; display: flex; align-items: center; justify-content: center; }
     .pane-landing-btn { padding: 8px 18px; font-size: 13px; }
     /* --- Text editor sessions (SPE-103) ---
@@ -180,8 +188,16 @@
        shell. Document tabs, the Monaco host and a status bar stack
        vertically inside it. */
     .editor-view { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); }
-    .editor-doc-bar { flex: 0 0 auto; display: flex; align-items: stretch; overflow-x: auto; background: var(--bg-alt); border-bottom: 1px solid var(--border); scrollbar-width: none; }
-    .editor-doc-bar::-webkit-scrollbar { display: none; }
+    /* The bar itself no longer scrolls: only the strip of document tabs
+       inside it does. The folder button on one end and the run button on
+       the other are pinned, so neither is scrolled out of reach once
+       enough files are open. */
+    .editor-doc-bar { flex: 0 0 auto; display: flex; align-items: stretch; overflow: hidden; background: var(--bg-alt); border-bottom: 1px solid var(--border); }
+    .doc-strip { flex: 1 1 auto; min-width: 0; display: flex; align-items: stretch; overflow-x: auto; scrollbar-width: none; }
+    .doc-strip::-webkit-scrollbar { display: none; }
+    .doc-run { flex: 0 0 auto; display: flex; align-items: center; gap: 5px; padding: 0 11px; cursor: pointer; color: var(--text-dim); border-left: 1px solid var(--border); font-size: 11.5px; white-space: nowrap; }
+    .doc-run:hover { background: var(--hover); color: var(--success); }
+    .doc-run .doc-run-glyph { font-size: 9px; line-height: 1; }
     .doc-tab { display: flex; align-items: center; gap: 7px; padding: 6px 8px 6px 11px; font-size: 12px; color: var(--text-dim); border-right: 1px solid var(--border); cursor: pointer; white-space: nowrap; max-width: 230px; }
     .doc-tab:hover { background: var(--hover); }
     .doc-tab.active { background: var(--bg); color: var(--text); box-shadow: inset 0 2px 0 var(--accent); }
@@ -204,7 +220,8 @@
     /* SPE-106: the folder control heads the document strip. The empty
        state used to be the only way to reach Open Folder, and it is
        gone the moment there is a buffer open. */
-    .doc-folder { display: flex; align-items: center; gap: 5px; padding: 0 10px; cursor: pointer; color: var(--text-dim); border-right: 1px solid var(--border); font-size: 11.5px; white-space: nowrap; }
+    .doc-folder { flex: 0 0 auto; max-width: 190px; display: flex; align-items: center; gap: 5px; padding: 0 10px; cursor: pointer; color: var(--text-dim); border-right: 1px solid var(--border); font-size: 11.5px; white-space: nowrap; }
+    .doc-folder .doc-folder-name { overflow: hidden; text-overflow: ellipsis; }
     .doc-folder:hover { background: var(--hover); color: var(--text); }
     .doc-folder.active { color: var(--accent-ink); }
     .doc-folder .caret { font-size: 9px; opacity: 0.7; }
@@ -237,9 +254,31 @@
     .tree-row .act { flex: 0 0 auto; opacity: 0; padding: 0 2px; font-size: 11px; }
     .tree-row:hover .act { opacity: 0.5; }
     .tree-row .act:hover { opacity: 1; color: var(--text); }
+    .tree-row .act.danger:hover { color: var(--danger); }
     .editor-tree-note { padding: 4px 12px; font-size: 11px; color: var(--text-dim); }
     .editor-host { position: absolute; inset: 0; }
     .editor-empty { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 18px; padding: 24px; box-sizing: border-box; text-align: center; overflow-y: auto; }
+    /* A PDF viewer sits in the same box the Monaco host does, one per
+       open PDF, and only the active one is shown. Monaco is hidden
+       rather than unmounted while one is on top of it. */
+    .editor-pdf { position: absolute; inset: 0; display: none; flex-direction: column; background: var(--bg-alt); }
+    .editor-view.viewing-pdf .editor-host { visibility: hidden; }
+    .pdf-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; padding: 4px 8px; background: var(--bg-alt); border-bottom: 1px solid var(--border); font-size: 11.5px; color: var(--text-dim); }
+    /* Overrides the app's default button, which is a solid accent-blue
+       call to action: a row of those across a viewer toolbar would shout
+       over the document they are there to serve. */
+    .pdf-bar-btn { padding: 2px 8px; font-size: 11.5px; font-weight: 500; background: transparent; color: var(--text-dim); border: 1px solid transparent; border-radius: 4px; box-shadow: none; }
+    .pdf-bar-btn:hover { background: var(--hover); color: var(--text); box-shadow: none; }
+    .pdf-bar-btn:active { transform: none; box-shadow: none; }
+    .pdf-bar-zoom { min-width: 42px; text-align: center; font-variant-numeric: tabular-nums; }
+    .pdf-bar-page { margin-left: 10px; font-variant-numeric: tabular-nums; }
+    .pdf-bar-right { margin-left: auto; }
+    /* The scrolling half. Centred, with room around the pages so a white
+       page reads as a page rather than as the pane's background. */
+    .pdf-pages { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 16px 20px; }
+    .pdf-page { flex: 0 0 auto; background: #ffffff; box-shadow: 0 2px 10px rgba(0,0,0,0.35); }
+    .pdf-page canvas { display: block; }
+    .pdf-page-error { padding: 12px; color: var(--danger); font-size: 12px; }
     .editor-view.empty .editor-host { visibility: hidden; }
     .editor-view.empty .editor-empty { display: flex; }
     .editor-empty h2 { margin: 0 0 5px; font-size: 18px; font-weight: 600; }
@@ -453,6 +492,10 @@
       align-items: center; justify-content: center; z-index: 2000;
       padding: 20px; box-sizing: border-box;
     }
+    /* Scrollable, so a dialog taller or wider than the viewport (a small
+       window, or the webview zoomed in) can still be reached in full
+       rather than having its bottom or right edge cut off. */
+    #session-picker-overlay, #lsp-editor-overlay, #session-editor-overlay { overflow: auto; }
     #session-picker-overlay.open, #lsp-editor-overlay.open, #session-editor-overlay.open,
     #shortcuts-overlay.open, #backup-restore-overlay.open, .dialog-overlay.open { display: flex; }
     #session-picker, #lsp-editor, #session-editor,
@@ -581,6 +624,24 @@
       box-shadow: 0 4px 16px rgba(0,0,0,0.4);
       z-index: 10;
     }
+    /* A Remote Desktop session's pane. There is no terminal in it: the
+       desktop is drawn by the system's own client in its own window, and
+       this card is what stands for the session inside Xpecter — where it
+       is, what is showing it, whether it is still up, and the same
+       R/D/Enter actions a stopped terminal offers. */
+    .rdp-pane { flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px; outline: none; }
+    .rdp-card { width: min(540px, 100%); box-sizing: border-box; background: var(--bg-alt); border: 1px solid var(--border); border-top: 2px solid var(--success); border-radius: 8px; padding: 16px 18px; font-family: Menlo, Consolas, monospace; font-size: 12.5px; box-shadow: 0 4px 16px rgba(0,0,0,0.3); }
+    .rdp-card.ended { border-top-color: var(--danger); }
+    .rdp-card.launched { border-top-color: var(--warning); }
+    .rdp-card .rdp-title { display: flex; align-items: center; gap: 8px; font-weight: bold; font-size: 14px; margin-bottom: 8px; }
+    .rdp-card .rdp-line { color: var(--text-dim); margin: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .rdp-card .rdp-line b { color: var(--text); font-weight: 500; }
+    .rdp-card .rdp-state { margin: 10px 0 4px; font-weight: 600; }
+    .rdp-card .rdp-state.running { color: var(--success); }
+    .rdp-card .rdp-state.ended { color: var(--danger); }
+    .rdp-card .rdp-state.launched { color: var(--warning); }
+    .rdp-card .rdp-note { color: var(--text-dim); font-size: 11.5px; line-height: 1.5; margin-bottom: 10px; }
+    .rdp-pane:focus .rdp-card { box-shadow: 0 0 0 2px var(--accent-soft), 0 4px 16px rgba(0,0,0,0.3); }
     .disconnect-title { color: var(--danger); font-weight: bold; margin-bottom: 6px; }
     .disconnect-action { display: flex; align-items: center; gap: 8px; padding: 3px 2px; cursor: pointer; color: var(--text); border-radius: 4px; }
     .disconnect-action:hover { background: var(--hover); }
@@ -800,6 +861,10 @@
 
       <div class="settings-group">
         <div class="settings-group-title">Terminal</div>
+        <div class="settings-row"><label for="scrollback-select">Scrollback</label>
+          <select id="scrollback-select"></select>
+        </div>
+        <div class="settings-note">How far back you can scroll in a terminal. Every retained line is held in memory for as long as the session is open, so the largest sizes cost real memory across a window full of panes. Lowering this discards anything already above the new limit.</div>
         <div class="settings-row"><label><input type="checkbox" id="highlight-toggle" checked /> Colorize terminal output</label></div>
         <div class="settings-row"><label><input type="checkbox" id="show-tab-numbers-toggle" /> Show tab numbers</label></div>
         <div class="settings-row"><label><input type="checkbox" id="ssh-keepalive-toggle" checked /> SSH keepalive (prevent idle disconnects)</label></div>
@@ -991,15 +1056,23 @@
           <span class="picker-name">Telnet</span>
           <span class="picker-desc">Unencrypted, for legacy gear</span>
         </div>
-        <div class="picker-item picker-wide" id="picker-editor" tabindex="0" role="button">
+        <div class="picker-item picker-wide" id="picker-rdp" tabindex="0" role="button">
           <span class="picker-key">5</span>
+          <span class="icon">&#129703;</span>
+          <span class="picker-text">
+            <span class="picker-name">Remote Desktop</span>
+            <span class="picker-desc">RDP to a Windows machine, opened in your system's Remote Desktop client</span>
+          </span>
+        </div>
+        <div class="picker-item picker-wide" id="picker-editor" tabindex="0" role="button">
+          <span class="picker-key">6</span>
           <span class="icon">&#128221;</span>
           <span class="picker-text">
             <span class="picker-name">Editor</span>
             <span class="picker-desc">Edit local files and files on any connected host &mdash; no connection of its own</span>
           </span>
         </div>
-        <div class="picker-foot">Press 1-5 to choose, or Esc to close.</div>
+        <div class="picker-foot">Press 1-6 to choose, or Esc to close.</div>
       </div>
       <div id="picker-serial-fields" style="display:none;flex-direction:column;gap:8px;padding:16px;">
         <input id="serial-port" placeholder="/dev/ttyUSB0 or COM3" class="dialog-field" />
@@ -1011,6 +1084,28 @@
           <option value="115200">115200</option>
         </select>
         <button id="serial-connect" style="padding:6px;">Connect</button>
+      </div>
+      <div id="picker-rdp-fields" style="display:none;flex-direction:column;gap:8px;padding:16px;">
+        <!-- First, before any field, because it is the one thing about
+             this form that differs from every other one here: there is
+             no password box, and a person expecting one will otherwise
+             put the password in the nearest empty field. -->
+        <div class="settings-note" style="margin:0 0 2px;">Opens in your system's Remote Desktop client, which asks for the password itself. Xpecter stores only the address, user and display settings.</div>
+        <input id="rdp-host" placeholder="host" class="dialog-field" />
+        <input id="rdp-port" placeholder="port (3389)" type="number" class="dialog-field" />
+        <input id="rdp-user" placeholder="user" class="dialog-field" />
+        <input id="rdp-domain" placeholder="domain — optional, e.g. CORP (not a password)" class="dialog-field" />
+        <input disabled placeholder="password — Remote Desktop will ask for it" class="dialog-field" title="Xpecter never stores a password; the Remote Desktop client prompts for it when it opens." />
+        <select id="rdp-display" class="dialog-field">
+          <option value="fullscreen">Full screen</option>
+          <option value="window" selected>Resizable window (desktop follows the size)</option>
+          <option value="1280x800">Window, 1280 × 800 (scaled)</option>
+          <option value="1600x900">Window, 1600 × 900 (scaled)</option>
+          <option value="1920x1080">Window, 1920 × 1080 (scaled)</option>
+        </select>
+        <label><input id="rdp-admin" type="checkbox" /> Console session (/admin)</label>
+        <div id="rdp-connect-error" style="display:none;color:var(--danger);font-size:12px;"></div>
+        <button id="rdp-connect" style="padding:6px;">Connect</button>
       </div>
       <div id="picker-ssh-fields" style="display:none;padding:16px;display:none;flex-direction:column;gap:8px;">
         <input id="host" placeholder="host" class="dialog-field" />
@@ -1096,8 +1191,26 @@
             <option value="115200">115200</option>
           </select>
         </div>
+        <div id="se-rdp-basic-fields" style="display:none;flex-direction:column;gap:8px;">
+          <div class="settings-note" style="margin:0 0 2px;">Opens in your system's Remote Desktop client, which asks for the password itself. Only the address, user and display settings are saved.</div>
+          <input id="se-rdp-host" placeholder="host" class="dialog-field" />
+          <input id="se-rdp-port" placeholder="port (3389)" type="number" class="dialog-field" />
+          <input id="se-rdp-user" placeholder="user" class="dialog-field" />
+          <input id="se-rdp-domain" placeholder="domain — optional, e.g. CORP (not a password)" class="dialog-field" />
+          <input disabled placeholder="password — Remote Desktop will ask for it" class="dialog-field" title="Xpecter never stores a password; the Remote Desktop client prompts for it when it opens." />
+        </div>
       </div>
       <div class="editor-tab-content" id="session-editor-tab-advanced" style="display:none;">
+        <div id="se-rdp-advanced-fields" style="display:none;flex-direction:column;gap:10px;">
+          <select id="se-rdp-display" class="dialog-field">
+            <option value="fullscreen">Full screen</option>
+            <option value="window">Resizable window (desktop follows the size)</option>
+            <option value="1280x800">Window, 1280 × 800 (scaled)</option>
+            <option value="1600x900">Window, 1600 × 900 (scaled)</option>
+            <option value="1920x1080">Window, 1920 × 1080 (scaled)</option>
+          </select>
+          <label><input id="se-rdp-admin" type="checkbox" /> Console session (/admin)</label>
+        </div>
         <div id="se-ssh-advanced-fields" style="display:flex;flex-direction:column;gap:10px;">
           <div style="display:flex;gap:6px;">
             <input id="se-keypath" readonly placeholder="Password auth (no key)" style="flex:1;min-width:0;box-sizing:border-box;background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:5px 8px;" />

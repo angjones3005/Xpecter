@@ -45,6 +45,23 @@ produces a build warning and, across larger gaps, real breakage.
 Both scripts put the toolchain on `PATH` themselves, so they work from a
 shell that has never seen it.
 
+## The Frontend Build Has A Prepare Step
+
+`npm run dev` and `npm run build` both run `npm run prepare-assets`
+first, which copies PDF.js's standard PDF fonts out of `node_modules`
+into `frontend/public/pdfjs/`. Vite serves and ships `public/` verbatim,
+so this is what puts those fonts under the served root in both dev and
+production.
+
+They are copied rather than committed: they are third-party binaries
+that pdfjs-dist already carries, and `frontend/public/pdfjs/` is
+gitignored. The consequence to know about is that **`vite` and `vite
+build` must not be invoked directly** — do that and the directory is
+missing, and PDFs that name a standard font without embedding it render
+with the wrong fonts or not at all. Use the npm scripts, which every
+other entrypoint here (`scripts/check.ps1`, `scripts/build.ps1`,
+`wails build`, CI) already does.
+
 ## Two Ordering Traps
 
 These are the only non-obvious things about building this repo. Both are

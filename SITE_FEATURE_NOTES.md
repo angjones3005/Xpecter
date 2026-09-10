@@ -84,6 +84,15 @@ Import common INI-style `.mxtsessions` and `.ini` files from MobaXterm. Xpecter 
 ### Session tags
 Add comma-separated tags to saved sessions. Xpecter trims and de-duplicates tags, and Quick Connect searches them.
 
+### Remote Desktop sessions
+RDP is a session type. A Remote Desktop session is saved in the Sessions panel beside SSH and serial ones — with its host, port, user, domain and display settings, and never a password — and is pinned, grouped, tagged, filtered and opened with a click like any other. New Session offers it as choice 5, and a session typed there can be saved on the spot.
+
+The desktop itself is drawn by the client the platform already has: Remote Desktop Connection on Windows, Windows App on macOS, FreeRDP or Remmina on Linux. Xpecter writes the session out as a `.rdp` file with everything filled in, starts that client on it, and keeps a pane that stands for the session — where it went, which client has it, whether the window is still open — with R to open it again, D to close the window from Xpecter, and Enter to close the pane. The sidebar shows the session live while the window is up. On macOS the client is handed the file and not watched, and the pane says so. Quitting Xpecter leaves open Remote Desktop windows alone.
+
+The display choice is full screen, a resizable window whose remote desktop follows the window size as you drag it (dynamic resolution), or a fixed resolution that scales into whatever window you give it (smart sizing) — so a window is a real, usable window rather than one opened at a stale size. FreeRDP gets the matching `/dynamic-resolution` or `/smart-sizing`.
+
+Why not inside the window: Xpecter's surface is a webview, and a remote desktop wants a native client. The pure-Go RDP implementations available could not be brought to a standard worth shipping without a server to test against, and a Remote Desktop that mostly connects is worse than one that always does.
+
 ### Persistent command snippets
 Save frequently used commands or configuration blocks as snippets. They appear in the Terminal menu and insert into the focused session through the existing paste safety guard.
 
@@ -124,8 +133,25 @@ Drag the edge of the workspace tree to give a long filename the room to show, or
 ### Creating files and folders
 Add a file or a folder to the workspace you already have open. The tree header creates at the root, and every folder row offers the same two actions for creating inside it. A new file opens for editing straight away. A name already taken is refused rather than quietly overwriting what is there.
 
+### Deleting files and folders
+Every row in the workspace tree can be deleted, and so can the file open in the editor, from the command palette. Deleting asks first, in a dialog that names the full path and, for a folder, counts what is going with it, because nothing here goes to a recycle bin: a delete is permanent and there is nothing to restore it from. A folder shown as empty is deleted as an empty folder, so one that gained a file in the meantime is refused rather than quietly taking it. An unmodified buffer open on a deleted file closes with it; a buffer with unsaved changes is deliberately left open, because its contents are then the only copy left.
+
 ### The tree keeps up with the folder
 A file added to an open folder by anything other than Xpecter — a build, a download, a shell in the next pane — appears in the tree on its own, as it happens. Xpecter watches exactly the folders on screen, so a busy directory you have collapsed costs nothing. The tree is redrawn only when something has really changed, so scroll position and expanded folders survive, and a burst of writes redraws once rather than once per file. A slow re-read runs underneath as a backstop, for the filesystems that accept a watch and then quietly never report anything.
+
+### Colour in plain text and logs
+A `.txt` or `.log` file is rarely prose here — it is a capture, a syslog extract, an installer log, output somebody pasted out of a session — and Monaco has no tokenizer for plain text at all, so all of it arrived as one grey wall. The editor now reads those files the way the terminal reads output, off the same vocabulary and in the same colours: outcomes, IPv4, IPv6 and MAC addresses, interface names in both long and abbreviated form, timestamps, `%FACILITY-severity-MNEMONIC` log tags, URLs, filesystem paths in either convention, and sizes and rates as whole units. Learning what a colour means in one pane teaches you what it means in the other. It applies to `.txt`, `.log`, `.out`, `.err` and `.text`, and any other file can be switched to it from Set Language.
+
+### Running the file you are editing
+A run button sits at the end of the document bar for files Xpecter knows how to run, and Run File is in the command palette for the rest. HTML opens in whichever browser the system uses for it. Scripts — Python, PowerShell, shell, batch and Node — open a shell in the file's own directory and run there, in a live shell rather than as the terminal's only process, so the output stays on screen when the script finishes and Up-Enter runs it again. The file is always saved first, and an unsaved buffer is sent to Save As, because running the previous version of a file you have just edited is a confusing way to lose ten minutes. A script opened from a host runs on that host, in the session it was opened from.
+
+### Reading PDFs
+PDFs open in Xpecter rather than being handed to another application. A PDF is a document like any other here: it gets a tab in an editor pane, it opens from the workspace tree and from the SFTP browser, and one on a host opens straight from the host without being downloaded first. The viewer fits the page to the pane when it opens, and has zoom, an actual-size and a fit-width button, and a page counter that follows as you scroll. Pinch to zoom on a trackpad or touchscreen (Ctrl+scroll with a mouse) zooms around the point under the cursor, not the middle of the page. Pages are drawn as they come into view, so a 400-page manual opens as fast as a one-page memo. Switching to another tab and back keeps the document exactly where it was.
+
+Rendering is Xpecter's own rather than the webview's, because only two of the three platforms it runs on have a built-in PDF viewer; doing it this way means it looks and behaves the same on all of them. A PDF is opened for reading and is never written back — saving is refused rather than quietly doing nothing — and Open Outside Xpecter is there in the toolbar and the command palette for the times you want the system viewer after all.
+
+### Opening anything in a folder
+The tree lists everything a folder holds and every row opens. Files Xpecter cannot show — programs, archives, PDFs, office documents, images, media, databases — are handed to the application the system already uses for them, and so is anything whose contents turn out to be binary or in a text encoding the editor cannot read. Opening something that is a program rather than a document asks first, because a single click in a file tree should not be able to start one silently. Files too large for the editor say so rather than taking the window with them.
 
 ### Local and remote files
 Open and save files on the local machine, and write a buffer to any host you are connected to over SFTP. Files opened from the remote browser edit in the same panes as local ones. Reload From Disk re-reads a file that changed underneath you.
@@ -158,6 +184,9 @@ Open PDFs, images, and other remote files with the operating system's default ap
 ### Creating and renaming on the host
 The remote browser has the same workspace actions as the editor's folder tree. Its header adds a file or a folder to the directory you are looking at, every folder row offers the same two for creating inside it, and every row can be renamed in place. A new file opens for editing straight away. A name already taken is refused rather than overwriting what is there, for both creating and renaming. Renaming a file that is currently open retargets the buffer, so saving writes to the new name instead of recreating the old one.
 
+### Deleting on the host
+Files and directories can be removed from the remote browser, with the same confirmation the local tree uses and the same counting of what a directory holds. This one is permanent in a stronger sense — SFTP has no trash, and it is somebody else's machine — so the dialog says so, and a directory is only walked once that has been answered. Open buffers are treated exactly as they are locally: unmodified ones close, unsaved ones stay.
+
 ### The remote browser keeps up with the directory
 The remote file list re-reads the directory it is showing and updates when its contents change, so a file written by the session in the terminal beside it shows up without a manual refresh. It runs on a slower clock than the local tree because each listing is a round trip to the host, and it stops entirely when the sidebar or the section is closed, when the window is in the background, or when the browser is pointed at a host that is not the focused tab.
 
@@ -178,6 +207,12 @@ The same highlighting pipeline works across Linux VMs, network switches, PowerSh
 - Numbers, including sizes, rates, percentages, and hex
 
 Text the far end already coloured is left exactly as it sent it, so a prompt, a pager, or vim is never recoloured. Escape sequences pass through untouched, including ones split across backend reads.
+
+### Scrollback
+Terminals keep 10,000 lines of output by default, rather than xterm.js's own 1,000, which a single verbose command can scroll past entirely. The size is adjustable in Settings, from 1,000 up to 100,000 lines, and is worth thinking about rather than simply maximising: every retained line is held in memory, per terminal, for as long as that session is open. Lowering it discards whatever is already above the new limit.
+
+### Links in output
+A URL printed by a session is not just coloured, it can be followed. Hovering underlines it and shows where it goes, and Ctrl+click (Cmd+click on macOS) opens it in the system browser — the same gesture the editor pane beside it already answers to, rather than a second convention inside one window. A bare click does nothing, so finishing a selection or focusing a pane can never launch a browser. Links that wrap across the edge of the pane are recognised whole, and trailing sentence punctuation is left out of the address without breaking the parenthesised URLs that genuinely end in a bracket.
 
 ### Terminal colour schemes
 Choose from Dark, Light, Dracula, Solarized Dark, Solarized Light, Gruvbox Dark, One Dark, and Tokyo Night. The highlighting palette follows the scheme rather than being fixed against it.
@@ -211,7 +246,7 @@ Sidebar, editor, and terminal panes can be resized by dragging their dividers. E
 
 ## Current Scope Notes
 
-- VNC and RDP are not yet integrated; both require dedicated graphical client surfaces.
+- RDP sessions are saved and launched here but drawn by the platform's own Remote Desktop client; VNC is not yet integrated, for the same reason (it needs a graphical client surface).
 - Automatic cloud-provider browsing and background sync are not yet integrated; encrypted BYO-storage bundles are available.
 - Full macro recording/replay and a plugin architecture remain future productivity features.
 - Dynamic SOCKS forwarding and remote SSH forwarding remain future tunnel-manager work.
