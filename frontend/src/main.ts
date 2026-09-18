@@ -10,6 +10,8 @@ import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import * as monaco from 'monaco-editor';
+import DOMPurify, { type Config as PurifyConfig } from 'dompurify';
+import { renderMarkdown, headingSlug, taskMarkerAt, countWords, type FrontMatter } from './markdown';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import JsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
 import CssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker';
@@ -3091,6 +3093,10 @@ interface EditorDoc {
   kind: 'text' | 'pdf' | 'image';
   pdf: PdfView | null;
   image: ImageView | null;
+  // A Markdown file is a text document with a second face: the rendered
+  // reading view. Present for .md files only; which face is showing is
+  // markdown.mode, and the buffer behind both is the same model.
+  markdown: MarkdownView | null;
   model: monaco.editor.ITextModel;
   viewState: monaco.editor.ICodeEditorViewState | null;
   // model.getAlternativeVersionId() as of the last open or save. Monaco
@@ -3155,6 +3161,9 @@ type EditorPrefs = {
   // from prefs written before this existed, which the spread over
   // DEFAULT_EDITOR_PREFS fills in.
   treeWidth: number;
+  // Which face a Markdown file opens with. Follows the last toggle, so
+  // someone who keeps switching to source stops having to.
+  markdownMode: MarkdownMode;
 };
 
 const DEFAULT_EDITOR_PREFS: EditorPrefs = {
@@ -3164,6 +3173,7 @@ const DEFAULT_EDITOR_PREFS: EditorPrefs = {
   tabSize: 4,
   insertSpaces: true,
   treeWidth: 212,
+  markdownMode: 'reading',
 };
 
 // Below this the header's five action glyphs collide with the folder
@@ -4215,6 +4225,507 @@ async function openPdfFile(path: string, isLocal: boolean, remoteSessionId: stri
   flashStatus(`Opened ${name}`);
 }
 
+// --- Markdown documents ---
+//
+// A .md file is read far more often than it is edited, and what is in
+// it is written to be read rendered: the runbook you are following, the
+// notes on a host, a vault of them. So a Markdown document has two
+// faces on the same buffer. The reading view is the rendered note, the
+// way Obsidian shows one: callouts, wikilinks that open the note they
+// name, tasks you can tick off, images off disk, the front matter as a
+// properties table. Source is Monaco on the same model. Ctrl+E flips
+// between them, and the face a file opens with follows the last flip.
+//
+// The rendering itself is in markdown.ts. What lives here is the part
+// that needs the editor: which file [[Note]] is, how an image gets off
+// disk and into an <img>, how a tick lands back in the buffer.
+
+type MarkdownMode = 'reading' | 'source';
+
+type MarkdownView = {
+  container: HTMLDivElement;
+  // The scrolling area. Focusable, so PageDown and Ctrl+E work as soon
+  // as the note is on screen.
+  body: HTMLDivElement;
+  page: HTMLDivElement;
+  mode: MarkdownMode;
+  // The buffer changed while the reading view was not showing, so it
+  // is rendered on the way back rather than on every keystroke.
+  stale: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
+  // Bumped per render: an image that finishes loading for a render that
+  // has since been replaced is dropped rather than put into the new one.
+  generation: number;
+  // Resolved image data, by the src as written, so a re-render after a
+  // keystroke does not read every picture off disk again.
+  assets: Map<string, Promise<string | null>>;
+};
+
+const MARKDOWN_EXTENSIONS = new Set(['.md', '.markdown', '.mdown', '.mkd']);
+
+function isMarkdownPath(path: string | null): boolean {
+  return !!path && MARKDOWN_EXTENSIONS.has(extensionOf(path));
+}
+
+function buildMarkdownView(pane: EditorPane, doc: EditorDoc): MarkdownView {
+  const container = document.createElement('div');
+  container.className = 'editor-markdown';
+  // Code blocks in the note use the editor's own monospace face.
+  container.style.setProperty('--md-mono', fontStack(appSettings.fontFamily || FONT_OPTIONS[0].value));
+  const body = document.createElement('div');
+  body.className = 'md-body';
+  body.tabIndex = 0;
+  const page = document.createElement('div');
+  page.className = 'md-page';
+  body.appendChild(page);
+  container.appendChild(body);
+  pane.body.appendChild(container);
+  const view: MarkdownView = {
+    container,
+    body,
+    page,
+    mode: editorPrefs.markdownMode === 'source' ? 'source' : 'reading',
+    stale: true,
+    timer: null,
+    generation: 0,
+    assets: new Map(),
+  };
+  body.addEventListener('click', (event) => handleMarkdownClick(pane, doc, event));
+  body.addEventListener('change', (event) => {
+    const input = event.target as HTMLInputElement | null;
+    if (input && input.classList.contains('md-task')) toggleMarkdownTask(doc, input);
+  });
+  return view;
+}
+
+function destroyMarkdownView(view: MarkdownView) {
+  if (view.timer) clearTimeout(view.timer);
+  view.container.remove();
+}
+
+// Called on every change to the buffer. Only a visible reading view is
+// worth rendering now, and then only once the typing pauses; a hidden
+// one is marked and caught up when it is next shown.
+function scheduleMarkdownRender(doc: EditorDoc) {
+  const view = doc.markdown;
+  if (!view) return;
+  if (view.timer) clearTimeout(view.timer);
+  const pane = editorPanes.get(doc.ownerPaneId);
+  if (view.mode !== 'reading' || pane?.activeDocId !== doc.id) {
+    view.stale = true;
+    return;
+  }
+  view.timer = setTimeout(() => {
+    view.timer = null;
+    renderMarkdownView(doc);
+  }, 150);
+}
+
+// Everything a note is allowed to put on the page. Raw HTML in a file
+// is passed through by the parser and cut down here: a note from a
+// host is not trusted with a script inside a window that has the Go
+// bindings. Inline styles go too, so a note cannot restyle the app.
+const MARKDOWN_SANITIZE: PurifyConfig = {
+  USE_PROFILES: { html: true },
+  FORBID_ATTR: ['style'],
+  FORBID_TAGS: ['style', 'form', 'button'],
+};
+
+function renderMarkdownView(doc: EditorDoc) {
+  const view = doc.markdown;
+  if (!view) return;
+  if (view.timer) {
+    clearTimeout(view.timer);
+    view.timer = null;
+  }
+  view.stale = false;
+  view.generation += 1;
+  const generation = view.generation;
+  const pane = editorPanes.get(doc.ownerPaneId);
+
+  const { html, frontMatter } = renderMarkdown(doc.model.getValue());
+  // Re-rendered in place, keeping the scroll: ticking a task halfway
+  // down a long note must not send you back to the top.
+  const scrollTop = view.body.scrollTop;
+  view.page.innerHTML = '';
+  if (frontMatter.length) view.page.appendChild(buildFrontMatterBlock(frontMatter));
+  const content = document.createElement('div');
+  content.className = 'md-content';
+  content.innerHTML = String(DOMPurify.sanitize(html, MARKDOWN_SANITIZE));
+  view.page.appendChild(content);
+  view.body.scrollTop = scrollTop;
+
+  // Each checkbox is numbered in document order, which is the order
+  // the task markers occur in the source; that is how a tick finds
+  // its line.
+  let taskIndex = 0;
+  for (const input of Array.from(content.querySelectorAll<HTMLInputElement>('input.md-task'))) {
+    input.dataset.task = String(taskIndex);
+    taskIndex += 1;
+  }
+  colorizeMarkdownCode(view, generation);
+  if (pane) void loadMarkdownImages(pane, doc, view, generation);
+  if (pane && pane.activeDocId === doc.id) renderEditorStatusBar(pane);
+}
+
+// Obsidian's Properties: the front matter as a table rather than as
+// three dashes and a wall of YAML above the note.
+function buildFrontMatterBlock(frontMatter: FrontMatter): HTMLDivElement {
+  const box = document.createElement('div');
+  box.className = 'md-props';
+  const table = document.createElement('table');
+  for (const { key, value } of frontMatter) {
+    const row = document.createElement('tr');
+    const name = document.createElement('th');
+    name.textContent = key;
+    const cell = document.createElement('td');
+    const values = Array.isArray(value) ? value : [value];
+    if (key.toLowerCase() === 'tags' || key.toLowerCase() === 'tag') {
+      for (const item of values) {
+        const pill = document.createElement('span');
+        pill.className = 'md-tag';
+        pill.textContent = item.startsWith('#') ? item : `#${item}`;
+        cell.appendChild(pill);
+      }
+    } else {
+      cell.textContent = values.join(', ');
+    }
+    row.append(name, cell);
+    table.appendChild(row);
+  }
+  box.appendChild(table);
+  return box;
+}
+
+// Fenced code is coloured by Monaco's own colorizer, so a shell block
+// in a runbook reads with the editor's highlighting and follows the
+// theme. Asynchronous, and dropped if the note was re-rendered in the
+// meantime.
+function colorizeMarkdownCode(view: MarkdownView, generation: number) {
+  for (const code of Array.from(view.page.querySelectorAll<HTMLElement>('pre.md-code code[data-lang]'))) {
+    const language = monacoLanguageFor(code.dataset.lang ?? '');
+    if (!language) continue;
+    const text = code.textContent ?? '';
+    void monaco.editor.colorize(text, language, { tabSize: 4 }).then((html) => {
+      if (view.generation !== generation || !code.isConnected) return;
+      code.innerHTML = html;
+      code.classList.add('monaco-editor');
+    }).catch(() => { /* an unknown language stays plain, which is fine */ });
+  }
+}
+
+// The Monaco language a fence's tag means: by id, alias, or extension,
+// plus the handful of names people write that match none of those.
+const FENCE_ALIASES: Record<string, string> = {
+  sh: 'shell', bash: 'shell', zsh: 'shell', console: 'shell', shellsession: 'shell',
+  ps: 'powershell', pwsh: 'powershell', yml: 'yaml', jsonc: 'json', txt: 'plaintext', text: 'plaintext',
+  'c++': 'cpp', golang: 'go', py: 'python', rb: 'ruby', ts: 'typescript', js: 'javascript', md: 'markdown',
+};
+
+function monacoLanguageFor(tag: string): string | null {
+  const lower = tag.toLowerCase();
+  if (!lower) return null;
+  const languages = monaco.languages.getLanguages();
+  const direct = FENCE_ALIASES[lower];
+  if (direct && languages.some((lang) => lang.id === direct)) return direct;
+  for (const lang of languages) {
+    if (lang.id === lower) return lang.id;
+    if (lang.aliases?.some((alias) => alias.toLowerCase() === lower)) return lang.id;
+  }
+  for (const lang of languages) {
+    if (lang.extensions?.some((ext) => ext.toLowerCase() === `.${lower}`)) return lang.id;
+  }
+  return null;
+}
+
+// Relative images are read off disk (or over SFTP) and inlined. The
+// webview cannot fetch a file path itself, and an image next to the
+// note is exactly what a note's images are.
+async function loadMarkdownImages(pane: EditorPane, doc: EditorDoc, view: MarkdownView, generation: number) {
+  const images = Array.from(view.page.querySelectorAll<HTMLImageElement>('img[data-src]'));
+  await Promise.all(images.map(async (img) => {
+    const src = img.dataset.src ?? '';
+    let cached = view.assets.get(src);
+    if (!cached) {
+      cached = resolveMarkdownAsset(pane, doc, src);
+      view.assets.set(src, cached);
+    }
+    const url = await cached;
+    if (view.generation !== generation || !img.isConnected) return;
+    if (url) {
+      img.src = url;
+    } else {
+      img.classList.add('md-broken');
+      img.alt = `${src} (not found)`;
+    }
+  }));
+}
+
+async function resolveMarkdownAsset(pane: EditorPane, doc: EditorDoc, src: string): Promise<string | null> {
+  const relative = safeDecodeURI(src);
+  const mime = IMAGE_MIME[extensionOf(relative)] ?? 'image/png';
+  if (doc.isLocal) {
+    for (const candidate of localLinkCandidates(pane, doc, relative)) {
+      try {
+        return `data:${mime};base64,${await App.ReadLocalFileBase64(candidate)}`;
+      } catch {
+        // Not there; the next candidate may be.
+      }
+    }
+    // Obsidian keeps attachments wherever it likes and links them by
+    // name, so the whole folder is the last place to look.
+    const found = await findInWorkspace(pane, baseName(relative));
+    if (found) {
+      try {
+        return `data:${mime};base64,${await App.ReadLocalFileBase64(found)}`;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+  if (!doc.remoteSessionId || !doc.path) return null;
+  try {
+    const path = joinLinkPath(parentOf(doc.path), relative, '/');
+    return `data:${mime};base64,${await App.ReadRemoteFileBase64(doc.remoteSessionId, path)}`;
+  } catch {
+    return null;
+  }
+}
+
+function safeDecodeURI(text: string): string {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
+}
+
+// The directory a path is in, with the separators it came with, unlike
+// dirName, which normalises to '/' for display.
+function parentOf(path: string): string {
+  const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  return cut > 0 ? path.slice(0, cut) : path;
+}
+
+// base + relative, with "." and ".." folded, joined by the separator
+// the platform's paths use so the result compares equal to the same
+// file opened from the tree.
+function joinLinkPath(base: string, relative: string, sep: string): string {
+  if (/^([A-Za-z]:[\\/]|[\\/])/.test(relative)) return relative.replace(/[\\/]/g, sep);
+  const parts = base.split(/[\\/]/);
+  for (const segment of relative.split(/[\\/]/)) {
+    if (!segment || segment === '.') continue;
+    if (segment === '..') {
+      if (parts.length > 1) parts.pop();
+      continue;
+    }
+    parts.push(segment);
+  }
+  return parts.join(sep);
+}
+
+function localSeparator(): string {
+  return platformName === 'windows' ? '\\' : '/';
+}
+
+// Where a relative link in a local note may point: next to the note
+// first, then from the top of the open folder.
+function localLinkCandidates(pane: EditorPane, doc: EditorDoc, relative: string): string[] {
+  const sep = localSeparator();
+  const candidates: string[] = [];
+  if (doc.path) candidates.push(joinLinkPath(parentOf(doc.path), relative, sep));
+  if (pane.folder) {
+    const fromRoot = joinLinkPath(pane.folder, relative, sep);
+    if (!candidates.includes(fromRoot)) candidates.push(fromRoot);
+  }
+  return candidates;
+}
+
+async function findInWorkspace(pane: EditorPane, name: string): Promise<string | null> {
+  if (!pane.folder || !name) return null;
+  try {
+    const found = await App.FindLocalFiles(pane.folder, name);
+    return found[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function localFileExists(path: string): Promise<boolean> {
+  try {
+    await App.ClassifyLocalFile(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Clicks in the reading view. Every link is intercepted: the webview
+// would otherwise navigate the whole app away to wherever it pointed.
+function handleMarkdownClick(pane: EditorPane, doc: EditorDoc, event: MouseEvent) {
+  const anchor = (event.target as HTMLElement | null)?.closest('a');
+  if (!anchor) return;
+  event.preventDefault();
+  if (anchor.classList.contains('md-wikilink')) {
+    void openWikilink(pane, doc, anchor.dataset.target ?? '', anchor.dataset.heading ?? '');
+    return;
+  }
+  const href = anchor.getAttribute('href') ?? '';
+  if (/^(https?:|mailto:)/i.test(href)) {
+    runtime.BrowserOpenURL(href);
+    return;
+  }
+  if (href.startsWith('#')) {
+    scrollToHeading(doc, safeDecodeURI(href.slice(1)));
+    return;
+  }
+  const hash = href.indexOf('#');
+  const target = safeDecodeURI(hash >= 0 ? href.slice(0, hash) : href);
+  const heading = hash >= 0 ? safeDecodeURI(href.slice(hash + 1)) : '';
+  if (target) void openLinkedFile(pane, doc, target, heading, { searchFolder: false, createIfMissing: false });
+}
+
+// [[Note]] names a note, not a path: it is looked for next to this one,
+// then anywhere in the open folder, and — as in Obsidian — created if
+// it is nowhere, after asking.
+async function openWikilink(pane: EditorPane, doc: EditorDoc, target: string, heading: string) {
+  if (!target) {
+    scrollToHeading(doc, heading);
+    return;
+  }
+  const name = /\.[A-Za-z0-9]{1,5}$/.test(target) ? target : `${target}.md`;
+  await openLinkedFile(pane, doc, name, heading, { searchFolder: true, createIfMissing: true });
+}
+
+async function openLinkedFile(
+  pane: EditorPane,
+  doc: EditorDoc,
+  relative: string,
+  heading: string,
+  opts: { searchFolder: boolean; createIfMissing: boolean },
+) {
+  if (!doc.isLocal) {
+    if (!doc.remoteSessionId || !doc.path) return;
+    const path = joinLinkPath(parentOf(doc.path), relative, '/');
+    await openRemoteFile(doc.remoteSessionId, path);
+    if (heading) scrollDocToHeading(findOpenDoc(path, false, doc.remoteSessionId), heading);
+    return;
+  }
+  let path: string | null = null;
+  for (const candidate of localLinkCandidates(pane, doc, relative)) {
+    if (await localFileExists(candidate)) {
+      path = candidate;
+      break;
+    }
+  }
+  if (!path && opts.searchFolder) path = await findInWorkspace(pane, baseName(relative));
+  if (!path) {
+    if (!opts.createIfMissing) {
+      flashStatus(`${relative} was not found`, true);
+      return;
+    }
+    const folder = pane.folder ?? (doc.path ? parentOf(doc.path) : null);
+    if (!folder) {
+      flashStatus(`${relative} was not found`, true);
+      return;
+    }
+    const created = joinLinkPath(folder, relative, localSeparator());
+    if (!confirm(`${baseName(relative)} does not exist yet.\n\nCreate it in ${folder}?`)) return;
+    try {
+      await App.WriteLocalFile(created, `# ${baseName(relative).replace(/\.[^.]+$/, '')}\n`);
+    } catch (err) {
+      flashStatus(`Could not create ${baseName(relative)}: ${err}`, true);
+      return;
+    }
+    if (pane.folder) void refreshFolder(pane);
+    path = created;
+  }
+  await openLocalFile(path, pane);
+  if (heading) scrollDocToHeading(findOpenDoc(path, true, null), heading);
+}
+
+function scrollDocToHeading(target: EditorDoc | null, heading: string) {
+  if (target) scrollToHeading(target, heading);
+}
+
+// A heading link lands on the heading in whichever face is showing: the
+// rendered one is scrolled to and flashed, the source one is revealed
+// in Monaco by searching for the heading line.
+function scrollToHeading(doc: EditorDoc, heading: string) {
+  const view = doc.markdown;
+  if (!view || !heading) return;
+  const slug = headingSlug(heading);
+  if (view.mode === 'reading') {
+    if (view.stale) renderMarkdownView(doc);
+    const el = view.page.querySelector<HTMLElement>(`#${CSS.escape(slug)}`);
+    if (!el) {
+      flashStatus(`No heading "${heading}" in ${doc.title}`, true);
+      return;
+    }
+    el.scrollIntoView({ block: 'start' });
+    el.classList.add('md-heading-flash');
+    setTimeout(() => el.classList.remove('md-heading-flash'), 1200);
+    return;
+  }
+  const pane = editorPanes.get(doc.ownerPaneId);
+  if (!pane) return;
+  const model = doc.model;
+  for (let line = 1; line <= model.getLineCount(); line += 1) {
+    const match = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/.exec(model.getLineContent(line));
+    if (match && headingSlug(match[1]) === slug) {
+      pane.editor.revealLineNearTop(line);
+      pane.editor.setPosition({ lineNumber: line, column: 1 });
+      pane.editor.focus();
+      return;
+    }
+  }
+  flashStatus(`No heading "${heading}" in ${doc.title}`, true);
+}
+
+// A tick in the reading view is an edit to the buffer: the n-th
+// checkbox on the page is the n-th task marker in the source. It goes
+// through the model like any other edit, so it dirties the document,
+// undoes with Ctrl+Z in source mode, and is saved with Ctrl+S.
+function toggleMarkdownTask(doc: EditorDoc, input: HTMLInputElement) {
+  const index = Number(input.dataset.task);
+  const marker = Number.isInteger(index) ? taskMarkerAt(doc.model.getValue(), index) : null;
+  if (!marker) {
+    input.checked = !input.checked;
+    flashStatus('Could not find that task in the source', true);
+    return;
+  }
+  input.closest('li')?.classList.toggle('is-checked', input.checked);
+  const range = new monaco.Range(marker.line + 1, marker.column + 1, marker.line + 1, marker.column + 2);
+  doc.model.pushEditOperations([], [{ range, text: input.checked ? 'x' : ' ' }], () => null);
+}
+
+function setMarkdownMode(doc: EditorDoc, mode: MarkdownMode) {
+  const view = doc.markdown;
+  if (!view || view.mode === mode) return;
+  const pane = editorPanes.get(doc.ownerPaneId);
+  if (!pane) return;
+  // The caret and scroll are parked before the buffer goes behind the
+  // rendered note, so coming back to source lands where you left it.
+  if (pane.activeDocId === doc.id && mode === 'reading') stashViewState(pane);
+  view.mode = mode;
+  // Remembered as the default: someone who keeps flipping to source
+  // wants their notes to open there.
+  editorPrefs.markdownMode = mode;
+  saveEditorPrefs();
+  if (pane.activeDocId === doc.id) {
+    applyActiveDoc(pane);
+    if (mode === 'source') pane.editor.focus();
+  }
+  renderDocBar(pane);
+  renderEditorStatusBar(pane);
+}
+
+function toggleMarkdownMode(doc: EditorDoc) {
+  if (!doc.markdown) return;
+  setMarkdownMode(doc, doc.markdown.mode === 'reading' ? 'source' : 'reading');
+}
+
 // --- Documents ---
 
 function createDoc(pane: EditorPane, opts: {
@@ -4236,6 +4747,7 @@ function createDoc(pane: EditorPane, opts: {
     kind: opts.kind ?? 'text',
     pdf: null,
     image: null,
+    markdown: null,
     model,
     viewState: null,
     savedVersionId: model.getAlternativeVersionId(),
@@ -4244,7 +4756,11 @@ function createDoc(pane: EditorPane, opts: {
   };
   editorDocs.set(doc.id, doc);
   pane.docIds.push(doc.id);
+  if (doc.kind === 'text' && isMarkdownPath(opts.path)) doc.markdown = buildMarkdownView(pane, doc);
   model.onDidChangeContent(() => {
+    // The reading view follows the buffer, debounced: a keystroke in
+    // source mode should not re-render a long note every time.
+    if (doc.markdown) scheduleMarkdownRender(doc);
     // Fires on every keystroke, so only a genuine flip between clean
     // and dirty is worth the re-renders below.
     const dirty = isDocDirty(doc);
@@ -4290,16 +4806,26 @@ function applyActiveDoc(pane: EditorPane) {
   // rather than torn down, so switching away from a 300-page document or
   // a large image and back does not rebuild it or lose the scroll and
   // zoom you left it at.
+  const reading = !!doc?.markdown && doc.markdown.mode === 'reading';
   for (const id of pane.docIds) {
     const other = editorDocs.get(id);
-    const el = other?.pdf?.container ?? other?.image?.container ?? null;
-    if (el) el.style.display = other === doc ? 'flex' : 'none';
+    const el = other?.pdf?.container ?? other?.image?.container ?? other?.markdown?.container ?? null;
+    if (!other || !el) continue;
+    // A Markdown document's rendered face is only on top while it is in
+    // reading mode; in source mode Monaco shows its buffer like any
+    // other text file.
+    const shown = other === doc && (other.markdown ? reading : true);
+    el.style.display = shown ? 'flex' : 'none';
   }
-  pane.root.classList.toggle('viewing-media', doc?.kind === 'pdf' || doc?.kind === 'image');
+  pane.root.classList.toggle('viewing-media', doc?.kind === 'pdf' || doc?.kind === 'image' || reading);
   // Focus the viewer so its keyboard zoom (Ctrl +/-/0) works without a
   // click first; a text document keeps Monaco's own focus handling.
   if (doc?.pdf) doc.pdf.pagesBox.focus();
   else if (doc?.image) doc.image.surface.focus();
+  else if (doc?.markdown && reading) {
+    if (doc.markdown.stale) renderMarkdownView(doc);
+    doc.markdown.body.focus();
+  }
   // Drives both the pane header and, for a whole editor tab, the tab
   // bar entry, so the filename is visible wherever the editor is.
   pane.session.label = doc ? doc.title : 'Editor';
@@ -4505,6 +5031,16 @@ function repointDoc(doc: EditorDoc, to: { path: string; isLocal: boolean; remote
   doc.title = baseName(to.path);
   monaco.editor.setModelLanguage(doc.model, languageForPath(to.path));
   const pane = editorPanes.get(doc.ownerPaneId);
+  // A scratch buffer saved as notes.md gains the reading face; a note
+  // renamed to something else loses it.
+  if (pane && doc.kind === 'text' && isMarkdownPath(to.path) !== !!doc.markdown) {
+    if (doc.markdown) {
+      destroyMarkdownView(doc.markdown);
+      doc.markdown = null;
+    } else {
+      doc.markdown = buildMarkdownView(pane, doc);
+    }
+  }
   if (pane) {
     // The name on the document tab is the thing that just changed.
     renderDocBar(pane);
@@ -4696,6 +5232,10 @@ function discardDoc(doc: EditorDoc) {
   if (doc.image) {
     destroyImageView(doc.image);
     doc.image = null;
+  }
+  if (doc.markdown) {
+    destroyMarkdownView(doc.markdown);
+    doc.markdown = null;
   }
   if (!pane) return;
   renderDocBar(pane);
@@ -4923,7 +5463,20 @@ function renderDocBar(pane: EditorPane) {
   const active = pane.activeDocId ? editorDocs.get(pane.activeDocId) : null;
   const action = runPlanFor(active ?? null);
   if (active && action) pane.docBar.appendChild(buildRunButton(pane, active, action));
+  if (active?.markdown) pane.docBar.appendChild(buildMarkdownToggle(active));
   refreshTreeHighlights(pane);
+}
+
+// Reading or editing, the way Obsidian's tab header shows it: the
+// button names the face you are looking at, and a click flips it.
+function buildMarkdownToggle(doc: EditorDoc): HTMLDivElement {
+  const reading = doc.markdown?.mode === 'reading';
+  const el = document.createElement('div');
+  el.className = 'doc-view-toggle' + (reading ? ' reading' : '');
+  el.textContent = reading ? '\u{1F4D6} Reading' : '✎ Source';
+  el.title = reading ? 'Edit the source (Ctrl+E)' : 'Show the reading view (Ctrl+E)';
+  el.onclick = () => toggleMarkdownMode(doc);
+  return el;
 }
 
 function buildDocTab(pane: EditorPane, doc: EditorDoc, isActive: boolean): HTMLDivElement {
@@ -5065,6 +5618,17 @@ function renderEditorStatusBar(pane: EditorPane) {
     const label = doc.image ? `Image · ${doc.image.naturalWidth} × ${doc.image.naturalHeight}` : 'Image';
     statusItem(pane, label, 'Open in the application your system uses for this file', () => { void openViewerExternally(doc); });
     return;
+  }
+
+  // A note reports its length in words, as Obsidian does, and which
+  // face is showing. In reading mode that is the whole story: there
+  // is no cursor, and the indentation and language of the source are
+  // not what you are looking at.
+  if (doc.markdown) {
+    const words = countWords(doc.model.getValue());
+    const face = doc.markdown.mode === 'reading' ? 'Reading view' : 'Source';
+    statusItem(pane, `${face} · ${words} ${words === 1 ? 'word' : 'words'}`, 'Toggle reading view (Ctrl+E)', () => toggleMarkdownMode(doc));
+    if (doc.markdown.mode === 'reading') return;
   }
 
   pane.positionEl = statusItem(pane, '', 'Go to line (Ctrl+G)', () => runEditorAction(pane, 'editor.action.gotoLine'));
@@ -6115,6 +6679,15 @@ function openCommandPalette(pane: EditorPane) {
       { label: 'Copy File Path', run: () => { if (doc.path) void navigator.clipboard.writeText(doc.path); } },
     );
   } else if (doc) {
+    if (doc.markdown) {
+      const reading = doc.markdown.mode === 'reading';
+      items.push({
+        label: reading ? 'Edit Source' : 'Reading View',
+        detail: reading ? 'the Markdown behind this note' : 'the rendered note, the way Obsidian shows it',
+        hint: 'Ctrl+E',
+        run: () => toggleMarkdownMode(doc),
+      });
+    }
     items.push(
       { label: 'Save', hint: 'Ctrl+S', run: () => { void saveDoc(doc); } },
       { label: 'Save As…', hint: 'Ctrl+Shift+S', run: () => { void saveDocAs(doc); } },
@@ -6235,6 +6808,8 @@ function registerEditorKeybindings(pane: EditorPane) {
   bind(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyP, (active) => openGoToFile(active));
   bind(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyP, (active) => openCommandPalette(active));
   bind(monaco.KeyMod.Alt | monaco.KeyCode.KeyZ, toggleWordWrap);
+  // Obsidian's own key for the same flip.
+  bind(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyE, withDoc((doc) => { if (doc.markdown) toggleMarkdownMode(doc); }));
   bind(monaco.KeyMod.CtrlCmd | monaco.KeyCode.PageDown, (active) => cycleDoc(active, 1));
   bind(monaco.KeyMod.CtrlCmd | monaco.KeyCode.PageUp, (active) => cycleDoc(active, -1));
 }
@@ -6261,6 +6836,9 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (key === 's' && doc) { e.preventDefault(); void saveDoc(doc); }
+  // The reading view is where Monaco does not have focus, so this is
+  // the path Ctrl+E takes to get back to the source.
+  else if (key === 'e' && doc?.markdown) { e.preventDefault(); toggleMarkdownMode(doc); }
   else if (key === 'n') { e.preventDefault(); newUntitledDoc(pane); }
   else if (key === 'o') { e.preventDefault(); void openLocalFile(undefined, pane); }
   else if (key === 'w' && doc) { e.preventDefault(); void closeDoc(doc); }

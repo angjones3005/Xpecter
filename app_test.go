@@ -212,3 +212,50 @@ Host *
 		t.Error("imported profiles must get ids")
 	}
 }
+
+// A wikilink names a note, not a path: the whole folder is searched,
+// case-insensitively, with the shallowest match first and the places
+// nothing links into (dot-directories, node_modules) left alone.
+func TestFindLocalFilesSearchesTheWholeFolder(t *testing.T) {
+	root := t.TempDir()
+	app := &App{}
+	mk := func(parts ...string) string {
+		path := filepath.Join(append([]string{root}, parts...)...)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	deep := mk("a", "b", "Note.md")
+	shallow := mk("a", "note.md")
+	mk(".obsidian", "Note.md")
+	mk("node_modules", "pkg", "Note.md")
+	mk("a", "Other.md")
+
+	got, err := app.FindLocalFiles(root, "Note.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{shallow, deep}
+	if len(got) != len(want) {
+		t.Fatalf("FindLocalFiles = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("FindLocalFiles[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	if got, err := app.FindLocalFiles(root, "Missing.md"); err != nil || len(got) != 0 {
+		t.Errorf("FindLocalFiles for a missing name = %v, %v; want none", got, err)
+	}
+	if _, err := app.FindLocalFiles(root, ""); err == nil {
+		t.Error("FindLocalFiles accepted an empty name")
+	}
+	if _, err := app.FindLocalFiles(filepath.Join(root, "nope"), "Note.md"); err == nil {
+		t.Error("FindLocalFiles accepted a folder that does not exist")
+	}
+}

@@ -279,6 +279,89 @@
     .pdf-page { flex: 0 0 auto; background: #ffffff; box-shadow: 0 2px 10px rgba(0,0,0,0.35); }
     .pdf-page canvas { display: block; }
     .pdf-page-error { padding: 12px; color: var(--danger); font-size: 12px; }
+    /* The Markdown reading view: a rendered note in the box the Monaco
+       host occupies, the way Obsidian shows one. Reading and editing
+       are two modes of the same document, so this is shown or hidden
+       per document rather than being a separate kind of viewer. The
+       column is capped at a readable measure and centred; the fonts
+       are the app's own, with code in the editor's monospace face. */
+    .editor-markdown { position: absolute; inset: 0; display: none; flex-direction: column; background: var(--bg); }
+    .md-body { flex: 1 1 auto; min-height: 0; overflow: auto; outline: none; }
+    .md-page { max-width: 780px; margin: 0 auto; padding: 26px 44px 96px; box-sizing: border-box; font-size: 15px; line-height: 1.65; color: var(--text); word-wrap: break-word; }
+    .md-page > :first-child { margin-top: 0; }
+    .md-page h1, .md-page h2, .md-page h3, .md-page h4, .md-page h5, .md-page h6 { margin: 1.4em 0 0.5em; line-height: 1.25; font-weight: 650; letter-spacing: -0.01em; }
+    .md-page h1 { font-size: 1.9em; }
+    .md-page h2 { font-size: 1.5em; }
+    .md-page h3 { font-size: 1.25em; }
+    .md-page h4 { font-size: 1.08em; }
+    .md-page h5, .md-page h6 { font-size: 1em; color: var(--text-dim); }
+    .md-page h1:target, .md-page h2:target, .md-page h3:target, .md-page h4:target, .md-page h5:target, .md-page h6:target,
+    .md-page .md-heading-flash { background: var(--accent-soft); border-radius: 4px; }
+    .md-page p { margin: 0 0 0.9em; }
+    .md-page a { color: var(--accent-ink); text-decoration: none; }
+    .md-page a:hover { text-decoration: underline; }
+    .md-page a.md-wikilink { color: var(--accent-ink); }
+    .md-page a.md-wikilink.md-missing { color: var(--text-dim); text-decoration: underline dotted; }
+    .md-page a.md-embed-link { display: inline-block; padding: 2px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-alt); }
+    .md-page img { max-width: 100%; height: auto; border-radius: 4px; }
+    .md-page img.md-broken { display: inline-block; min-width: 120px; padding: 8px 10px; border: 1px dashed var(--border); color: var(--text-dim); font-size: 12px; }
+    .md-page hr { border: 0; border-top: 1px solid var(--border); margin: 1.6em 0; }
+    .md-page ul, .md-page ol { padding-left: 1.6em; margin: 0 0 0.9em; }
+    .md-page li { margin: 0.15em 0; }
+    .md-page li > p { margin: 0.2em 0; }
+    .md-page li.md-task-item { list-style: none; margin-left: -1.4em; padding-left: 0; }
+    .md-page li.md-task-item > p:first-child, .md-page li.md-task-item > input { display: inline; }
+    .md-page input.md-task { width: 15px; height: 15px; margin: 0 7px 0 0; vertical-align: -2px; accent-color: var(--accent); cursor: pointer; }
+    .md-page li.md-task-item.is-checked { color: var(--text-dim); text-decoration: line-through; }
+    .md-page li.md-task-item.is-checked > ul, .md-page li.md-task-item.is-checked > ol { text-decoration: none; }
+    .md-page blockquote { margin: 0 0 0.9em; padding: 2px 0 2px 16px; border-left: 3px solid var(--accent); color: var(--text-dim); }
+    .md-page blockquote > :last-child { margin-bottom: 0; }
+    .md-page code { font-family: var(--md-mono, ui-monospace, monospace); font-size: 0.88em; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
+    .md-page pre.md-code { margin: 0 0 1em; padding: 12px 14px; overflow-x: auto; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 6px; line-height: 1.5; }
+    .md-page pre.md-code code { display: block; padding: 0; border: 0; background: transparent; font-size: 0.86em; white-space: pre; }
+    /* Monaco's colorizer emits its own token classes, which its theme
+       CSS only reaches under .monaco-editor. That class also brings the
+       editor's sans-serif font and background with it, both undone here. */
+    .md-page pre.md-code .monaco-editor { font-family: inherit !important; font-size: inherit !important; background: transparent !important; position: static; }
+    .md-page mark { background: rgba(255, 208, 0, 0.35); color: inherit; border-radius: 2px; padding: 0 2px; }
+    .md-page .md-tag { display: inline-block; padding: 0 7px; border-radius: 10px; background: var(--accent-soft); color: var(--accent-ink); font-size: 0.86em; line-height: 1.6; }
+    .md-page table { border-collapse: collapse; margin: 0 0 1em; max-width: 100%; display: block; overflow-x: auto; font-size: 0.94em; }
+    .md-page th, .md-page td { border: 1px solid var(--border); padding: 5px 11px; text-align: left; vertical-align: top; }
+    .md-page th { background: var(--bg-alt); font-weight: 600; }
+    .md-page del { color: var(--text-dim); }
+    .md-page kbd { font-family: var(--md-mono, ui-monospace, monospace); font-size: 0.85em; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; background: var(--bg-alt); }
+    /* Properties: the front matter, shown as the table Obsidian shows it
+       as rather than as three dashes and a wall of YAML. */
+    .md-props { margin: 0 0 1.4em; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 0.9em; }
+    .md-props table { display: table; border: 0; margin: 0; }
+    .md-props th, .md-props td { border: 0; padding: 3px 10px 3px 0; }
+    .md-props th { background: transparent; color: var(--text-dim); font-weight: 500; white-space: nowrap; width: 1%; }
+    .md-props .md-tag { margin-right: 4px; }
+    /* Callouts, coloured by family. --md-callout is r,g,b so the same
+       value gives the border, the tinted background and the title. */
+    .md-callout { --md-callout: 49,120,198; margin: 0 0 1em; padding: 10px 14px; border-radius: 6px; background: rgba(var(--md-callout), 0.1); border-left: 3px solid rgb(var(--md-callout)); }
+    .md-callout-title { display: flex; align-items: center; gap: 7px; font-weight: 600; color: rgb(var(--md-callout)); }
+    :root[data-theme="light"] .md-callout-title { filter: brightness(0.85); }
+    .md-callout-icon { font-size: 1.05em; width: 1.2em; text-align: center; }
+    details.md-callout > summary { cursor: pointer; list-style: none; }
+    details.md-callout > summary::-webkit-details-marker { display: none; }
+    details.md-callout > summary::after { content: '▸'; margin-left: auto; font-size: 0.85em; opacity: 0.7; transition: transform 0.12s ease; }
+    details.md-callout[open] > summary::after { transform: rotate(90deg); }
+    .md-callout-content { margin-top: 6px; }
+    .md-callout-content > :last-child { margin-bottom: 0; }
+    .md-callout[data-callout="abstract"], .md-callout[data-callout="info"], .md-callout[data-callout="todo"] { --md-callout: 8,145,178; }
+    .md-callout[data-callout="tip"] { --md-callout: 13,148,136; }
+    .md-callout[data-callout="success"] { --md-callout: 46,160,67; }
+    .md-callout[data-callout="question"] { --md-callout: 217,119,6; }
+    .md-callout[data-callout="warning"] { --md-callout: 234,138,0; }
+    .md-callout[data-callout="failure"], .md-callout[data-callout="danger"], .md-callout[data-callout="bug"] { --md-callout: 229,72,77; }
+    .md-callout[data-callout="example"] { --md-callout: 139,92,246; }
+    .md-callout[data-callout="quote"] { --md-callout: 128,128,128; }
+    /* The doc-bar toggle between reading and editing, pinned beside the
+       run button so it never scrolls away with the tabs. */
+    .doc-view-toggle { flex: 0 0 auto; display: flex; align-items: center; gap: 5px; padding: 0 11px; cursor: pointer; color: var(--text-dim); border-left: 1px solid var(--border); font-size: 11.5px; white-space: nowrap; }
+    .doc-view-toggle:hover { background: var(--hover); color: var(--text); }
+    .doc-view-toggle.reading { color: var(--accent-ink); }
     /* The image viewer shares the PDF toolbar (.pdf-bar). Its surface is
        a checkerboard so a transparent PNG reads as transparent rather
        than as whatever the theme's background happens to be, and the

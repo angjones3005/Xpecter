@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"mime"
 	"net"
 	"os"
@@ -1027,6 +1028,82 @@ func (a *App) ListLocalDir(dir string) ([]LocalFile, error) {
 		return strings.ToLower(files[i].Name) < strings.ToLower(files[j].Name)
 	})
 	return files, nil
+}
+
+// How far FindLocalFiles is willing to look. A vault of notes is a few
+// thousand entries; a home directory with a node_modules in it is not,
+// and the point of the cap is that a wikilink click never turns into a
+// full-disk walk.
+const maxFindEntries = 50000
+const maxFindMatches = 20
+
+// FindLocalFiles returns every file under root whose name equals name,
+// case-insensitively, shallowest first. It backs the reading view's
+// wikilinks: [[Note]] in Obsidian means "the note called Note anywhere
+// in the vault", so the folder open in the editor is searched the same
+// way rather than only the note's own directory. Dot-directories and
+// node_modules are skipped, since nothing anyone links to lives there.
+func (a *App) FindLocalFiles(root string, name string) ([]string, error) {
+	if root == "" || name == "" {
+		return nil, fmt.Errorf("a folder and a file name are both required")
+	}
+	if info, err := os.Stat(root); err != nil {
+		return nil, err
+	} else if !info.IsDir() {
+		return nil, fmt.Errorf("%s is not a directory", root)
+	}
+	type match struct {
+		path  string
+		depth int
+	}
+	var matches []match
+	visited := 0
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			// An unreadable subfolder is skipped, not fatal: the note
+			// being looked for is almost certainly somewhere else.
+			if d != nil && d.IsDir() && path != root {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		visited++
+		if visited > maxFindEntries {
+			return filepath.SkipAll
+		}
+		if d.IsDir() {
+			if path != root && (strings.HasPrefix(d.Name(), ".") || d.Name() == "node_modules") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.EqualFold(d.Name(), name) {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			rel = path
+		}
+		matches = append(matches, match{path: path, depth: strings.Count(rel, string(filepath.Separator))})
+		if len(matches) >= maxFindMatches {
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].depth != matches[j].depth {
+			return matches[i].depth < matches[j].depth
+		}
+		return strings.ToLower(matches[i].path) < strings.ToLower(matches[j].path)
+	})
+	paths := make([]string, 0, len(matches))
+	for _, m := range matches {
+		paths = append(paths, m.path)
+	}
+	return paths, nil
 }
 
 // AppendSessionLog appends raw terminal output to one file per session.

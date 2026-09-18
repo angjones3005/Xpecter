@@ -198,6 +198,9 @@ export interface AppBindings {
   SelectFileIn(defaultDir: string): Promise<string>;
   SaveTextFileIn(defaultDir: string, defaultFilename: string, content: string): Promise<string>;
   ListLocalDir(dir: string): Promise<LocalFile[]>;
+  // Every file under root named `name` (case-insensitive), shallowest
+  // first. How the reading view turns [[Note]] into a path.
+  FindLocalFiles(root: string, name: string): Promise<string[]>;
   ReadLocalFile(path: string): Promise<string>;
   WriteLocalFile(path: string, content: string): Promise<void>;
   CreateLocalFile(dir: string, name: string): Promise<string>;
