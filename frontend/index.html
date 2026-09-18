@@ -287,7 +287,9 @@
        are the app's own, with code in the editor's monospace face. */
     .editor-markdown { position: absolute; inset: 0; display: none; flex-direction: column; background: var(--bg); }
     .md-body { flex: 1 1 auto; min-height: 0; overflow: auto; outline: none; }
-    .md-page { max-width: 780px; margin: 0 auto; padding: 26px 44px 96px; box-sizing: border-box; font-size: 15px; line-height: 1.65; color: var(--text); word-wrap: break-word; }
+    /* Proportional, whatever face the rest of the app is in: a note is
+       prose, and Obsidian's reading view is set in a text face too. */
+    .md-page { max-width: 780px; margin: 0 auto; padding: 26px 44px 96px; box-sizing: border-box; font-family: 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif; font-size: 15.5px; line-height: 1.65; color: var(--text); word-wrap: break-word; }
     .md-page > :first-child { margin-top: 0; }
     .md-page h1, .md-page h2, .md-page h3, .md-page h4, .md-page h5, .md-page h6 { margin: 1.4em 0 0.5em; line-height: 1.25; font-weight: 650; letter-spacing: -0.01em; }
     .md-page h1 { font-size: 1.9em; }
@@ -322,7 +324,7 @@
     /* Monaco's colorizer emits its own token classes, which its theme
        CSS only reaches under .monaco-editor. That class also brings the
        editor's sans-serif font and background with it, both undone here. */
-    .md-page pre.md-code .monaco-editor { font-family: inherit !important; font-size: inherit !important; background: transparent !important; position: static; }
+    .md-page pre.md-code .monaco-editor { font-family: inherit !important; font-size: inherit !important; background: transparent !important; position: static; outline: none !important; border: 0 !important; box-shadow: none !important; }
     .md-page mark { background: rgba(255, 208, 0, 0.35); color: inherit; border-radius: 2px; padding: 0 2px; }
     .md-page .md-tag { display: inline-block; padding: 0 7px; border-radius: 10px; background: var(--accent-soft); color: var(--accent-ink); font-size: 0.86em; line-height: 1.6; }
     .md-page table { border-collapse: collapse; margin: 0 0 1em; max-width: 100%; display: block; overflow-x: auto; font-size: 0.94em; }
