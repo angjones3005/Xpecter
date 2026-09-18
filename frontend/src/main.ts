@@ -2938,6 +2938,10 @@ function createTerminalForSession(session: Session, tab: Tab) {
       void saveSessionOutput(session);
       return false;
     }
+    if (e.type === 'keydown' && shortcutMatches(e, 'print')) {
+      void printSessionOutput(session);
+      return false;
+    }
     if (e.type === 'keydown' && shortcutMatches(e, 'sidebar')) {
       // Not plain Ctrl+B: that's tmux's default prefix key, binding it
       // globally would break every tmux user's workflow the moment
@@ -3487,6 +3491,25 @@ function createEditorForSession(session: Session, tab: Tab) {
     if (owner) focusPane(owner, paneIndexOf(owner, session));
   });
   registerEditorKeybindings(pane);
+
+  // Right-click on a viewer — the reading view, a PDF, an image — gets
+  // a small menu of its own. Monaco keeps its own menu, which Print is
+  // added to in registerEditorKeybindings.
+  body.addEventListener('contextmenu', (event) => {
+    const target = event.target as HTMLElement | null;
+    if (!target || host.contains(target)) return;
+    const doc = pane.activeDocId ? editorDocs.get(pane.activeDocId) : null;
+    if (!doc) return;
+    event.preventDefault();
+    const items = [{ label: 'Print…', run: () => { void printDoc(doc); } }];
+    if (doc.markdown) {
+      items.push({ label: doc.markdown.mode === 'reading' ? 'Edit source' : 'Reading view', run: () => toggleMarkdownMode(doc) });
+    }
+    if (doc.path && doc.kind !== 'text') {
+      items.push({ label: 'Open outside Xpecter', run: () => { void openViewerExternally(doc); } });
+    }
+    showPaneContextMenu(event.clientX, event.clientY, items);
+  });
 
   renderDocBar(pane);
   applyActiveDoc(pane);
@@ -4364,7 +4387,7 @@ function renderMarkdownView(doc: EditorDoc) {
     taskIndex += 1;
   }
   colorizeMarkdownCode(view, generation);
-  if (pane) void loadMarkdownImages(pane, doc, view, generation);
+  if (pane) void loadMarkdownImages(pane, doc, view, content, () => view.generation === generation);
   if (pane && pane.activeDocId === doc.id) renderEditorStatusBar(pane);
 }
 
@@ -4441,8 +4464,13 @@ function monacoLanguageFor(tag: string): string | null {
 // Relative images are read off disk (or over SFTP) and inlined. The
 // webview cannot fetch a file path itself, and an image next to the
 // note is exactly what a note's images are.
-async function loadMarkdownImages(pane: EditorPane, doc: EditorDoc, view: MarkdownView, generation: number) {
-  const images = Array.from(view.page.querySelectorAll<HTMLImageElement>('img[data-src]'));
+//
+// `root` is wherever the rendered note was put — the reading view, or
+// the print root — and `wanted` says whether the answer is still worth
+// applying by the time a file has been read: a re-render or a finished
+// print job in the meantime makes it moot.
+async function loadMarkdownImages(pane: EditorPane, doc: EditorDoc, view: MarkdownView, root: HTMLElement, wanted: () => boolean) {
+  const images = Array.from(root.querySelectorAll<HTMLImageElement>('img[data-src]'));
   await Promise.all(images.map(async (img) => {
     const src = img.dataset.src ?? '';
     let cached = view.assets.get(src);
@@ -4451,7 +4479,7 @@ async function loadMarkdownImages(pane: EditorPane, doc: EditorDoc, view: Markdo
       view.assets.set(src, cached);
     }
     const url = await cached;
-    if (view.generation !== generation || !img.isConnected) return;
+    if (!wanted() || !img.isConnected) return;
     if (url) {
       img.src = url;
     } else {
@@ -4724,6 +4752,314 @@ function setMarkdownMode(doc: EditorDoc, mode: MarkdownMode) {
 function toggleMarkdownMode(doc: EditorDoc) {
   if (!doc.markdown) return;
   setMarkdownMode(doc, doc.markdown.mode === 'reading' ? 'source' : 'reading');
+}
+
+// --- Printing ---
+//
+// Print what the pane is showing. A note prints rendered, the way the
+// reading view shows it; a text file prints as highlighted source; a
+// PDF prints its pages; an image prints itself; a terminal prints its
+// scrollback. All of it goes through the webview's own print dialog,
+// which is also the way to a PDF of a note: Windows and GTK both offer
+// "save as PDF" there.
+//
+// Nothing is navigated away from or opened in a second window: a print
+// root is filled, the print stylesheet hides the rest of the app for
+// the duration, and the root is emptied afterwards. Paper is white
+// whatever the theme, so the root declares a light palette of its own
+// and code is coloured for it rather than for the screen.
+
+function printRoot(): HTMLDivElement {
+  let root = document.getElementById('print-root') as HTMLDivElement | null;
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'print-root';
+    document.body.appendChild(root);
+  }
+  root.innerHTML = '';
+  root.style.setProperty('--md-mono', fontStack(appSettings.fontFamily || FONT_OPTIONS[0].value));
+  return root;
+}
+
+let printing = false;
+
+async function printWith(title: string, fill: (root: HTMLDivElement) => Promise<void> | void) {
+  if (printing) return;
+  printing = true;
+  const root = printRoot();
+  const previousTitle = document.title;
+  try {
+    await fill(root);
+    // The document title is the job name in the dialog and the file
+    // name "Save as PDF" offers, so it is the thing being printed
+    // rather than "Xpecter".
+    document.title = title;
+    document.body.classList.add('printing');
+    // One frame, so the freshly inserted content is laid out and its
+    // images decoded before the dialog snapshots the page.
+    await new Promise<void>((resolve) => requestAnimationFrame(() => setTimeout(resolve, 60)));
+    // Returns once the dialog is dismissed on both webviews this ships
+    // on, which is what makes the cleanup below safe to run straight
+    // after it.
+    window.print();
+  } catch (err) {
+    flashStatus(`Could not print: ${err}`, true);
+  } finally {
+    document.body.classList.remove('printing');
+    document.title = previousTitle;
+    root.innerHTML = '';
+    printing = false;
+  }
+}
+
+function printHeader(root: HTMLDivElement, text: string) {
+  const head = document.createElement('div');
+  head.className = 'print-head';
+  head.textContent = `${text} · ${new Date().toLocaleString()}`;
+  root.appendChild(head);
+}
+
+// The document, printed as what it is.
+async function printDoc(doc: EditorDoc) {
+  if (doc.markdown) {
+    const pane = editorPanes.get(doc.ownerPaneId);
+    if (pane) await printMarkdownDoc(pane, doc);
+    return;
+  }
+  if (doc.kind === 'pdf' && doc.pdf) {
+    await printPdfDoc(doc, doc.pdf);
+    return;
+  }
+  if (doc.kind === 'image' && doc.image) {
+    await printImageDoc(doc, doc.image);
+    return;
+  }
+  if (doc.kind === 'text') {
+    await printTextDoc(doc);
+    return;
+  }
+  flashStatus(`${doc.title} cannot be printed`, true);
+}
+
+async function printTextDoc(doc: EditorDoc) {
+  const text = doc.model.getValue();
+  if (!text.trim()) {
+    flashStatus(`${doc.title} is empty; nothing to print`, true);
+    return;
+  }
+  await printWith(doc.title, async (root) => {
+    printHeader(root, doc.path ?? doc.title);
+    const pre = document.createElement('pre');
+    pre.className = 'print-code';
+    pre.innerHTML = await highlightForPrint(text, doc.model.getLanguageId());
+    root.appendChild(pre);
+  });
+}
+
+// The note as the reading view shows it, whichever face is on screen:
+// the point of printing a note is the rendered note.
+async function printMarkdownDoc(pane: EditorPane, doc: EditorDoc) {
+  const view = doc.markdown;
+  if (!view) return;
+  await printWith(doc.title.replace(/\.[^.]+$/, ''), async (root) => {
+    const { html, frontMatter } = renderMarkdown(doc.model.getValue());
+    const page = document.createElement('div');
+    page.className = 'md-page';
+    if (frontMatter.length) page.appendChild(buildFrontMatterBlock(frontMatter));
+    const content = document.createElement('div');
+    content.className = 'md-content';
+    content.innerHTML = String(DOMPurify.sanitize(html, MARKDOWN_SANITIZE));
+    // A folded callout prints open: paper cannot be clicked.
+    for (const details of Array.from(content.querySelectorAll('details'))) details.open = true;
+    page.appendChild(content);
+    root.appendChild(page);
+    await Promise.all([
+      loadMarkdownImages(pane, doc, view, page, () => printing),
+      highlightCodeForPrint(page),
+    ]);
+  });
+}
+
+async function highlightCodeForPrint(root: HTMLElement) {
+  const blocks = Array.from(root.querySelectorAll<HTMLElement>('pre.md-code code[data-lang]'));
+  await Promise.all(blocks.map(async (code) => {
+    const language = monacoLanguageFor(code.dataset.lang ?? '');
+    if (!language) return;
+    code.innerHTML = await highlightForPrint(code.textContent ?? '', language);
+  }));
+}
+
+async function printPdfDoc(doc: EditorDoc, view: PdfView) {
+  const pages = view.file.numPages;
+  await printWith(doc.title, async (root) => {
+    for (let n = 1; n <= pages; n += 1) {
+      if (!printing) return;
+      if (pages > 3) flashStatus(`Preparing page ${n} of ${pages}…`);
+      const page = await view.file.getPage(n);
+      const viewport = page.getViewport({ scale: 1.5 });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.floor(viewport.width));
+      canvas.height = Math.max(1, Math.floor(viewport.height));
+      await page.render({ canvas, viewport }).promise;
+      // A JPEG per page rather than a live canvas, so the bitmap is let
+      // go as soon as it is encoded and a long manual does not hold
+      // every page in memory at once.
+      const img = document.createElement('img');
+      img.src = canvas.toDataURL('image/jpeg', 0.9);
+      canvas.width = 0;
+      canvas.height = 0;
+      const box = document.createElement('div');
+      box.className = 'print-page';
+      box.appendChild(img);
+      root.appendChild(box);
+      await img.decode().catch(() => { /* a page that will not decode prints blank rather than stopping the job */ });
+    }
+    flashStatus(`Printing ${doc.title}`);
+  });
+}
+
+async function printImageDoc(doc: EditorDoc, view: ImageView) {
+  await printWith(doc.title, async (root) => {
+    const box = document.createElement('div');
+    box.className = 'print-image';
+    const img = document.createElement('img');
+    img.src = view.img.src;
+    box.appendChild(img);
+    root.appendChild(box);
+    await img.decode().catch(() => { /* printed as-is */ });
+  });
+}
+
+async function printSessionOutput(session: Session) {
+  if (!session.term) {
+    flashStatus('Nothing to print: this pane has no terminal.', true);
+    return;
+  }
+  const content = terminalTextContent(session.term).replace(/\s+$/, '');
+  if (!content.trim()) {
+    flashStatus('Nothing to print: this terminal is empty.', true);
+    return;
+  }
+  await printWith(session.label, (root) => {
+    printHeader(root, session.label);
+    const pre = document.createElement('pre');
+    pre.className = 'print-code';
+    pre.textContent = content;
+    root.appendChild(pre);
+  });
+}
+
+// Whatever the focused pane is showing. The Terminal menu's entry and
+// the shortcut both land here, so one gesture prints a note, a script,
+// or a shell's scrollback depending on where you are.
+function printFocusedPane() {
+  const tab = activeTabId ? tabs.get(activeTabId) : null;
+  if (!tab) return;
+  if (tab.isHome) {
+    flashStatus('Nothing to print on the Home tab.', true);
+    return;
+  }
+  const session = focusedSession(tab);
+  const pane = editorPanes.get(session.id);
+  if (pane) {
+    const doc = pane.activeDocId ? editorDocs.get(pane.activeDocId) : null;
+    if (doc) void printDoc(doc);
+    else flashStatus('Nothing to print: no file is open in this pane.', true);
+    return;
+  }
+  void printSessionOutput(session);
+}
+
+// A light palette by token kind, so a page prints in the colours a
+// light editor would show, whatever theme is on screen. Ordered: the
+// first prefix that matches wins. The last row is the log highlighter's
+// own token set, in its light-theme colours.
+const PRINT_TOKEN_COLORS: [string, string][] = [
+  ['comment', '#008000'], ['string', '#a31515'], ['regexp', '#811f3f'], ['number', '#098658'],
+  ['keyword', '#0000ff'], ['type', '#267f99'], ['tag', '#800000'], ['metatag', '#0000ff'],
+  ['attribute.name', '#e50000'], ['attribute.value', '#0000ff'], ['annotation', '#808080'],
+  ['constant', '#0070c1'], ['variable', '#001080'], ['predefined', '#795e26'],
+  ['good', '#1a7f37'], ['bad', '#cf222e'], ['warn', '#9a6700'], ['iface', '#1b7c83'], ['addr', '#8250df'],
+  ['meta', '#0e7490'], ['path', '#0550ae'], ['time', '#6e7781'], ['config', '#0000c0'],
+];
+
+function printTokenColor(type: string): string | null {
+  for (const [prefix, color] of PRINT_TOKEN_COLORS) {
+    if (type === prefix || type.startsWith(`${prefix}.`)) return color;
+  }
+  return null;
+}
+
+function escapeForHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Source coloured for paper. Monaco's colorizer emits class names that
+// mean whatever the on-screen theme says, so the tokens are taken raw
+// here and given inline colours from the print palette instead.
+async function highlightForPrint(text: string, language: string): Promise<string> {
+  if (!language || language === 'plaintext') return escapeForHtml(text);
+  // colorize is what loads a language's tokenizer on demand; tokenize
+  // below is synchronous and answers with plain text for one that has
+  // not been loaded yet.
+  try {
+    await monaco.editor.colorize('', language, {});
+  } catch {
+    return escapeForHtml(text);
+  }
+  let tokens: monaco.Token[][];
+  try {
+    tokens = monaco.editor.tokenize(text, language);
+  } catch {
+    return escapeForHtml(text);
+  }
+  const lines = text.split(/\r\n|\r|\n/);
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const lineTokens = tokens[i] ?? [];
+    if (lineTokens.length === 0) {
+      out.push(escapeForHtml(line));
+      continue;
+    }
+    let html = '';
+    for (let t = 0; t < lineTokens.length; t += 1) {
+      const start = lineTokens[t].offset;
+      const end = t + 1 < lineTokens.length ? lineTokens[t + 1].offset : line.length;
+      const chunk = escapeForHtml(line.slice(start, end));
+      const color = printTokenColor(lineTokens[t].type);
+      html += color ? `<span style="color:${color}">${chunk}</span>` : chunk;
+    }
+    out.push(html);
+  }
+  return out.join('\n');
+}
+
+// A small menu of the kind the session list uses, for the viewers that
+// have no menu of their own: the reading view, a PDF, an image.
+function showPaneContextMenu(x: number, y: number, items: { label: string; run: () => void }[]) {
+  document.getElementById('session-context-menu')?.remove();
+  const menu = document.createElement('div');
+  menu.id = 'session-context-menu';
+  menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;background:var(--bg-alt);border:1px solid var(--border);border-radius:4px;padding:4px 0;z-index:2000;min-width:150px;font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,0.4);`;
+  for (const item of items) {
+    const el = document.createElement('div');
+    el.textContent = item.label;
+    el.style.cssText = 'padding:6px 12px;cursor:pointer;';
+    el.onmouseenter = () => { el.style.background = 'var(--hover)'; };
+    el.onmouseleave = () => { el.style.background = ''; };
+    el.onclick = () => {
+      menu.remove();
+      item.run();
+    };
+    menu.appendChild(el);
+  }
+  document.body.appendChild(menu);
+  // Kept on screen: a right-click near the bottom edge opens upward.
+  const rect = menu.getBoundingClientRect();
+  if (rect.right > window.innerWidth) menu.style.left = `${Math.max(0, x - rect.width)}px`;
+  if (rect.bottom > window.innerHeight) menu.style.top = `${Math.max(0, y - rect.height)}px`;
+  attachMenuAutoClose(menu);
 }
 
 // --- Documents ---
@@ -6672,6 +7008,7 @@ function openCommandPalette(pane: EditorPane) {
   // commands that exist only to refuse.
   if (doc && doc.kind !== 'text') {
     items.push(
+      { label: 'Print…', hint: 'Ctrl+Shift+P', run: () => { void printDoc(doc); } },
       { label: 'Reload From Disk', detail: doc.path ?? 'nothing to reload from', run: () => { void reloadDoc(doc); } },
       { label: 'Close File', hint: 'Ctrl+W', run: () => { void closeDoc(doc); } },
       { label: 'Open Outside Xpecter', detail: 'the application your system uses for this file', run: () => { void openViewerExternally(doc); } },
@@ -6692,6 +7029,7 @@ function openCommandPalette(pane: EditorPane) {
       { label: 'Save', hint: 'Ctrl+S', run: () => { void saveDoc(doc); } },
       { label: 'Save As…', hint: 'Ctrl+Shift+S', run: () => { void saveDocAs(doc); } },
       { label: 'Save to Remote Host…', detail: 'write this buffer over SFTP', run: () => { void saveDocToRemote(doc); } },
+      { label: 'Print…', hint: 'Ctrl+Shift+P', detail: doc.markdown ? 'the rendered note' : 'highlighted source', run: () => { void printDoc(doc); } },
       { label: 'Reload From Disk', detail: doc.path ?? 'nothing to reload from', run: () => { void reloadDoc(doc); } },
       { label: 'Close File', hint: 'Ctrl+W', run: () => { void closeDoc(doc); } },
       { label: 'Run File', detail: runCommandLabel(doc), run: () => { void runDoc(pane, doc); } },
@@ -6719,7 +7057,7 @@ function openCommandPalette(pane: EditorPane) {
     { label: `Word Wrap: ${editorPrefs.wordWrap ? 'on' : 'off'}`, hint: 'Alt+Z', run: toggleWordWrap },
     { label: `Minimap: ${editorPrefs.minimap ? 'on' : 'off'}`, run: toggleMinimap },
     { label: `Render Whitespace: ${editorPrefs.whitespace ? 'always' : 'in selection'}`, run: toggleWhitespace },
-    { label: 'All Editor Commands…', detail: "Monaco's own palette, everything not listed here", hint: 'F1', run: () => runEditorAction(pane, 'editor.action.quickCommand') },
+    { label: 'All Editor Commands…', detail: "Monaco's own palette, everything not listed here", run: () => runEditorAction(pane, 'editor.action.quickCommand') },
   );
   openQuickPick('Editor command', items);
 }
@@ -6806,7 +7144,26 @@ function registerEditorKeybindings(pane: EditorPane) {
   bind(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyN, (active) => { newUntitledDoc(active); });
   bind(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyO, (active) => { void openLocalFile(undefined, active); });
   bind(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyP, (active) => openGoToFile(active));
-  bind(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyP, (active) => openCommandPalette(active));
+  // F1 rather than Ctrl+Shift+P, which is Print here: the chord every
+  // browser, Obsidian and most of Windows uses for it. F1 is what VS
+  // Code answers to as well. It displaces Monaco's own palette, which
+  // stays reachable as an entry inside this one.
+  bind(monaco.KeyCode.F1, (active) => openCommandPalette(active));
+  // An action rather than a bare command, so it also appears in
+  // Monaco's right-click menu.
+  pane.editor.addAction({
+    id: `xpecter.print.${scope}`,
+    label: 'Print…',
+    contextMenuGroupId: 'navigation',
+    contextMenuOrder: 9,
+    keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyP],
+    precondition: scope,
+    run: () => {
+      const active = focusedEditorPane() ?? pane;
+      const doc = active.activeDocId ? editorDocs.get(active.activeDocId) : null;
+      if (doc) void printDoc(doc);
+    },
+  });
   bind(monaco.KeyMod.Alt | monaco.KeyCode.KeyZ, toggleWordWrap);
   // Obsidian's own key for the same flip.
   bind(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyE, withDoc((doc) => { if (doc.markdown) toggleMarkdownMode(doc); }));
@@ -6827,12 +7184,17 @@ document.addEventListener('keydown', (e) => {
   const scope = pane.session.container ?? pane.root;
   const target = e.target as HTMLElement | null;
   if (target && target !== document.body && !scope.contains(target)) return;
+  if (e.key === 'F1' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    openCommandPalette(pane);
+    return;
+  }
   if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
   const doc = pane.activeDocId ? editorDocs.get(pane.activeDocId) : null;
   const key = e.key.toLowerCase();
   if (e.shiftKey) {
     if (key === 's' && doc) { e.preventDefault(); void saveDocAs(doc); }
-    else if (key === 'p') { e.preventDefault(); openCommandPalette(pane); }
+    else if (key === 'p' && doc) { e.preventDefault(); void printDoc(doc); }
     return;
   }
   if (key === 's' && doc) { e.preventDefault(); void saveDoc(doc); }
@@ -8503,7 +8865,7 @@ let copyOnSelectEnabled = localStorage.getItem('xpecter-copy-on-select') === 'on
 let rightClickPasteEnabled = localStorage.getItem('xpecter-rclick-paste') !== 'off';
 let highlightEnabled = localStorage.getItem('xpecter-highlight') !== 'off';
 
-type ShortcutId = 'disconnect' | 'paste' | 'sidebar' | 'zoomIn' | 'zoomOut' | 'resetZoom' | 'fullscreen' | 'splitVertical' | 'splitHorizontal' | 'closePane' | 'saveOutput';
+type ShortcutId = 'disconnect' | 'paste' | 'sidebar' | 'zoomIn' | 'zoomOut' | 'resetZoom' | 'fullscreen' | 'splitVertical' | 'splitHorizontal' | 'closePane' | 'saveOutput' | 'print';
 type ShortcutBinding = { ctrl: boolean; shift: boolean; alt: boolean; key: string };
 const DEFAULT_SHORTCUTS: Record<ShortcutId, ShortcutBinding> = {
   disconnect: { ctrl: true, shift: true, alt: false, key: 'x' },
@@ -8520,6 +8882,10 @@ const DEFAULT_SHORTCUTS: Record<ShortcutId, ShortcutBinding> = {
   // same job one session type over. They can never collide: this one is
   // only reachable from inside a terminal, that one from inside Monaco.
   saveOutput: { ctrl: true, shift: true, alt: false, key: 's' },
+  // The same chord prints the open document in an editor pane; there
+  // it is bound on Monaco rather than here, for the same reason as
+  // saveOutput above.
+  print: { ctrl: true, shift: true, alt: false, key: 'p' },
 };
 let shortcuts: Record<ShortcutId, ShortcutBinding> = loadShortcuts();
 
@@ -11452,6 +11818,11 @@ document.getElementById('menu-save-output')!.addEventListener('click', () => {
   void saveSessionOutput(focusedSession(tab));
 });
 
+document.getElementById('menu-print')!.addEventListener('click', () => {
+  closeAllMenus();
+  printFocusedPane();
+});
+
 document.getElementById('menu-clear-screen')!.addEventListener('click', async () => {
   closeAllMenus();
   const tab = activeTabId ? tabs.get(activeTabId) : null;
@@ -11777,6 +12148,7 @@ const SHORTCUT_GROUPS: { title: string; items: [ShortcutId | null, string][] }[]
       ['disconnect', 'Disconnect active session'],
       ['paste', 'Paste'],
       ['saveOutput', 'Save terminal output to a file'],
+      ['print', 'Print terminal output (or the open document)'],
     ],
   },
   {
