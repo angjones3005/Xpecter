@@ -286,6 +286,11 @@
        column is capped at a readable measure and centred; the fonts
        are the app's own, with code in the editor's monospace face. */
     .editor-markdown { position: absolute; inset: 0; display: none; flex-direction: column; background: var(--bg); }
+    /* With an editor wallpaper the note sits on the picture, like the
+       buffer does under the wallpaper theme. Code blocks, callouts and
+       tables keep their own backgrounds, for the same reason Monaco's
+       widgets stay opaque: text on a picture is only readable in a box. */
+    .editor-view.has-editor-wallpaper .editor-markdown { background: transparent; }
     .md-body { flex: 1 1 auto; min-height: 0; overflow: auto; outline: none; }
     /* Proportional, whatever face the rest of the app is in: a note is
        prose, and Obsidian's reading view is set in a text face too. */

@@ -1402,6 +1402,10 @@ function applyEditorWallpaperToPane(pane: EditorPane) {
   // rescale as content changes.
   body.style.backgroundSize = bg ? '100% 100%' : '';
   body.style.backgroundPosition = bg ? '0 0' : '';
+  // The reading view paints its own opaque page over the body; with a
+  // wallpaper set it goes transparent, the same way the wallpaper theme
+  // uncovers the picture behind Monaco.
+  pane.root.classList.toggle('has-editor-wallpaper', !!bg);
 }
 
 function applyEditorWallpaperVisual() {
