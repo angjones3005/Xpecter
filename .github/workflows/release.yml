@@ -22,6 +22,11 @@ jobs:
             platform: darwin
             artifact: xpecter-macos-universal.zip
     runs-on: ${{ matrix.os }}
+    # id-token is what the OIDC variant of the Azure login needs; the
+    # other permission is the default this would otherwise drop.
+    permissions:
+      contents: read
+      id-token: write
     env:
       # Windows binaries are code-signed through Azure Artifact Signing
       # when the signing secrets exist (see CODEBOOK.md, "Release
@@ -30,7 +35,20 @@ jobs:
       # fork or a machine with no Azure account still gets a build. An
       # unsigned build is what Defender on a managed machine deletes on
       # sight, which is the whole reason the signing steps exist.
-      SIGN_WINDOWS: ${{ secrets.AZURE_CLIENT_SECRET != '' && secrets.SIGNING_ACCOUNT_NAME != '' }}
+      #
+      # Two ways to authenticate, chosen by whether a client secret is
+      # present: a client secret on the app registration, or a
+      # federated (OIDC) credential on it plus AZURE_SUBSCRIPTION_ID,
+      # which is what Azure's own guide sets up.
+      HAS_TENANT: ${{ secrets.AZURE_TENANT_ID != '' }}
+      HAS_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID != '' }}
+      HAS_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET != '' }}
+      HAS_SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION_ID != '' }}
+      HAS_ENDPOINT: ${{ secrets.SIGNING_ENDPOINT != '' }}
+      HAS_ACCOUNT: ${{ secrets.SIGNING_ACCOUNT_NAME != '' }}
+      HAS_PROFILE: ${{ secrets.SIGNING_PROFILE_NAME != '' }}
+      SIGN_WINDOWS: ${{ secrets.AZURE_TENANT_ID != '' && secrets.AZURE_CLIENT_ID != '' && secrets.SIGNING_ENDPOINT != '' && secrets.SIGNING_ACCOUNT_NAME != '' && secrets.SIGNING_PROFILE_NAME != '' && (secrets.AZURE_CLIENT_SECRET != '' || secrets.AZURE_SUBSCRIPTION_ID != '') }}
+      SIGN_WITH_SECRET: ${{ secrets.AZURE_CLIENT_SECRET != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -124,18 +142,68 @@ jobs:
         run: wails build -platform windows/amd64 -ldflags "-X main.Version=${{ github.ref_name }}"
         shell: pwsh
 
+      # One no-op step per secret, so the run's step list (which is
+      # visible without the logs) says which of them the workflow could
+      # see. A skipped step here is a secret that is missing or named
+      # differently.
+      - name: "Signing: AZURE_TENANT_ID is set"
+        if: matrix.platform == 'windows' && env.HAS_TENANT == 'true'
+        run: echo ok
+      - name: "Signing: AZURE_CLIENT_ID is set"
+        if: matrix.platform == 'windows' && env.HAS_CLIENT_ID == 'true'
+        run: echo ok
+      - name: "Signing: AZURE_CLIENT_SECRET is set"
+        if: matrix.platform == 'windows' && env.HAS_CLIENT_SECRET == 'true'
+        run: echo ok
+      - name: "Signing: AZURE_SUBSCRIPTION_ID is set"
+        if: matrix.platform == 'windows' && env.HAS_SUBSCRIPTION == 'true'
+        run: echo ok
+      - name: "Signing: SIGNING_ENDPOINT is set"
+        if: matrix.platform == 'windows' && env.HAS_ENDPOINT == 'true'
+        run: echo ok
+      - name: "Signing: SIGNING_ACCOUNT_NAME is set"
+        if: matrix.platform == 'windows' && env.HAS_ACCOUNT == 'true'
+        run: echo ok
+      - name: "Signing: SIGNING_PROFILE_NAME is set"
+        if: matrix.platform == 'windows' && env.HAS_PROFILE == 'true'
+        run: echo ok
+
+      # The federated route: no secret on the runner at all, GitHub's
+      # OIDC token is exchanged for an Azure session that the signing
+      # action then picks up through the Azure CLI credential.
+      - name: Azure login (federated credential)
+        if: matrix.platform == 'windows' && env.SIGN_WINDOWS == 'true' && env.SIGN_WITH_SECRET != 'true'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
       # Signed in place, before it is zipped and before the installer
       # wraps it. The certificate comes from an Azure Artifact Signing
       # account; the runner never holds a key, it asks the service to
       # sign a hash. Timestamped so the signature outlives the
       # certificate's own validity.
-      - name: Sign xpecter.exe (Azure Artifact Signing)
-        if: matrix.platform == 'windows' && env.SIGN_WINDOWS == 'true'
+      - name: Sign xpecter.exe (Azure Artifact Signing, client secret)
+        if: matrix.platform == 'windows' && env.SIGN_WINDOWS == 'true' && env.SIGN_WITH_SECRET == 'true'
         uses: azure/artifact-signing-action@v2
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
           azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ secrets.SIGNING_PROFILE_NAME }}
+          files-folder: ${{ github.workspace }}\build\bin
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Sign xpecter.exe (Azure Artifact Signing, federated)
+        if: matrix.platform == 'windows' && env.SIGN_WINDOWS == 'true' && env.SIGN_WITH_SECRET != 'true'
+        uses: azure/artifact-signing-action@v2
+        with:
           endpoint: ${{ secrets.SIGNING_ENDPOINT }}
           signing-account-name: ${{ secrets.SIGNING_ACCOUNT_NAME }}
           certificate-profile-name: ${{ secrets.SIGNING_PROFILE_NAME }}
@@ -211,14 +279,27 @@ jobs:
       # SmartScreen at the download. Signed after the rename so the
       # file name is known, and only that file: xpecter.exe was signed
       # once already.
-      - name: Sign the installer (Azure Artifact Signing)
-        if: matrix.platform == 'windows' && env.SIGN_WINDOWS == 'true'
+      - name: Sign the installer (Azure Artifact Signing, client secret)
+        if: matrix.platform == 'windows' && env.SIGN_WINDOWS == 'true' && env.SIGN_WITH_SECRET == 'true'
         continue-on-error: true
         uses: azure/artifact-signing-action@v2
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
           azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ secrets.SIGNING_PROFILE_NAME }}
+          files: ${{ github.workspace }}\build\bin\xpecter-windows-installer.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Sign the installer (Azure Artifact Signing, federated)
+        if: matrix.platform == 'windows' && env.SIGN_WINDOWS == 'true' && env.SIGN_WITH_SECRET != 'true'
+        continue-on-error: true
+        uses: azure/artifact-signing-action@v2
+        with:
           endpoint: ${{ secrets.SIGNING_ENDPOINT }}
           signing-account-name: ${{ secrets.SIGNING_ACCOUNT_NAME }}
           certificate-profile-name: ${{ secrets.SIGNING_PROFILE_NAME }}

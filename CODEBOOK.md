@@ -141,10 +141,16 @@ unsigned, so a fork still builds.
 |---|---|
 | `AZURE_TENANT_ID` | The Entra tenant of the Azure subscription |
 | `AZURE_CLIENT_ID` | An app registration (service principal) given the **Artifact Signing Certificate Profile Signer** role on the signing account |
-| `AZURE_CLIENT_SECRET` | A client secret for that app registration |
+| `AZURE_CLIENT_SECRET` | A client secret for that app registration — **or** leave this out and set `AZURE_SUBSCRIPTION_ID` with a federated (OIDC) credential on the app registration for `repo:angjones3005/Xpecter:ref:refs/tags/*`, which is what Azure's own guide sets up |
 | `SIGNING_ENDPOINT` | The account's regional endpoint, e.g. `https://eus.codesigning.azure.net` |
 | `SIGNING_ACCOUNT_NAME` | The Artifact Signing account name |
 | `SIGNING_PROFILE_NAME` | The certificate profile (Public Trust) inside that account |
+
+They must be **repository** secrets (Settings → Secrets and variables →
+Actions → Repository secrets), not environment secrets and not
+variables: the build job declares no environment. The Windows job's
+step list shows one "Signing: … is set" step per secret; a skipped one
+is a secret the workflow could not see.
 
 Setting it up, once:
 
