@@ -122,6 +122,54 @@ Prefer `.\scripts\check.ps1` over typing `go test ./...` directly.
 - npm may advertise a newer major version of itself. Ignore it; CI pins
   Node 20 and its bundled npm.
 
+## Release Signing
+
+Unsigned Go binaries built minutes before download are what Defender on
+a managed machine deletes on sight, and what SmartScreen warns about on
+any machine. The release workflow therefore code-signs the Windows exe
+and the NSIS installer through **Azure Artifact Signing** (Microsoft's
+cloud signing service, previously called Trusted Signing). The runner
+never holds a certificate; it authenticates to the service and asks it
+to sign a hash, and the signature is RFC 3161 timestamped so it outlives
+the certificate.
+
+Signing is switched on by the presence of six repository secrets. When
+they are absent every signing step is skipped and the release ships
+unsigned, so a fork still builds.
+
+| Secret | What it is |
+|---|---|
+| `AZURE_TENANT_ID` | The Entra tenant of the Azure subscription |
+| `AZURE_CLIENT_ID` | An app registration (service principal) given the **Artifact Signing Certificate Profile Signer** role on the signing account |
+| `AZURE_CLIENT_SECRET` | A client secret for that app registration |
+| `SIGNING_ENDPOINT` | The account's regional endpoint, e.g. `https://eus.codesigning.azure.net` |
+| `SIGNING_ACCOUNT_NAME` | The Artifact Signing account name |
+| `SIGNING_PROFILE_NAME` | The certificate profile (Public Trust) inside that account |
+
+Setting it up, once:
+
+1. In the Azure portal create an **Artifact Signing** account (Basic tier
+   is enough), then an **identity validation** for the publisher. This is
+   the step that takes time: Microsoft verifies the legal identity the
+   certificate will name, an organisation or, in supported countries, an
+   individual.
+2. Once validated, add a **certificate profile** of type Public Trust.
+3. Create an app registration, give it a client secret, and assign it
+   the Certificate Profile Signer role on the signing account.
+4. Add the six secrets to the GitHub repository and push a tag.
+
+The signed publisher name is what a company's IT department allow-lists,
+so ask them for a publisher rule rather than a per-release hash rule.
+Every release also publishes `SHA256SUMS.txt` for hash-based rules.
+
+The version resource matters too. `wails.json`'s `info` block supplies
+the company, product, copyright and version strings Explorer shows under
+Properties → Details, and the release workflow stamps the tag into
+`productVersion` before building. To check them, read the file the way
+Explorer does (`Shell.Application` → `GetDetailsOf`): PowerShell 5.1's
+`(Get-Item x.exe).VersionInfo` shows blanks for these exes even though
+the resource is correct, which cost an hour of chasing nothing.
+
 ## Maintenance
 
 Update this file when any of the following changes:

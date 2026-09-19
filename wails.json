@@ -8,5 +8,12 @@
   "frontend:dev:serverUrl": "auto",
   "author": {
     "name": "Dawnrail"
+  },
+  "info": {
+    "companyName": "Dawnrail",
+    "productName": "Xpecter",
+    "productVersion": "3.5.0",
+    "copyright": "Copyright © Dawnrail",
+    "comments": "Terminal, SSH, serial and remote-file workbench"
   }
 }

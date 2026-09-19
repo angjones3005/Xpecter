@@ -22,6 +22,15 @@ jobs:
             platform: darwin
             artifact: xpecter-macos-universal.zip
     runs-on: ${{ matrix.os }}
+    env:
+      # Windows binaries are code-signed through Azure Artifact Signing
+      # when the signing secrets exist (see CODEBOOK.md, "Release
+      # signing"). Without them every step below that signs is skipped
+      # and the release ships unsigned, exactly as it did before, so a
+      # fork or a machine with no Azure account still gets a build. An
+      # unsigned build is what Defender on a managed machine deletes on
+      # sight, which is the whole reason the signing steps exist.
+      SIGN_WINDOWS: ${{ secrets.AZURE_CLIENT_SECRET != '' && secrets.SIGNING_ACCOUNT_NAME != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -87,6 +96,23 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      # The tag is the version. Wails stamps info.productVersion into
+      # the Windows version resource and the installer's own metadata,
+      # and it can only read it from wails.json, so the file is edited
+      # in the checkout before building. A binary with a real product
+      # name, company and version in its properties is one more thing
+      # that separates it from malware in the eyes of a scanner.
+      - name: Stamp the version into wails.json
+        shell: bash
+        run: |
+          node -e "
+            const fs = require('fs');
+            const j = JSON.parse(fs.readFileSync('wails.json', 'utf8'));
+            j.info = Object.assign({}, j.info, { productVersion: '${{ github.ref_name }}'.replace(/^v/, '') });
+            fs.writeFileSync('wails.json', JSON.stringify(j, null, 2) + '\n');
+          "
+          grep productVersion wails.json
+
       - name: Build (Linux)
         if: matrix.platform == 'linux'
         run: |
@@ -95,8 +121,39 @@ jobs:
 
       - name: Build (Windows)
         if: matrix.platform == 'windows'
+        run: wails build -platform windows/amd64 -ldflags "-X main.Version=${{ github.ref_name }}"
+        shell: pwsh
+
+      # Signed in place, before it is zipped and before the installer
+      # wraps it. The certificate comes from an Azure Artifact Signing
+      # account; the runner never holds a key, it asks the service to
+      # sign a hash. Timestamped so the signature outlives the
+      # certificate's own validity.
+      - name: Sign xpecter.exe (Azure Artifact Signing)
+        if: matrix.platform == 'windows' && env.SIGN_WINDOWS == 'true'
+        uses: azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ secrets.SIGNING_PROFILE_NAME }}
+          files-folder: ${{ github.workspace }}\build\bin
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Package Windows zip
+        if: matrix.platform == 'windows'
         run: |
-          wails build -platform windows/amd64 -ldflags "-X main.Version=${{ github.ref_name }}"
+          if ($env:SIGN_WINDOWS -eq 'true') { Write-Host "Packaging a signed xpecter.exe" } else { Write-Host "Packaging an UNSIGNED xpecter.exe (signing secrets not configured)" }
+          # Kept aside: the installer build below compiles a second exe
+          # over this one, and the signed copy is what goes back into
+          # the installer afterwards.
+          New-Item -ItemType Directory -Force signed | Out-Null
+          Copy-Item build/bin/xpecter.exe signed/xpecter.exe
           Compress-Archive -Path build/bin/* -DestinationPath ${{ matrix.artifact }}
         shell: pwsh
 
@@ -109,6 +166,22 @@ jobs:
         if: matrix.platform == 'windows'
         continue-on-error: true
         run: wails build -platform windows/amd64 -nsis -ldflags "-X main.Version=${{ github.ref_name }}"
+        shell: pwsh
+
+      # `wails build -nsis` compiled a fresh, unsigned exe and wrapped
+      # that. The signed copy goes back over it and makensis is run
+      # again on the project Wails just generated, with the same
+      # argument Wails itself passes, so the installer carries the
+      # signed binary. The WebView2 bootstrapper and the generated .nsh
+      # are still in place from the Wails run.
+      - name: Rebuild the installer around the signed exe
+        if: matrix.platform == 'windows' && env.SIGN_WINDOWS == 'true'
+        continue-on-error: true
+        run: |
+          Copy-Item signed/xpecter.exe build/bin/xpecter.exe -Force
+          Push-Location build/windows/installer
+          makensis -DARG_WAILS_AMD64_BINARY=..\..\bin\xpecter.exe project.nsi
+          Pop-Location
         shell: pwsh
 
       # The exact filename Wails gives the NSIS installer isn't
@@ -132,6 +205,27 @@ jobs:
             Write-Host "No installer file found in build/bin, NSIS build likely failed above."
           }
         shell: pwsh
+
+      # The installer is its own executable and gets its own signature;
+      # a signed exe inside an unsigned installer still trips
+      # SmartScreen at the download. Signed after the rename so the
+      # file name is known, and only that file: xpecter.exe was signed
+      # once already.
+      - name: Sign the installer (Azure Artifact Signing)
+        if: matrix.platform == 'windows' && env.SIGN_WINDOWS == 'true'
+        continue-on-error: true
+        uses: azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ secrets.SIGNING_PROFILE_NAME }}
+          files: ${{ github.workspace }}\build\bin\xpecter-windows-installer.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
 
       - name: Upload Windows installer (NSIS)
         if: matrix.platform == 'windows'
@@ -166,6 +260,14 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+
+      # One line per asset. This is what an IT department asks for when
+      # it allow-lists a program by hash rather than by publisher, and
+      # what anyone can check a download against.
+      - name: Write SHA-256 checksums
+        run: |
+          cd artifacts
+          sha256sum * | tee SHA256SUMS.txt
 
       - name: Publish release (Xpecter repo, private)
         uses: softprops/action-gh-release@v2
