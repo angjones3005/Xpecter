@@ -3168,6 +3168,9 @@ type EditorPrefs = {
   // Which face a Markdown file opens with. Follows the last toggle, so
   // someone who keeps switching to source stops having to.
   markdownMode: MarkdownMode;
+  // Zoom of the reading view, shared by every note the way Obsidian's
+  // zoom is: 1 is the stylesheet's own size.
+  markdownZoom: number;
 };
 
 const DEFAULT_EDITOR_PREFS: EditorPrefs = {
@@ -3178,6 +3181,7 @@ const DEFAULT_EDITOR_PREFS: EditorPrefs = {
   insertSpaces: true,
   treeWidth: 212,
   markdownMode: 'reading',
+  markdownZoom: 1,
 };
 
 // Below this the header's five action glyphs collide with the folder
@@ -4318,7 +4322,71 @@ function buildMarkdownView(pane: EditorPane, doc: EditorDoc): MarkdownView {
     const input = event.target as HTMLInputElement | null;
     if (input && input.classList.contains('md-task')) toggleMarkdownTask(doc, input);
   });
+  applyMarkdownZoom(view);
+  // The same Ctrl+wheel, pinch and Ctrl +/-/0 the PDF and image viewers
+  // answer to; the body is focusable, so the keys work once the note is
+  // on screen.
+  wireZoomGestures({
+    surface: body,
+    zoomAt: (factor, x, y) => zoomMarkdownAt(view, factor, x, y),
+    reset: () => setMarkdownZoom(1),
+  });
   return view;
+}
+
+// --- Reading view zoom ---
+//
+// One zoom for every note rather than one per document, as in Obsidian:
+// it is a reading preference, not a property of the file. Applied with
+// CSS zoom on the page so the type, the images and the measure all
+// scale together, and remembered across sessions.
+
+const MARKDOWN_MIN_ZOOM = 0.5;
+const MARKDOWN_MAX_ZOOM = 3;
+
+function applyMarkdownZoom(view: MarkdownView) {
+  view.page.style.setProperty('zoom', String(editorPrefs.markdownZoom));
+}
+
+function setMarkdownZoom(zoom: number) {
+  const next = Math.min(MARKDOWN_MAX_ZOOM, Math.max(MARKDOWN_MIN_ZOOM, Math.round(zoom * 100) / 100));
+  if (next === editorPrefs.markdownZoom) return;
+  editorPrefs.markdownZoom = next;
+  saveEditorPrefs();
+  for (const doc of editorDocs.values()) {
+    if (doc.markdown) applyMarkdownZoom(doc.markdown);
+  }
+  // The status bar shows the zoom once it is not 100%, on whichever
+  // panes have a note in front.
+  for (const pane of editorPanes.values()) {
+    const active = pane.activeDocId ? editorDocs.get(pane.activeDocId) : null;
+    if (active?.markdown) renderEditorStatusBar(pane);
+  }
+}
+
+// Anchored zoom, the same idea as the image viewer's: the point under
+// the cursor stays under it, so the note grows toward the pointer.
+function zoomMarkdownAt(view: MarkdownView, factor: number, clientX: number, clientY: number) {
+  const rect = view.body.getBoundingClientRect();
+  const px = clientX - rect.left;
+  const py = clientY - rect.top;
+  const before = editorPrefs.markdownZoom;
+  const contentX = view.body.scrollLeft + px;
+  const contentY = view.body.scrollTop + py;
+  setMarkdownZoom(before * factor);
+  const ratio = editorPrefs.markdownZoom / before;
+  if (ratio === 1) return;
+  view.body.scrollLeft = contentX * ratio - px;
+  view.body.scrollTop = contentY * ratio - py;
+}
+
+// For the palette, which has no pointer to zoom toward: the middle of
+// the note.
+function zoomMarkdownBy(doc: EditorDoc, factor: number) {
+  const view = doc.markdown;
+  if (!view) return;
+  const rect = view.body.getBoundingClientRect();
+  zoomMarkdownAt(view, factor, rect.left + rect.width / 2, rect.top + rect.height / 2);
 }
 
 function destroyMarkdownView(view: MarkdownView) {
@@ -5800,7 +5868,72 @@ function renderDocBar(pane: EditorPane) {
   const action = runPlanFor(active ?? null);
   if (active && action) pane.docBar.appendChild(buildRunButton(pane, active, action));
   if (active?.markdown) pane.docBar.appendChild(buildMarkdownToggle(active));
+  // Pinned at the far end, and only once there is more than one file to
+  // close: with a single document open it would be a second close
+  // button for the same thing.
+  if (pane.docIds.length >= 2) {
+    const closeAll = document.createElement('div');
+    closeAll.className = 'doc-close-all';
+    closeAll.textContent = '✕ Close all';
+    closeAll.title = `Close all ${pane.docIds.length} files (Ctrl+K Ctrl+W)`;
+    closeAll.onclick = () => { void closeAllDocs(pane); };
+    pane.docBar.appendChild(closeAll);
+  }
   refreshTreeHighlights(pane);
+}
+
+// --- Closing several documents at once ---
+//
+// Each one goes through closeDoc, so a file with unsaved changes gets
+// the same save / discard / cancel question it would on its own, and it
+// is brought to the front first so the question is about the file on
+// screen. Cancel stops the whole run with everything after it still
+// open, which is what cancel means.
+async function closeDocs(pane: EditorPane, docIds: string[]): Promise<boolean> {
+  for (const docId of docIds) {
+    const doc = editorDocs.get(docId);
+    if (!doc) continue;
+    if (doc.dirty) setActiveDoc(pane, doc.id);
+    if (!(await closeDoc(doc))) return false;
+  }
+  return true;
+}
+
+function closeAllDocs(pane: EditorPane): Promise<boolean> {
+  return closeDocs(pane, [...pane.docIds]);
+}
+
+function closeOtherDocs(pane: EditorPane, keep: EditorDoc): Promise<boolean> {
+  return closeDocs(pane, pane.docIds.filter((id) => id !== keep.id));
+}
+
+function closeDocsToTheRight(pane: EditorPane, from: EditorDoc): Promise<boolean> {
+  const index = pane.docIds.indexOf(from.id);
+  return closeDocs(pane, index < 0 ? [] : pane.docIds.slice(index + 1));
+}
+
+function closeSavedDocs(pane: EditorPane): Promise<boolean> {
+  return closeDocs(pane, pane.docIds.filter((id) => !editorDocs.get(id)?.dirty));
+}
+
+// Right-click on a document tab: the set of close commands every editor
+// puts there, so clearing a strip of twelve files is one gesture rather
+// than twelve.
+function showDocTabMenu(pane: EditorPane, doc: EditorDoc, x: number, y: number) {
+  const index = pane.docIds.indexOf(doc.id);
+  const others = pane.docIds.length - 1;
+  const toRight = index < 0 ? 0 : pane.docIds.length - index - 1;
+  const items: { label: string; run: () => void }[] = [
+    { label: 'Close', run: () => { void closeDoc(doc); } },
+  ];
+  if (others > 0) items.push({ label: `Close Others (${others})`, run: () => { void closeOtherDocs(pane, doc); } });
+  if (toRight > 0) items.push({ label: `Close to the Right (${toRight})`, run: () => { void closeDocsToTheRight(pane, doc); } });
+  if (pane.docIds.some((id) => editorDocs.get(id)?.dirty)) {
+    items.push({ label: 'Close Saved', run: () => { void closeSavedDocs(pane); } });
+  }
+  items.push({ label: `Close All (${pane.docIds.length})`, run: () => { void closeAllDocs(pane); } });
+  if (doc.path) items.push({ label: 'Copy Path', run: () => { void navigator.clipboard.writeText(doc.path!); } });
+  showPaneContextMenu(x, y, items);
 }
 
 // Reading or editing, the way Obsidian's tab header shows it: the
@@ -5827,6 +5960,10 @@ function buildDocTab(pane: EditorPane, doc: EditorDoc, isActive: boolean): HTMLD
     if (e.button !== 1) return;
     e.preventDefault();
     void closeDoc(doc);
+  };
+  el.oncontextmenu = (e) => {
+    e.preventDefault();
+    showDocTabMenu(pane, doc, e.clientX, e.clientY);
   };
   el.addEventListener('dragstart', (event) => {
     event.dataTransfer?.setData('text/xpecter-doc-id', doc.id);
@@ -5964,7 +6101,14 @@ function renderEditorStatusBar(pane: EditorPane) {
     const words = countWords(doc.model.getValue());
     const face = doc.markdown.mode === 'reading' ? 'Reading view' : 'Source';
     statusItem(pane, `${face} · ${words} ${words === 1 ? 'word' : 'words'}`, 'Toggle reading view (Ctrl+E)', () => toggleMarkdownMode(doc));
-    if (doc.markdown.mode === 'reading') return;
+    if (doc.markdown.mode === 'reading') {
+      // Only once it is not 100%: at the stylesheet's own size there is
+      // nothing to report, and a click puts it back there.
+      if (editorPrefs.markdownZoom !== 1) {
+        statusItem(pane, `${Math.round(editorPrefs.markdownZoom * 100)}%`, 'Reset zoom (Ctrl+0)', () => setMarkdownZoom(1));
+      }
+      return;
+    }
   }
 
   pane.positionEl = statusItem(pane, '', 'Go to line (Ctrl+G)', () => runEditorAction(pane, 'editor.action.gotoLine'));
@@ -7011,6 +7155,8 @@ function openCommandPalette(pane: EditorPane) {
       { label: 'Print…', hint: 'Ctrl+Shift+P', run: () => { void printDoc(doc); } },
       { label: 'Reload From Disk', detail: doc.path ?? 'nothing to reload from', run: () => { void reloadDoc(doc); } },
       { label: 'Close File', hint: 'Ctrl+W', run: () => { void closeDoc(doc); } },
+      { label: 'Close All Files', hint: 'Ctrl+K Ctrl+W', detail: `${pane.docIds.length} open in this pane`, run: () => { void closeAllDocs(pane); } },
+      { label: 'Close Other Files', run: () => { void closeOtherDocs(pane, doc); } },
       { label: 'Open Outside Xpecter', detail: 'the application your system uses for this file', run: () => { void openViewerExternally(doc); } },
       { label: 'Delete File…', detail: doc.path ?? 'never saved, so there is nothing to delete', run: () => { void deleteOpenDoc(pane, doc); } },
       { label: 'Copy File Path', run: () => { if (doc.path) void navigator.clipboard.writeText(doc.path); } },
@@ -7024,6 +7170,14 @@ function openCommandPalette(pane: EditorPane) {
         hint: 'Ctrl+E',
         run: () => toggleMarkdownMode(doc),
       });
+      if (reading) {
+        const zoom = `${Math.round(editorPrefs.markdownZoom * 100)}%`;
+        items.push(
+          { label: 'Zoom In', detail: `reading view, now ${zoom}`, hint: 'Ctrl+=', run: () => zoomMarkdownBy(doc, ZOOM_KEY_STEP) },
+          { label: 'Zoom Out', detail: `reading view, now ${zoom}`, hint: 'Ctrl+-', run: () => zoomMarkdownBy(doc, 1 / ZOOM_KEY_STEP) },
+          { label: 'Reset Zoom', detail: `reading view, now ${zoom}`, hint: 'Ctrl+0', run: () => setMarkdownZoom(1) },
+        );
+      }
     }
     items.push(
       { label: 'Save', hint: 'Ctrl+S', run: () => { void saveDoc(doc); } },
@@ -7032,6 +7186,9 @@ function openCommandPalette(pane: EditorPane) {
       { label: 'Print…', hint: 'Ctrl+Shift+P', detail: doc.markdown ? 'the rendered note' : 'highlighted source', run: () => { void printDoc(doc); } },
       { label: 'Reload From Disk', detail: doc.path ?? 'nothing to reload from', run: () => { void reloadDoc(doc); } },
       { label: 'Close File', hint: 'Ctrl+W', run: () => { void closeDoc(doc); } },
+      { label: 'Close All Files', hint: 'Ctrl+K Ctrl+W', detail: `${pane.docIds.length} open in this pane`, run: () => { void closeAllDocs(pane); } },
+      { label: 'Close Other Files', run: () => { void closeOtherDocs(pane, doc); } },
+      { label: 'Close Saved Files', detail: 'everything without unsaved changes', run: () => { void closeSavedDocs(pane); } },
       { label: 'Run File', detail: runCommandLabel(doc), run: () => { void runDoc(pane, doc); } },
       { label: 'Delete File…', detail: doc.path ?? 'never saved, so there is nothing to delete', run: () => { void deleteOpenDoc(pane, doc); } },
       { label: 'Copy File Path', run: () => { if (doc.path) void navigator.clipboard.writeText(doc.path); } },
@@ -7141,6 +7298,10 @@ function registerEditorKeybindings(pane: EditorPane) {
   bind(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, withDoc((doc) => { void saveDoc(doc); }));
   bind(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyS, withDoc((doc) => { void saveDocAs(doc); }));
   bind(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyW, withDoc((doc) => { void closeDoc(doc); }));
+  // VS Code's chord for the same thing. Ctrl+K is already a chord prefix
+  // in Monaco (Ctrl+K Ctrl+C comments a line), so this joins that family
+  // rather than taking a key of its own.
+  bind(monaco.KeyMod.chord(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK, monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyW), (active) => { void closeAllDocs(active); });
   bind(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyN, (active) => { newUntitledDoc(active); });
   bind(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyO, (active) => { void openLocalFile(undefined, active); });
   bind(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyP, (active) => openGoToFile(active));
