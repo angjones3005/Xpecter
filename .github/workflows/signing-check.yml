@@ -1,0 +1,117 @@
+# Answers "why did the release not sign?" without cutting a release.
+#
+# Runs on pushes to the signing-check branch and on demand from the
+# Actions tab. One no-op step per secret makes the step list say which
+# secrets this repository's workflows can see, and if the set needed
+# for Azure Artifact Signing is complete it signs a throwaway copy of a
+# system exe and verifies the signature, which proves the credentials,
+# the role assignment and the certificate profile end to end.
+name: Signing check
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - signing-check
+
+jobs:
+  check:
+    name: Which secrets can workflows see, and does signing work
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      HAS_TENANT: ${{ secrets.AZURE_TENANT_ID != '' }}
+      HAS_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID != '' }}
+      HAS_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET != '' }}
+      HAS_SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION_ID != '' }}
+      HAS_ENDPOINT: ${{ secrets.SIGNING_ENDPOINT != '' }}
+      HAS_ACCOUNT: ${{ secrets.SIGNING_ACCOUNT_NAME != '' }}
+      HAS_PROFILE: ${{ secrets.SIGNING_PROFILE_NAME != '' }}
+      # The control: this secret is known to exist and to work (the
+      # release workflow publishes with it). If this step is skipped
+      # too, the detection itself is broken rather than the secrets.
+      HAS_DAWNRAIL_TOKEN: ${{ secrets.DAWNRAIL_TOKEN != '' }}
+      SIGN_WINDOWS: ${{ secrets.AZURE_TENANT_ID != '' && secrets.AZURE_CLIENT_ID != '' && secrets.SIGNING_ENDPOINT != '' && secrets.SIGNING_ACCOUNT_NAME != '' && secrets.SIGNING_PROFILE_NAME != '' && (secrets.AZURE_CLIENT_SECRET != '' || secrets.AZURE_SUBSCRIPTION_ID != '') }}
+      SIGN_WITH_SECRET: ${{ secrets.AZURE_CLIENT_SECRET != '' }}
+    steps:
+      - name: "Control: DAWNRAIL_TOKEN is set"
+        if: env.HAS_DAWNRAIL_TOKEN == 'true'
+        run: echo ok
+      - name: "AZURE_TENANT_ID is set"
+        if: env.HAS_TENANT == 'true'
+        run: echo ok
+      - name: "AZURE_CLIENT_ID is set"
+        if: env.HAS_CLIENT_ID == 'true'
+        run: echo ok
+      - name: "AZURE_CLIENT_SECRET is set"
+        if: env.HAS_CLIENT_SECRET == 'true'
+        run: echo ok
+      - name: "AZURE_SUBSCRIPTION_ID is set"
+        if: env.HAS_SUBSCRIPTION == 'true'
+        run: echo ok
+      - name: "SIGNING_ENDPOINT is set"
+        if: env.HAS_ENDPOINT == 'true'
+        run: echo ok
+      - name: "SIGNING_ACCOUNT_NAME is set"
+        if: env.HAS_ACCOUNT == 'true'
+        run: echo ok
+      - name: "SIGNING_PROFILE_NAME is set"
+        if: env.HAS_PROFILE == 'true'
+        run: echo ok
+
+      - name: Prepare a throwaway exe to sign
+        if: env.SIGN_WINDOWS == 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force tosign | Out-Null
+          Copy-Item "$env:SystemRoot\System32\where.exe" tosign\sample.exe
+          (Get-AuthenticodeSignature tosign\sample.exe).Status
+
+      - name: Azure login (federated credential)
+        if: env.SIGN_WINDOWS == 'true' && env.SIGN_WITH_SECRET != 'true'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign the sample (client secret)
+        if: env.SIGN_WINDOWS == 'true' && env.SIGN_WITH_SECRET == 'true'
+        uses: azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ secrets.SIGNING_PROFILE_NAME }}
+          files-folder: ${{ github.workspace }}\tosign
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Sign the sample (federated)
+        if: env.SIGN_WINDOWS == 'true' && env.SIGN_WITH_SECRET != 'true'
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ secrets.SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ secrets.SIGNING_PROFILE_NAME }}
+          files-folder: ${{ github.workspace }}\tosign
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify the signature
+        if: env.SIGN_WINDOWS == 'true'
+        shell: pwsh
+        run: |
+          $s = Get-AuthenticodeSignature tosign\sample.exe
+          "Status: $($s.Status)"
+          "Signer: $($s.SignerCertificate.Subject)"
+          "Timestamp: $($s.TimeStamperCertificate.Subject)"
+          if ($s.Status -ne 'Valid') { throw "Signature is $($s.Status)" }
