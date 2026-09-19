@@ -3827,8 +3827,13 @@ function wireZoomGestures(z: ZoomController) {
     if (!e.ctrlKey) return; // an ordinary scroll; leave it to the surface
     e.preventDefault();
     // exp keeps the step multiplicative and symmetric, so zooming in then
-    // out by the same amount returns to where it started.
-    queue(Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY);
+    // out by the same amount returns to where it started. A mouse notch
+    // is 100 units in pixel mode (about 3 in line mode, 1 in page mode,
+    // normalised here the way the terminal's handler does), and lands
+    // at roughly 13% per notch; a trackpad pinch arrives as many small
+    // deltas and adds up to a smooth glide at the same rate.
+    const perUnit = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 100 : 1;
+    queue(Math.exp(-e.deltaY * perUnit * 0.0012), e.clientX, e.clientY);
   }, { passive: false });
 
   let pinch = 0;
