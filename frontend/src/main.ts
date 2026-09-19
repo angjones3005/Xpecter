@@ -1251,9 +1251,14 @@ function zoomBy(delta: number) {
 // deltaY is normalised because a wheel reports pixels, lines or pages
 // depending on the device, and a line-mode wheel reports about 3 per
 // notch: without this a mouse in line mode would never reach a step.
+// A viewer surface — a PDF, an image, a rendered note — has a zoom of
+// its own and is left to handle the gesture itself; this listener is
+// capture-phase, so without the check it would swallow the wheel before
+// the viewer's listener ever ran and resize the terminal font instead.
 let ctrlWheelDelta = 0;
 window.addEventListener('wheel', (event) => {
   if (!event.ctrlKey) return;
+  if ((event.target as HTMLElement | null)?.closest?.('[data-zoom-surface]')) return;
   event.preventDefault();
   event.stopPropagation();
   const perUnit = event.deltaMode === 1 ? 33 : event.deltaMode === 2 ? 400 : 1;
@@ -3791,6 +3796,10 @@ function zoomFromCenter(z: ZoomController, factor: number) {
 }
 
 function wireZoomGestures(z: ZoomController) {
+  // Marks the surface for the window-level Ctrl+wheel handler, which
+  // otherwise claims the gesture for the terminal font before it gets
+  // here.
+  z.surface.dataset.zoomSurface = 'true';
   // Deltas that arrive within one frame — a trackpad pinch fires a burst
   // of them — collapse into a single application, so the viewer redraws
   // at most once per frame however fast the gesture.
