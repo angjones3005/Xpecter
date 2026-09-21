@@ -1581,6 +1581,43 @@ func (a *App) DeleteFolder(id string) error {
 	return config.SaveFolders(config.RemoveByID(folders, id, folderID))
 }
 
+// --- Reordering the sidebar's lists ---
+// Each list is stored as an array and shown in array order, so a drag
+// in the sidebar is saved as a new order of ids. Anything not listed
+// keeps its place after the listed ones (config.ReorderByID).
+
+func (a *App) ReorderSessions(ids []string) error {
+	sessions, err := config.LoadSessions()
+	if err != nil {
+		return err
+	}
+	return config.SaveSessions(config.ReorderByID(sessions, ids, sessionID))
+}
+
+func (a *App) ReorderGroups(ids []string) error {
+	groups, err := config.LoadGroups()
+	if err != nil {
+		return err
+	}
+	return config.SaveGroups(config.ReorderByID(groups, ids, groupID))
+}
+
+func (a *App) ReorderFolders(ids []string) error {
+	folders, err := config.LoadFolders()
+	if err != nil {
+		return err
+	}
+	return config.SaveFolders(config.ReorderByID(folders, ids, folderID))
+}
+
+func (a *App) ReorderLocalShellProfiles(ids []string) error {
+	profiles, err := config.LoadLocalShellProfiles()
+	if err != nil {
+		return err
+	}
+	return config.SaveLocalShellProfiles(config.ReorderByID(profiles, ids, localShellProfileID))
+}
+
 // --- Session groups (folders) ---
 
 func (a *App) ListGroups() ([]config.SessionGroup, error) {

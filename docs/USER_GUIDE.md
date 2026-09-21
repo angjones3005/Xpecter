@@ -2,7 +2,7 @@
 
 Xpecter is a desktop terminal for people who spend the day on remote machines and network hardware. One window holds SSH sessions, local shells, serial consoles, Telnet and Mosh, saved Remote Desktop and VNC sessions, a code editor that works on local and remote files, and a handful of network tools. It runs the same way on Windows, macOS and Linux.
 
-This guide covers everything the app does and how to use it, as of v3.8.0. It is written for someone who has never opened Xpecter. If you only want the short version, read [At a glance](#at-a-glance) and [Your first connection](#your-first-connection).
+This guide covers everything the app does and how to use it, as of v3.9.0. It is written for someone who has never opened Xpecter. If you only want the short version, read [At a glance](#at-a-glance) and [Your first connection](#your-first-connection).
 
 ---
 
@@ -194,7 +194,7 @@ Not a picker tile, but in the Terminal menu: **New Mosh Session…** asks for `u
 
 Enter host, port (3389), user and an optional domain. Choose a display mode:
 
-- **Full screen**
+- **Full screen** (the default)
 - **Resizable window**, where the remote desktop follows the window size as you drag it
 - A fixed **1280×800**, **1600×900** or **1920×1080** window, scaled into whatever size you give it
 
@@ -227,6 +227,8 @@ Below it, in order: a **★ Pinned** group, a **Running** group listing sessions
 Clicking a session that is already connected switches to its tab instead of opening a second connection. To open a second connection deliberately, use **Open another session** from the right-click menu.
 
 **Filter sessions…** matches on name, host, serial port and tags, and filters local shell profiles at the same time. Arrow keys and Enter work from the field. While a filter is active the folders step aside and rows show their address, so a match on a host still shows why.
+
+**Reordering.** Every list in the sidebar is in the order you put it in. Drag a session above or below another to move it there; dropped beside a session in another folder, it joins that folder at that spot, and dropped on a folder's header it goes in at the end. Drag a folder's header above or below another folder to reorder folders, into or out of a parent. Home lists sessions and folders in the same order.
 
 ### Right-click menu on a session
 
@@ -271,7 +273,7 @@ All three report how many sessions were imported.
 
 ### Local shells and Folders sections
 
-**Local shells** lists your shell profiles; click one to open it, hover for a delete action. **Folders** lists pinned workspace folders; click one to open it in an editor. A folder currently open in an editor is highlighted. Pin a folder from this section's `+` or from the editor's folder menu.
+**Local shells** lists your shell profiles; click one to open it, hover for a delete action. **Folders** lists pinned workspace folders; click one to open it in an editor. A folder currently open in an editor is highlighted. Pin a folder from this section's `+` or from the editor's folder menu. Drag rows in either section above or below one another to reorder them; the Terminal menu, the editor's folder menu and Home keep the same order.
 
 ---
 
@@ -376,6 +378,12 @@ A PDF gets a tab like any document, from the tree or from the remote browser (a 
 ### Viewing images
 
 PNG, JPEG, GIF, WebP, BMP, ICO, SVG and AVIF open in a viewer tab with the same fit, actual-size and zoom controls as the PDF viewer. A small image is never blown up past its real size. Transparency shows against a checkerboard. TIFF and PSD go to the system application.
+
+### Markdown notes
+
+A Markdown file opens as a rendered note, the way Obsidian shows one. The **📖 Reading** / **✎ Source** toggle on the document strip (Ctrl+E) switches between the note and its source, the palette has the same two commands, and the face you last chose is the one the next note opens in. The reading view follows `[[wikilinks]]` to other notes in the folder, ticks task-list boxes back into the file, shows front matter as a properties table, and draws callouts, tags, tables and code blocks with the editor's own colouring.
+
+Ctrl+wheel, pinch, or Ctrl with + / - / 0 zoom the note, one zoom for every note. Zoomed past 100% the note keeps the width it had, so it grows past the edge of the pane and scrolls sideways, the way a zoomed PDF does: drag the scrollbar, hold Shift while scrolling, or use the arrow keys.
 
 ### Running a file
 
@@ -564,6 +572,7 @@ View > **Keyboard Shortcuts…** lists every binding. Click one to rebind it, pr
 | Find in files | Ctrl+Shift+F |
 | Next / previous document | Ctrl+PageDown / Ctrl+PageUp |
 | Toggle word wrap | Alt+Z |
+| Markdown: reading view or source | Ctrl+E |
 
 Ctrl+S saves when an editor pane has focus. In a terminal, Ctrl+Shift+S saves output. The two never collide.
 

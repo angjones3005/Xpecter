@@ -2,7 +2,7 @@
 
 Xpecter is a desktop terminal for people who spend the day on remote machines and network hardware. One window holds SSH sessions, local shells, serial consoles, Telnet and Mosh, saved Remote Desktop and VNC sessions, a code editor that works on local and remote files, an SFTP browser, and a set of network tools. It runs the same way on Windows, macOS and Linux.
 
-This page lists every feature in Xpecter 3.8 and how to reach it. `Ctrl` means `Cmd` on macOS; the app shows the right key for your platform.
+This page lists every feature in Xpecter 3.9 and how to reach it. `Ctrl` means `Cmd` on macOS; the app shows the right key for your platform.
 
 ## Contents
 
@@ -111,7 +111,7 @@ Unencrypted, for legacy equipment. Enter the host and port (default 23). Xpecter
 Terminal > **New Mosh Session…** asks for `user@host` and runs `mosh` in a local shell, with Xpecter's tabs, resizing, logging and highlighting. The local machine needs the `mosh` client and the host needs `mosh-server` with its UDP ports open.
 
 ### 5. Remote Desktop
-Enter host, port, user and an optional domain, and choose full screen, a resizable window whose remote desktop follows the window size as you drag it, or a fixed resolution scaled into whatever size you give it. **Console session (/admin)** attaches to the console.
+Enter host, port, user and an optional domain, and choose full screen (the default), a resizable window whose remote desktop follows the window size as you drag it, or a fixed resolution scaled into whatever size you give it. **Console session (/admin)** attaches to the console.
 
 Xpecter does not draw the desktop itself. It writes a `.rdp` file with everything filled in and starts the client your platform already has: Remote Desktop Connection on Windows, Windows App on macOS, FreeRDP or Remmina on Linux. The client asks for the password; Xpecter never stores one. A pane stands for the session, showing whether the window is still open, with **R** to open it again, **D** to close the window and **Enter** to close the pane.
 
@@ -133,6 +133,9 @@ Pin to top or Unpin, Open another session, Edit session, Forget saved password (
 
 ### Folders and pinning
 Create folders from Sessions > New Folder or the 📁 button. Folders nest, and a session dragged onto a folder moves there. Right-click a folder to rename or delete it; deleting a folder moves its sessions out. Pinned sessions sit at the top of the sidebar and lead Home, so the machines you reach for every day are one click away on a cold start.
+
+### Arrange the sidebar by dragging
+Every list in the sidebar is in the order you put it in. Drag a session above or below another to move it there, beside a session in another folder to move it into that folder at that spot, or onto a folder's header to add it at the end. Folder headers drag the same way, above or below another folder, into or out of a parent. Pinned folders and shell profiles reorder by the same drag, and Home, the Terminal menu and the editor's folder menu keep the order.
 
 ### Tags, tag colours and the production guard
 The Edit session dialog takes comma-separated tags, and both the sidebar filter and Quick connect search them. A tag can carry a colour: `prod` and `production` start red, `staging` orange, `dev`, `lab` and `test` green, and any tag can be added, recoloured or removed in Settings > **Tag colours**. A session with a coloured tag shows it as a pill in the sidebar, on its tab and on its pane header, so a terminal on a production box is recognisable from across the room.
@@ -215,6 +218,9 @@ Every row in the tree opens. Text opens in the editor. PDFs and common images op
 
 ### Reading PDFs and viewing images
 A PDF gets a tab like any document, from the tree or from the remote browser, and one on a host opens straight from the host. The viewer fits the page to the pane, has zoom, actual-size and fit-width buttons and a page counter that follows as you scroll; pinch, Ctrl+scroll, or Ctrl with + / - / 0 zoom around the point under the cursor. PNG, JPEG, GIF, WebP, BMP, ICO, SVG and AVIF open in an image viewer with the same controls, and transparency shows against a checkerboard.
+
+### Markdown notes
+A Markdown file opens as a rendered note, the way Obsidian shows one, with a toggle on the document strip (Ctrl+E) between the note and its source. The reading view follows wikilinks to other notes in the folder, ticks task-list boxes back into the file, shows front matter as a properties table, and draws callouts, tags, tables and code blocks with the editor's own colouring. Ctrl+wheel, pinch, or Ctrl with + / - / 0 zoom the note; zoomed past 100% it keeps its width and scrolls sideways like a zoomed PDF, so nothing is ever cut off.
 
 ### Running a file
 The **Run** button on the document strip, or Run File in the palette, saves the file and runs it: HTML in your browser; Python, PowerShell, shell, batch and Node scripts in a live shell opened in the file's own directory, so the output stays on screen and Up then Enter runs it again. A script opened from a host runs on that host.

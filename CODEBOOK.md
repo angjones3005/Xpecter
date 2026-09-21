@@ -51,7 +51,8 @@ tested: ANSI colour-state reading (`ansi.ts`), shell quoting
 (`shellquote.ts`), the Markdown task-marker scan (`markdown.ts`),
 paste line splitting (`paste.ts`), the saved-workspace format
 (`workspace.ts`), tag colours and guards (`tags.ts`), custom highlight
-rules (`highlightrules.ts`) and the OSC 7 and hex-dump helpers (`osc.ts`).
+rules (`highlightrules.ts`), the OSC 7 and hex-dump helpers (`osc.ts`) and
+the drag-to-reorder arithmetic (`reorder.ts`).
 `check.ps1` and CI run them between eslint and the Vite build. Anything
 that touches the DOM stays in `main.ts` and is exercised in the running
 app instead.

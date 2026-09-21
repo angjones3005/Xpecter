@@ -118,6 +118,10 @@
     .side-group .name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .side-group .count { flex: 0 0 auto; opacity: 0.6; font-size: 10px; }
     .side-group.drop-target, .side-row.drop-target { box-shadow: inset 0 0 0 1px var(--accent); background: var(--hover); }
+    /* A row dragged above or below another: the line is the side it
+       will land on. */
+    .side-row.drop-before, .side-group.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+    .side-row.drop-after, .side-group.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
     /* SPE-106: a pinned folder that is currently open in an editor,
        the folder equivalent of the live dot on a running session. */
     .side-row.folder-open .name { color: var(--accent-ink); }
@@ -1431,8 +1435,8 @@
         <input id="rdp-domain" placeholder="domain — optional, e.g. CORP (not a password)" class="dialog-field" />
         <input disabled placeholder="password — Remote Desktop will ask for it" class="dialog-field" title="Xpecter never stores a password; the Remote Desktop client prompts for it when it opens." />
         <select id="rdp-display" class="dialog-field">
-          <option value="fullscreen">Full screen</option>
-          <option value="window" selected>Resizable window (desktop follows the size)</option>
+          <option value="fullscreen" selected>Full screen</option>
+          <option value="window">Resizable window (desktop follows the size)</option>
           <option value="1280x800">Window, 1280 × 800 (scaled)</option>
           <option value="1600x900">Window, 1600 × 900 (scaled)</option>
           <option value="1920x1080">Window, 1920 × 1080 (scaled)</option>

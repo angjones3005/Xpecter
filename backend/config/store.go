@@ -68,3 +68,30 @@ func RemoveByID[T any](items []T, id string, getID func(T) string) []T {
 	}
 	return kept
 }
+
+// ReorderByID returns items arranged in the order ids lists them: the
+// order the user dragged the sidebar into. An item ids does not mention
+// follows the listed ones in its old relative order, an id that names
+// nothing is ignored, and a repeated id counts once, so a stale list
+// from the UI can neither lose nor duplicate anything. The input slice
+// is left as it was.
+func ReorderByID[T any](items []T, ids []string, getID func(T) string) []T {
+	index := make(map[string]int, len(items))
+	for i, item := range items {
+		index[getID(item)] = i
+	}
+	out := make([]T, 0, len(items))
+	placed := make([]bool, len(items))
+	for _, id := range ids {
+		if i, ok := index[id]; ok && !placed[i] {
+			placed[i] = true
+			out = append(out, items[i])
+		}
+	}
+	for i, item := range items {
+		if !placed[i] {
+			out = append(out, item)
+		}
+	}
+	return out
+}

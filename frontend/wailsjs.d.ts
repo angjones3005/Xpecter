@@ -391,6 +391,12 @@ export interface AppBindings {
   ListFolders(): Promise<Folder[]>;
   SaveFolder(folder: Folder): Promise<void>;
   DeleteFolder(id: string): Promise<void>;
+  // The sidebar's drag-to-reorder: ids in their new order. Anything
+  // not listed keeps its place after the listed ones.
+  ReorderSessions(ids: string[]): Promise<void>;
+  ReorderGroups(ids: string[]): Promise<void>;
+  ReorderFolders(ids: string[]): Promise<void>;
+  ReorderLocalShellProfiles(ids: string[]): Promise<void>;
   ListLocalShellProfiles(): Promise<LocalShellProfile[]>;
   SaveLocalShellProfile(profile: LocalShellProfile): Promise<void>;
   DeleteLocalShellProfile(id: string): Promise<void>;

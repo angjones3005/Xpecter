@@ -20,6 +20,7 @@ import { SearchAddon } from '@xterm/addon-search';
 import { isGuarded, normaliseTag, parseTagStyles, serializeTagStyles, tagStyleFor, TAG_STYLES_STORAGE_KEY, type TagStyles } from './tags';
 import { compileCustomRule, parseCustomRules, CUSTOM_RULE_CATEGORIES, HIGHLIGHT_RULES_STORAGE_KEY, type CustomHighlightRule } from './highlightrules';
 import { hexDump, parseOsc7 } from './osc';
+import { dropSide, reorderIds, wouldNest, type DropSide } from './reorder';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import JsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
 import CssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker';
@@ -4956,6 +4957,9 @@ type MarkdownView = {
   // Resolved image data, by the src as written, so a re-render after a
   // keystroke does not read every picture off disk again.
   assets: Map<string, Promise<string | null>>;
+  // Re-applies the zoomed width when the pane changes size, or when the
+  // view first gets a size.
+  resize: ResizeObserver;
 };
 
 const MARKDOWN_EXTENSIONS = new Set(['.md', '.markdown', '.mdown', '.mkd']);
@@ -4986,7 +4990,9 @@ function buildMarkdownView(pane: EditorPane, doc: EditorDoc): MarkdownView {
     timer: null,
     generation: 0,
     assets: new Map(),
+    resize: new ResizeObserver(() => applyMarkdownZoom(view)),
   };
+  view.resize.observe(body);
   body.addEventListener('click', (event) => handleMarkdownClick(pane, doc, event));
   body.addEventListener('change', (event) => {
     const input = event.target as HTMLInputElement | null;
@@ -5014,8 +5020,23 @@ function buildMarkdownView(pane: EditorPane, doc: EditorDoc): MarkdownView {
 const MARKDOWN_MIN_ZOOM = 0.5;
 const MARKDOWN_MAX_ZOOM = 3;
 
+// The measure the page is capped at, the same 780px as .md-page's
+// max-width in the stylesheet.
+const MARKDOWN_MEASURE_PX = 780;
+
 function applyMarkdownZoom(view: MarkdownView) {
-  view.page.style.setProperty('zoom', String(editorPrefs.markdownZoom));
+  const zoom = editorPrefs.markdownZoom;
+  view.page.style.setProperty('zoom', String(zoom));
+  // Zoomed in, the note keeps the measure it had at 100% and grows past
+  // the edge of the pane, which then scrolls sideways, the way a zoomed
+  // PDF does. Reflowing into an ever narrower column made every line
+  // shorter with each step and left nothing to pan across. Lengths
+  // inside a zoomed element are in zoomed pixels, so the pane's real
+  // width is what the cap is measured against. A pane with no size yet
+  // (the view is hidden) is left alone; the observer comes back when it
+  // has one.
+  const paneWidth = view.body.clientWidth;
+  view.page.style.width = zoom > 1 && paneWidth > 0 ? `${Math.min(MARKDOWN_MEASURE_PX, paneWidth)}px` : '';
 }
 
 function setMarkdownZoom(zoom: number) {
@@ -5061,6 +5082,7 @@ function zoomMarkdownBy(doc: EditorDoc, factor: number) {
 
 function destroyMarkdownView(view: MarkdownView) {
   if (view.timer) clearTimeout(view.timer);
+  view.resize.disconnect();
   view.container.remove();
 }
 
@@ -7647,6 +7669,11 @@ function buildFolderRow(folder: Folder, isOpen: boolean): HTMLDivElement {
   row.className = 'side-row' + (isOpen ? ' folder-open' : '');
   row.tabIndex = -1;
   row.title = isOpen ? `${folder.path} — open in an editor` : folder.path;
+  row.draggable = true;
+  row.addEventListener('dragstart', (e) => {
+    e.dataTransfer?.setData(FOLDER_DRAG, folder.id);
+  });
+  acceptReorderDrop(row, FOLDER_DRAG, (movedId, side) => { void moveFolderNextTo(movedId, folder.id, side); });
 
   const icon = document.createElement('span');
   icon.className = 'side-dot';
@@ -9668,11 +9695,108 @@ function vncProfileFromPicker(): SessionProfile | null {
   return { id: '', name: '', type: 'vnc', host, port };
 }
 
+// --- Reordering by drag ---
+// Every list in the sidebar is shown in its stored order, and a row
+// dragged above or below another changes that order: reorder.ts does
+// the arithmetic, the backend saves the ids. One payload type per kind
+// of row, so a session cannot land among the shell profiles.
+
+const SESSION_DRAG = 'text/xpecter-session-id';
+const GROUP_DRAG = 'text/xpecter-group-id';
+const FOLDER_DRAG = 'text/xpecter-folder-id';
+const SHELL_PROFILE_DRAG = 'text/xpecter-shell-profile-id';
+
+function dropSideOfRow(event: DragEvent, row: HTMLElement): DropSide {
+  const rect = row.getBoundingClientRect();
+  return dropSide(event.clientY, rect.top, rect.height);
+}
+
+function markDropSide(row: HTMLElement, side: DropSide | null) {
+  row.classList.toggle('drop-before', side === 'before');
+  row.classList.toggle('drop-after', side === 'after');
+}
+
+// Lets a row take a dragged sibling of its own kind, above or below it.
+// A drag of any other kind passes through to whatever else listens.
+function acceptReorderDrop(row: HTMLElement, mime: string, onDrop: (movedId: string, side: DropSide) => void) {
+  row.addEventListener('dragover', (event) => {
+    if (!event.dataTransfer?.types.includes(mime)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    markDropSide(row, dropSideOfRow(event, row));
+  });
+  row.addEventListener('dragleave', () => markDropSide(row, null));
+  row.addEventListener('drop', (event) => {
+    markDropSide(row, null);
+    const movedId = event.dataTransfer?.getData(mime);
+    if (!movedId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onDrop(movedId, dropSideOfRow(event, row));
+  });
+}
+
+// A session dropped beside another takes its place in the stored
+// order. Dropped beside one in the folder tree it also joins that
+// folder, which is how a session moves between folders to a chosen
+// spot; beside a row in Pinned, Running or a filtered list, which show
+// sessions from every folder, only the order changes.
+async function moveSessionNextTo(movedId: string, target: SessionProfile, side: DropSide, adoptGroup: boolean) {
+  if (movedId === target.id) return;
+  const all = await App.ListSessions();
+  const moved = all.find((s) => s.id === movedId);
+  if (!moved) return;
+  if (adoptGroup && (moved.groupId ?? '') !== (target.groupId ?? '')) {
+    await App.SaveSession({ ...moved, groupId: target.groupId });
+  }
+  await App.ReorderSessions(reorderIds(all.map((s) => s.id), movedId, target.id, side));
+  renderSessionList();
+}
+
+// A folder dropped beside another becomes its sibling, above or below
+// it, moving between levels when the two had different parents. A
+// folder cannot be dropped beside one of its own descendants, since
+// that would put it inside itself.
+async function moveGroupNextTo(movedId: string, target: SessionGroup, side: DropSide) {
+  if (movedId === target.id) return;
+  const groups = await App.ListGroups();
+  const moved = groups.find((g) => g.id === movedId);
+  if (!moved) return;
+  const parentOf = new Map(groups.map((g) => [g.id, g.parentId]));
+  if (wouldNest(parentOf, movedId, target.parentId)) {
+    flashStatus('A folder cannot be moved inside itself', true);
+    return;
+  }
+  if ((moved.parentId ?? '') !== (target.parentId ?? '')) {
+    await App.SaveGroup({ ...moved, parentId: target.parentId });
+  }
+  await App.ReorderGroups(reorderIds(groups.map((g) => g.id), movedId, target.id, side));
+  renderSessionList();
+}
+
+async function moveFolderNextTo(movedId: string, targetId: string, side: DropSide) {
+  const folders = await App.ListFolders();
+  await App.ReorderFolders(reorderIds(folders.map((f) => f.id), movedId, targetId, side));
+  renderFolderList();
+}
+
+async function moveShellProfileNextTo(movedId: string, targetId: string, side: DropSide) {
+  const profiles = await App.ListLocalShellProfiles();
+  await App.ReorderLocalShellProfiles(reorderIds(profiles.map((p) => p.id), movedId, targetId, side));
+  renderLocalShellProfileList();
+  renderLocalShellProfilesMenu();
+  if (homeIsActive()) renderHomeView().catch(() => {});
+}
+
 // SPE-100: whole row is the click target. The old row bound click to
 // its label <span> only, so most of the row was dead space, and it kept
 // a delete X visible at half opacity on every row forever. Actions now
 // appear on hover; delete still confirms via the context menu too.
-function renderSessionRow(s: SessionProfile, depth: number, live: Map<string, Session>): HTMLElement {
+// inTree says the row sits in the folder tree, where a drop beside it
+// also moves the dragged session into that folder. The Pinned, Running
+// and filtered lists show sessions from every folder, so a drop there
+// changes only the order.
+function renderSessionRow(s: SessionProfile, depth: number, live: Map<string, Session>, inTree = true): HTMLElement {
   const row = document.createElement('div');
   row.className = 'side-row';
   row.style.paddingLeft = `${6 + depth * 11}px`;
@@ -9680,8 +9804,9 @@ function renderSessionRow(s: SessionProfile, depth: number, live: Map<string, Se
   row.dataset.sessionId = s.id;
   row.tabIndex = -1;
   row.addEventListener('dragstart', (e) => {
-    e.dataTransfer?.setData('text/xpecter-session-id', s.id);
+    e.dataTransfer?.setData(SESSION_DRAG, s.id);
   });
+  acceptReorderDrop(row, SESSION_DRAG, (movedId, side) => { void moveSessionNextTo(movedId, s, side, inTree); });
 
   const running = live.get(s.id) ?? null;
   if (s.pinned) {
@@ -10209,7 +10334,15 @@ function renderGroupNode(
     saveCollapsedGroups();
     renderSessionList();
   });
+  // The header takes a dragged session (into this folder) and a dragged
+  // folder (beside this one); the two are told apart by payload type.
+  header.draggable = true;
+  header.addEventListener('dragstart', (e) => {
+    e.dataTransfer?.setData(GROUP_DRAG, group.id);
+  });
+  acceptReorderDrop(header, GROUP_DRAG, (movedId, side) => { void moveGroupNextTo(movedId, group, side); });
   header.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer?.types.includes(SESSION_DRAG)) return;
     e.preventDefault();
     header.classList.add('drop-target');
   });
@@ -11094,7 +11227,7 @@ async function renderSessionList() {
       empty.textContent = 'No sessions match.';
       list.appendChild(empty);
     } else {
-      for (const s of visibleSessions) list.appendChild(renderSessionRow(s, 0, live));
+      for (const s of visibleSessions) list.appendChild(renderSessionRow(s, 0, live, false));
     }
     renderLocalShellProfileList();
     renderFolderList();
@@ -11139,7 +11272,7 @@ async function renderSessionList() {
     };
     list.appendChild(head);
     if (!pinnedCollapsed) {
-      for (const s of pinned) list.appendChild(renderSessionRow(s, 1, live));
+      for (const s of pinned) list.appendChild(renderSessionRow(s, 1, live, false));
     }
   }
 
@@ -11169,7 +11302,7 @@ async function renderSessionList() {
     };
     list.appendChild(head);
     if (!runningCollapsed) {
-      for (const s of running) list.appendChild(renderSessionRow(s, 1, live));
+      for (const s of running) list.appendChild(renderSessionRow(s, 1, live, false));
     }
   }
 
@@ -11626,11 +11759,15 @@ async function renderHomeView() {
     if (bucket) bucket.push(s);
     else byGroup.set(key, [s]);
   }
+  // Folders in the order the sidebar keeps them, the ungrouped bucket
+  // last; the sessions inside each are already in their stored order,
+  // which is the order they were dragged into.
+  const groupIndex = new Map(groups.map((g, i) => [g.id, i]));
   const groupKeys = Array.from(byGroup.keys()).sort((a, b) => {
     if (a === b) return 0;
     if (a === '') return 1;
     if (b === '') return -1;
-    return (groupNames.get(a) ?? '').localeCompare(groupNames.get(b) ?? '');
+    return (groupIndex.get(a) ?? 0) - (groupIndex.get(b) ?? 0);
   });
   // A single ungrouped bucket needs no "Ungrouped" header to
   // distinguish it from anything.
@@ -11642,7 +11779,7 @@ async function renderHomeView() {
       head.textContent = key ? `📁 ${groupNames.get(key)}` : 'Ungrouped';
       savedList.appendChild(head);
     }
-    const inGroup = byGroup.get(key)!.slice().sort((a, b) => a.name.localeCompare(b.name));
+    const inGroup = byGroup.get(key)!;
     for (const s of inGroup) savedList.appendChild(homeSavedRow(s));
   }
 
@@ -13328,6 +13465,11 @@ async function renderLocalShellProfileList() {
     row.className = 'side-row';
     row.tabIndex = -1;
     row.title = profile.command ? `${profile.name} — ${profile.command}` : profile.name;
+    row.draggable = true;
+    row.addEventListener('dragstart', (e) => {
+      e.dataTransfer?.setData(SHELL_PROFILE_DRAG, profile.id);
+    });
+    acceptReorderDrop(row, SHELL_PROFILE_DRAG, (movedId, side) => { void moveShellProfileNextTo(movedId, profile.id, side); });
 
     const icon = document.createElement('span');
     icon.className = 'side-dot';
