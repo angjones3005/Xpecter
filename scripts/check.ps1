@@ -62,6 +62,7 @@ if (-not $SkipInstall) {
 }
 Invoke-Step 'tsc --noEmit' { Push-Location frontend; npx tsc --noEmit; Pop-Location }
 Invoke-Step 'eslint' { Push-Location frontend; npm run lint; Pop-Location }
+Invoke-Step 'vitest' { Push-Location frontend; npm test; Pop-Location }
 Invoke-Step 'vite build' { Push-Location frontend; npm run build; Pop-Location }
 
 if ($failed.Count -gt 0) {

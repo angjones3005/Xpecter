@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -38,7 +39,11 @@ func (s *Session) EnableX11() error {
 	_ = binary.Write(payload, binary.BigEndian, uint32(len(cookie)))
 	payload.WriteString(cookie)
 	_ = binary.Write(payload, binary.BigEndian, uint32(0))
-	ok, err := s.sess.SendRequest("x11-req", true, payload.Bytes())
+	sess := s.shellSession()
+	if sess == nil {
+		return fmt.Errorf("X11 forwarding needs a shell to attach to")
+	}
+	ok, err := sess.SendRequest("x11-req", true, payload.Bytes())
 	if err != nil {
 		return fmt.Errorf("requesting X11 forwarding: %w", err)
 	}
@@ -85,11 +90,27 @@ func dialX11Display(display string) (net.Conn, error) {
 	if strings.HasPrefix(display, ":") {
 		number := strings.TrimPrefix(strings.Split(display, ".")[0], ":")
 		if n, err := strconv.Atoi(number); err == nil {
-			return net.Dial("unix", fmt.Sprintf("/tmp/.X11-unix/X%d", n))
+			// The local socket first, where there is one. On Windows,
+			// where VcXsrv and Xming listen on TCP and DISPLAY is still
+			// spelled ":0", there is not, and this used to stop here
+			// with every forwarded X11 channel refused.
+			if runtime.GOOS != "windows" {
+				if conn, err := net.Dial("unix", fmt.Sprintf("/tmp/.X11-unix/X%d", n)); err == nil {
+					return conn, nil
+				}
+			}
+			return net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(6000+n)))
 		}
 	}
-	host := "127.0.0.1"
-	port := "6000"
+	host, port := x11TCPAddress(display)
+	return net.Dial("tcp", net.JoinHostPort(host, port))
+}
+
+// x11TCPAddress reads "host:display[.screen]" into the TCP endpoint an X
+// server listens on: port 6000 plus the display number.
+func x11TCPAddress(display string) (host, port string) {
+	host = "127.0.0.1"
+	port = "6000"
 	if strings.Contains(display, ":") {
 		parts := strings.Split(display, ":")
 		if parts[0] != "" {
@@ -97,7 +118,7 @@ func dialX11Display(display string) (net.Conn, error) {
 		}
 		port = strconv.Itoa(6000 + atoiOrZero(strings.Split(parts[1], ".")[0]))
 	}
-	return net.Dial("tcp", net.JoinHostPort(host, port))
+	return host, port
 }
 
 func atoiOrZero(value string) int {

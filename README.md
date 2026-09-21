@@ -32,15 +32,17 @@ Download the build for your platform from the [Releases page](https://github.com
 
 No account, no setup wizard. Open it, and use **Sessions > New Session** (or the **+ New Session** button on a fresh tab) to connect.
 
+The full walkthrough of everything the app does, and how to use it, is in the [User Guide](docs/USER_GUIDE.md).
+
 ## Known limitations (beta)
 
 This is an early beta. A few things worth knowing going in:
 
 - **macOS**: builds successfully in CI, but hasn't yet been verified running on real Mac hardware. If you hit anything odd on Mac specifically, that's genuinely useful to report.
 - **Serial console support is new** and hasn't yet been tested against real hardware, if you try it, feedback here is especially valuable.
-- **No password saving, by design.** Saved sessions store host/user/port/key path only, never passwords. This is intentional (see "Session storage" below), not a bug.
+- **No password saving in Xpecter's own files, by design.** Saved sessions store host/user/port/key path only. The one exception is opt-in: Settings > Security can remember SSH passwords in the OS keychain (Credential Manager / Keychain / Secret Service), and it is off by default (see "Session storage" below).
 - **Windows ConPTY**: verified working for the default shell and Command Prompt; the PowerShell-specific path and a few edge cases (resize behavior, very old Windows versions, process cleanup) haven't been separately stress-tested yet.
-- No drag-and-drop *download* yet (remote file to local), only upload (local file to remote) is supported for now.
+- Downloads from the remote file browser go through its ⤓ action and a save dialog; dragging a file out of the window onto the desktop is not something a webview can do.
 
 None of these should stop you from using it day to day, they're just the honest edges of an early build.
 
@@ -110,7 +112,6 @@ wails build -tags webkit2_41
 Actively tracked in Linear. Notable open items:
 - Tmux-style pane multiplexing
 - Additional theme presets and a font picker
-- Drag-and-drop *download* (remote → local)
 - RDP and VNC drawn inside the window rather than by the system client
 
 ### Session storage

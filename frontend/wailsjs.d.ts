@@ -175,6 +175,20 @@ export interface UpdateInfo {
   releaseUrl: string;
   assetUrl: string;
 }
+// One "transfer:progress" event: a file or a folder moving in either
+// direction, with bytes for the whole of it.
+export interface TransferProgress {
+  id: string;
+  name: string;
+  direction: 'download' | 'upload';
+  done: number;
+  total: number;
+  files?: number;
+  filesDone?: number;
+  state: 'running' | 'done' | 'failed';
+  error?: string;
+}
+
 export interface AppBindings {
   // cols/rows size the PTY at spawn. Pass 0 for either when the pane
   // isn't measurable yet; the backend substitutes its own default,
@@ -220,6 +234,17 @@ export interface AppBindings {
   // Hands a local path to the OS default handler. Used for files the
   // editor cannot show, and by the Run button for HTML.
   OpenLocalPathExternally(path: string): Promise<void>;
+  // Opens the OS file manager on a local folder, or on a file's folder
+  // with the file selected where the platform can.
+  RevealInFileManager(path: string): Promise<void>;
+  // Transfers with progress (transfers.go). Each reports on the
+  // "transfer:progress" event while it runs; the dialog-driven ones
+  // resolve to "" / [] when the dialog is cancelled.
+  SaveRemoteFileAs(id: string, remotePath: string): Promise<string>;
+  DownloadRemoteFolder(id: string, remotePath: string): Promise<string>;
+  UploadLocalFiles(id: string, remoteDir: string): Promise<string[]>;
+  // An OS notification for a bell in a terminal that is not on screen.
+  NotifyBell(title: string, body: string): Promise<void>;
   // Raw bytes, base64-encoded, for the viewers that need the file
   // intact rather than as text. Both refuse a file too large to hold in
   // memory on both sides of the bridge at once.
@@ -234,6 +259,14 @@ export interface AppBindings {
   AppendSessionLog(directory: string, sessionId: string, label: string, content: string): Promise<void>;
   GetSettings(): Promise<Settings>;
   SaveSettings(settings: Settings): Promise<void>;
+  // The window-close guard (closeguard.go). ArmCloseGuard says the
+  // page is listening for "app:close-requested"; the other two answer
+  // one: acknowledged (the dialog is up), then quit or stay.
+  ArmCloseGuard(): Promise<void>;
+  AcknowledgeCloseRequest(): Promise<void>;
+  FinishCloseRequest(quit: boolean): Promise<void>;
+  // Forward ids still running through a session on the backend.
+  ListForwardsFor(sessionId: string): Promise<string[]>;
   GetVersion(): Promise<string>;
   CheckForUpdate(): Promise<UpdateInfo>;
   DownloadAndInstallUpdate(assetUrl: string): Promise<void>;

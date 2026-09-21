@@ -5,28 +5,8 @@ import (
 	"testing"
 )
 
-// preserveAndCleanup saves whatever's currently at path (if anything) and
-// restores it after the test, so this doesn't clobber real saved profiles
-// sitting in the actual config dir.
-func preserveAndCleanup(t *testing.T, path string) {
-	t.Helper()
-	original, readErr := os.ReadFile(path)
-	hadOriginal := readErr == nil
-	t.Cleanup(func() {
-		if hadOriginal {
-			_ = os.WriteFile(path, original, 0o600)
-		} else {
-			_ = os.Remove(path)
-		}
-	})
-}
-
 func TestLocalShellProfilesRoundTrip(t *testing.T) {
-	path, err := localShellProfilesPath()
-	if err != nil {
-		t.Fatalf("localShellProfilesPath: %v", err)
-	}
-	preserveAndCleanup(t, path)
+	isolateConfig(t)
 
 	want := []LocalShellProfile{
 		{ID: "1", Name: "PowerShell", Command: "powershell.exe", StartingDir: `C:\Users\ajohnson`, Icon: "powershell"},
@@ -53,11 +33,11 @@ func TestLocalShellProfilesRoundTrip(t *testing.T) {
 }
 
 func TestLoadLocalShellProfilesEmptyWhenFileMissing(t *testing.T) {
+	isolateConfig(t)
 	path, err := localShellProfilesPath()
 	if err != nil {
 		t.Fatalf("localShellProfilesPath: %v", err)
 	}
-	preserveAndCleanup(t, path)
 	_ = os.Remove(path)
 
 	got, err := LoadLocalShellProfiles()

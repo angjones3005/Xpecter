@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -47,6 +49,27 @@ type UpdateInfo struct {
 func (a *App) GetVersion() string {
 	return Version
 }
+
+// updateOffer is what the last CheckForUpdate found: the one asset this
+// build may install, and the checksum file that vouches for it.
+//
+// DownloadAndInstallUpdate takes the URL as an argument because the
+// frontend hands back what it was shown, but it only ever installs the
+// URL recorded here. On Windows the download is launched elevated, so
+// a URL that came from anywhere else (a script injected into the
+// webview, say) would be arbitrary code running as administrator.
+type updateOffer struct {
+	assetURL string
+	sumsURL  string
+}
+
+// Where every release asset lives. Anything outside it is not a
+// release of this app, whatever the API said.
+const releaseDownloadPrefix = "https://github.com/Dawnrail/Dawnrail/releases/download/"
+
+// The checksum list release.yml publishes beside the assets, one
+// `<sha256>  <name>` line per file.
+const checksumsAssetName = "SHA256SUMS.txt"
 
 // CheckForUpdate queries GitHub's public releases API (no auth needed
 // for a public repo) and compares against the running build's version.
@@ -101,13 +124,75 @@ func (a *App) CheckForUpdate() (UpdateInfo, error) {
 	info.ReleaseURL = rel.HTMLURL
 	info.Available = isNewerVersion(rel.TagName, Version)
 
+	offer := updateOffer{}
 	for _, asset := range rel.Assets {
-		if assetMatchesPlatform(asset.Name) {
+		if asset.Name == checksumsAssetName {
+			offer.sumsURL = asset.BrowserDownloadURL
+		}
+		if info.AssetURL == "" && assetMatchesPlatform(asset.Name) && updateAssetAllowed(asset.BrowserDownloadURL) {
 			info.AssetURL = asset.BrowserDownloadURL
-			break
 		}
 	}
+	offer.assetURL = info.AssetURL
+	a.updateMu.Lock()
+	a.update = offer
+	a.updateMu.Unlock()
 	return info, nil
+}
+
+// updateAssetAllowed reports whether a URL names a release asset of this
+// app: HTTPS, under the release download path, and a plain file name
+// with nothing in it that could be read as a path.
+func updateAssetAllowed(assetURL string) bool {
+	if !strings.HasPrefix(assetURL, releaseDownloadPrefix) {
+		return false
+	}
+	rest := strings.TrimPrefix(assetURL, releaseDownloadPrefix)
+	// "<tag>/<file>", nothing more.
+	parts := strings.Split(rest, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return false
+	}
+	name := parts[1]
+	return name != "." && name != ".." && !strings.ContainsAny(name, `\?#`)
+}
+
+// expectedChecksum finds name's SHA-256 in a sha256sum-style listing:
+// `<hex>  <name>` per line, with the optional "*" binary marker sha256sum
+// prints on some platforms.
+func expectedChecksum(sums []byte, name string) (string, bool) {
+	for _, line := range strings.Split(string(sums), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		if strings.TrimPrefix(fields[1], "*") == name {
+			return strings.ToLower(fields[0]), true
+		}
+	}
+	return "", false
+}
+
+// verifyChecksum compares a downloaded file against the checksum list.
+func verifyChecksum(path string, sums []byte, name string) error {
+	want, ok := expectedChecksum(sums, name)
+	if !ok {
+		return fmt.Errorf("%s does not list %s, so the download cannot be verified", checksumsAssetName, name)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+	if got != want {
+		return fmt.Errorf("checksum mismatch for %s: the download is not the file the release published", name)
+	}
+	return nil
 }
 
 // assetMatchesPlatform picks the right release asset for the platform
@@ -145,6 +230,17 @@ func (a *App) DownloadAndInstallUpdate(assetURL string) error {
 	if assetURL == "" {
 		return fmt.Errorf("no update asset available for this platform")
 	}
+	// Only the asset CheckForUpdate itself found, and verified against
+	// the checksums published with it. See updateOffer.
+	a.updateMu.Lock()
+	offer := a.update
+	a.updateMu.Unlock()
+	if offer.assetURL == "" || assetURL != offer.assetURL || !updateAssetAllowed(assetURL) {
+		return fmt.Errorf("that is not the update Xpecter found; check for updates again")
+	}
+	if offer.sumsURL == "" {
+		return fmt.Errorf("the release publishes no %s, so the download cannot be verified", checksumsAssetName)
+	}
 
 	tmpDir, err := os.MkdirTemp("", "xpecter-update-*")
 	if err != nil {
@@ -154,7 +250,22 @@ func (a *App) DownloadAndInstallUpdate(assetURL string) error {
 	filename := filepath.Base(assetURL)
 	destPath := filepath.Join(tmpDir, filename)
 	if err := downloadFile(assetURL, destPath); err != nil {
+		_ = os.RemoveAll(tmpDir)
 		return fmt.Errorf("download failed: %w", err)
+	}
+	sumsPath := filepath.Join(tmpDir, checksumsAssetName)
+	if err := downloadFile(offer.sumsURL, sumsPath); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return fmt.Errorf("could not download %s: %w", checksumsAssetName, err)
+	}
+	sums, err := os.ReadFile(sumsPath)
+	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return err
+	}
+	if err := verifyChecksum(destPath, sums, filename); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return err
 	}
 
 	switch runtime.GOOS {
@@ -253,7 +364,13 @@ func unzip(zipPath, destDir string) error {
 		if err != nil {
 			return err
 		}
-		dst, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+		// An archive written without permission bits (some zip tools
+		// store 0) would otherwise produce files nobody can read.
+		mode := f.Mode().Perm()
+		if mode&0o400 == 0 {
+			mode = 0o644
+		}
+		dst, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
 		if err != nil {
 			src.Close()
 			return err

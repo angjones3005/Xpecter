@@ -1,6 +1,8 @@
 package config
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 
 	"xpecter/backend/idgen"
@@ -59,6 +61,32 @@ func ExportBundle() (ConfigBundle, error) {
 	}, nil
 }
 
+// ParseBundle decodes an exported configuration and refuses anything
+// that is not one. encoding/json ignores unknown fields and zero-fills
+// missing ones, so before this any JSON object at all decoded as a
+// valid, empty bundle: picking the wrong file in the import dialog (the
+// app's own encrypted export, which the dialog's *.json filter happily
+// offers, or a package.json) and choosing Replace erased every saved
+// session. A real export always carries a "sessions" list, and its
+// absence is what tells a bundle from anything else.
+func ParseBundle(data []byte) (ConfigBundle, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return ConfigBundle{}, fmt.Errorf("not a valid Xpecter config file: %w", err)
+	}
+	if _, ok := fields["sessions"]; !ok {
+		return ConfigBundle{}, errors.New("not an Xpecter config export: the file has no sessions list")
+	}
+	var bundle ConfigBundle
+	if err := json.Unmarshal(data, &bundle); err != nil {
+		return ConfigBundle{}, fmt.Errorf("not a valid Xpecter config file: %w", err)
+	}
+	if bundle.Version > configBundleVersion {
+		return ConfigBundle{}, fmt.Errorf("this file was exported by a newer Xpecter (format %d); update Xpecter to import it", bundle.Version)
+	}
+	return bundle, nil
+}
+
 // ImportMode selects what an imported bundle does to what is already
 // on this machine. The two answer different questions: ImportMerge is
 // "add these to what I have", ImportReplace is "make this machine look
@@ -90,6 +118,15 @@ const (
 // silently overwriting the local entry, so nothing is lost on either
 // side.
 func ImportBundle(bundle ConfigBundle, mode ImportMode) error {
+	if mode == ImportReplace {
+		// Replacing discards everything here, so what is here is backed
+		// up first, the same rule ResetAll keeps. The automatic backup
+		// can be a day old; the one taken now is the one that puts back
+		// exactly what a wrong file or a wrong click just removed.
+		if _, err := BackupNow(); err != nil {
+			return fmt.Errorf("refusing to replace the configuration, could not write a backup first: %w", err)
+		}
+	}
 	if err := SaveSettings(bundle.Settings); err != nil {
 		return err
 	}
@@ -116,12 +153,25 @@ func ImportBundle(bundle ConfigBundle, mode ImportMode) error {
 		return err
 	}
 	existingGroupIDs := idSet(groups, func(g SessionGroup) string { return g.ID })
-	for _, g := range bundle.Groups {
-		if existingGroupIDs[g.ID] {
-			g.ID = idgen.New()
+	// A group that gets a fresh id is still the parent of its child
+	// groups and the folder of its sessions, so every reference to the
+	// old id in the bundle is repointed. Without this, merging your own
+	// export back in (where every id collides) produced a duplicate,
+	// empty copy of every folder and put the sessions in the originals.
+	renamed := make(map[string]string)
+	for i := range bundle.Groups {
+		if existingGroupIDs[bundle.Groups[i].ID] {
+			fresh := idgen.New()
+			renamed[bundle.Groups[i].ID] = fresh
+			bundle.Groups[i].ID = fresh
 		}
-		groups = append(groups, g)
 	}
+	for i := range bundle.Groups {
+		if fresh, ok := renamed[bundle.Groups[i].ParentID]; ok {
+			bundle.Groups[i].ParentID = fresh
+		}
+	}
+	groups = append(groups, bundle.Groups...)
 	if err := SaveGroups(groups); err != nil {
 		return err
 	}
@@ -134,6 +184,9 @@ func ImportBundle(bundle ConfigBundle, mode ImportMode) error {
 	for _, s := range bundle.Sessions {
 		if existingSessionIDs[s.ID] {
 			s.ID = idgen.New()
+		}
+		if fresh, ok := renamed[s.GroupID]; ok {
+			s.GroupID = fresh
 		}
 		sessions = append(sessions, s)
 	}
@@ -183,8 +236,9 @@ func ImportBundle(bundle ConfigBundle, mode ImportMode) error {
 // be written, nothing is cleared, because a wipe with no way back is a
 // worse outcome than a wipe that didn't happen.
 //
-// Passwords are not mentioned here because Xpecter never stores them
-// (see the package comment in sessions.go); there is nothing to clear.
+// Passwords a session remembered in the OS keychain (backend/secret)
+// are not touched here: this package does not talk to the keychain.
+// app.go removes the ones whose sessions this cleared.
 func ResetAll() (string, error) {
 	backup, err := BackupNow()
 	if err != nil {

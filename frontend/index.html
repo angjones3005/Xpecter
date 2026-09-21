@@ -808,6 +808,47 @@
     .disconnect-action { display: flex; align-items: center; gap: 8px; padding: 3px 2px; cursor: pointer; color: var(--text); border-radius: 4px; }
     .disconnect-action:hover { background: var(--hover); }
     .disconnect-key { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; padding: 1px 6px; border: 1px solid var(--accent); border-radius: 4px; color: var(--accent); font-weight: bold; font-size: 11px; }
+    /* The same panel for a session reopened from the last launch that has
+       not connected yet: nothing went wrong, so nothing is red. */
+    .disconnect-panel.info { border-top-color: var(--accent); }
+    .disconnect-panel.info .disconnect-title { color: var(--accent-ink); }
+
+    /* Find in terminal output (Ctrl+Shift+F): a bar over the top edge of
+       the pane, out of the way of the prompt at the bottom. */
+    .term-find { position: absolute; top: 6px; right: 14px; z-index: 6; display: flex; align-items: center; gap: 4px; padding: 4px 6px; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.35); font-size: 12px; }
+    .term-find input { width: 200px; padding: 3px 6px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; font: inherit; }
+    .term-find input:focus { outline: none; border-color: var(--accent); }
+    .term-find.no-match input { border-color: var(--danger); }
+    .term-find-count { min-width: 64px; text-align: center; font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+    .term-find-toggle, .term-find-btn { padding: 2px 6px; border-radius: 4px; cursor: pointer; color: var(--text-dim); user-select: none; font-size: 11px; }
+    .term-find-toggle:hover, .term-find-btn:hover { background: var(--hover); color: var(--text); }
+    .term-find-toggle.on { background: var(--accent); color: #fff; }
+
+    /* A tab that has something to say while another is on screen. */
+    .tab .tab-activity { font-size: 9px; color: var(--accent); margin-left: 2px; }
+    .tab .tab-activity.bell { font-size: 11px; }
+
+    /* Home's offer to reopen the last launch's tabs. */
+    .home-restore { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border: 1px solid var(--accent); border-radius: 6px; background: var(--bg-alt); }
+    .home-restore-text { font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .home-restore-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .home-restore-actions button { padding: 4px 12px; font: inherit; font-size: 12px; border-radius: 4px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+    .home-restore-actions button.secondary { background: transparent; color: var(--text); border-color: var(--border); }
+    .home-restore-always { font-size: 11.5px; color: var(--text-dim); display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+
+    /* Transfers in progress, under the remote file list. */
+    #transfer-list:empty { display: none; }
+    .transfer-row { padding: 4px 8px 6px; font-size: 11px; color: var(--text-dim); border-top: 1px solid var(--border); }
+    .transfer-row.failed { color: var(--danger); cursor: pointer; }
+    .transfer-row.done { color: var(--success); cursor: pointer; }
+    .transfer-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .transfer-bar { height: 3px; margin-top: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+    .transfer-fill { height: 100%; background: var(--accent); transition: width 0.15s linear; }
+
+    /* The multi-line paste question. */
+    .paste-preview { max-height: 120px; overflow: auto; margin: 8px 0; padding: 6px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; font-size: 11.5px; color: var(--text-dim); white-space: pre; }
+    .paste-delay-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+    .paste-delay-row select { font: inherit; font-size: 12px; }
     /* Theme the terminal's native scrollbar to match the app instead of
        the OS default (usually white/light, standing out badly against
        the dark theme and any wallpaper). Only touches the scrollbar's
@@ -900,6 +941,7 @@
         <div class="item" id="menu-disconnect-tab">Disconnect <span style="opacity:0.5;font-size:11px;">Ctrl+Shift+X</span></div>
         <div class="separator"></div>
         <div class="item" id="menu-clear-screen">Clear Screen</div>
+        <div class="item" id="menu-find">Find in Output&hellip; <span style="opacity:0.5;font-size:11px;">Ctrl+Shift+F</span></div>
         <div class="item" id="menu-save-output">Save Terminal Output&hellip; <span style="opacity:0.5;font-size:11px;">Ctrl+Shift+S</span></div>
         <div class="item" id="menu-print">Print&hellip; <span style="opacity:0.5;font-size:11px;">Ctrl+Shift+P</span></div>
       </div>
@@ -1035,6 +1077,15 @@
         <div class="settings-row"><label><input type="checkbox" id="show-tab-numbers-toggle" /> Show tab numbers</label></div>
         <div class="settings-row"><label><input type="checkbox" id="ssh-keepalive-toggle" checked /> SSH keepalive (prevent idle disconnects)</label></div>
         <div class="settings-row"><label><input type="checkbox" id="keep-open-last-tab-toggle" /> Keep app open when last tab closes</label></div>
+        <div class="settings-row"><label><input type="checkbox" id="bell-notify-toggle" checked /> Notify when a background terminal rings its bell</label></div>
+        <div class="settings-row"><label for="restore-mode-select">On launch</label>
+          <select id="restore-mode-select">
+            <option value="ask">Offer to reopen the last session</option>
+            <option value="always">Reopen the last session automatically</option>
+            <option value="never">Start fresh</option>
+          </select>
+        </div>
+        <div class="settings-note">The tabs, split panes and editor folders that were open are remembered as you work. Passwords are not; a reopened session that needs one asks for it.</div>
       </div>
 
       <div class="settings-group">
@@ -1042,6 +1093,10 @@
         <div class="settings-row"><label><input type="checkbox" id="copy-on-select-toggle" /> Copy on select</label></div>
         <div class="settings-row"><label><input type="checkbox" id="rclick-paste-toggle" checked /> Right-click to paste</label></div>
         <div class="settings-row"><label><input type="checkbox" id="warn-multiline-paste-toggle" checked /> Warn before pasting multiple lines</label></div>
+        <div class="settings-row"><label for="paste-delay-select">Delay between pasted lines</label>
+          <select id="paste-delay-select"></select>
+        </div>
+        <div class="settings-note">For consoles that drop characters when a whole configuration is pasted at once. The multi-line paste prompt offers the same choice, and remembers it.</div>
       </div>
 
       <div class="settings-group sensitive">
@@ -1129,10 +1184,12 @@
           <span class="title" id="remote-files-label">Remote files</span>
           <span class="act" id="remote-new-file" title="New file here">+</span>
           <span class="act" id="remote-new-folder" title="New folder here">&#9634;</span>
+          <span class="act" id="remote-upload" title="Upload files here&hellip;">&#10514;</span>
           <span class="act" id="remote-refresh" title="Reread this directory">&#10227;</span>
         </div>
         <div class="side-body">
           <div id="file-list"></div>
+          <div id="transfer-list"></div>
         </div>
       </div>
     </div>
@@ -1167,6 +1224,10 @@
           <div id="home-empty">
             <p>No saved sessions yet. Create one and it will show up here, ready to reopen on every launch.</p>
             <button id="home-new-session-btn">+ New Session</button>
+          </div>
+          <div class="home-section" id="home-restore-section" style="display:none;">
+            <div class="home-section-head">Pick up where you left off</div>
+            <div id="home-restore-card" class="home-restore"></div>
           </div>
           <div class="home-section" id="home-pinned-section" style="display:none;">
             <div class="home-section-head">Pinned</div>

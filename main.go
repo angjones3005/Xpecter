@@ -73,6 +73,9 @@ func main() {
 		},
 		OnStartup:  app.startup,
 		OnShutdown: app.shutdown,
+		// Closing the window with unsaved buffers used to discard them
+		// without a word; see closeguard.go.
+		OnBeforeClose: app.beforeClose,
 		Bind: []interface{}{
 			app,
 		},

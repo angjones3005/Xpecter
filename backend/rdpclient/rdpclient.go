@@ -78,6 +78,16 @@ func (o Options) Validate() error {
 	if strings.TrimSpace(o.Host) == "" {
 		return errors.New("a host is required")
 	}
+	// The .rdp file is one setting per line. A line break inside a
+	// value would end the setting early and start another of the
+	// sender's choosing: a host imported from a shared bundle could
+	// turn on drive redirection to a machine of its own. Nothing a
+	// client could connect to has one in its name.
+	for name, value := range map[string]string{"host": o.Host, "user": o.User, "domain": o.Domain} {
+		if strings.ContainsAny(value, "\r\n\x00") {
+			return fmt.Errorf("the %s contains a line break or control character", name)
+		}
+	}
 	if o.Port < 0 || o.Port > 65535 {
 		return fmt.Errorf("port %d is out of range", o.Port)
 	}

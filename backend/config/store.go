@@ -3,6 +3,8 @@ package config
 import (
 	"encoding/json"
 	"os"
+
+	"xpecter/backend/atomicfile"
 )
 
 // loadJSON reads and unmarshals a JSON file into a slice or struct of
@@ -26,14 +28,16 @@ func loadJSON[T any](path string, empty T) (T, error) {
 }
 
 // saveJSON marshals v as indented JSON and writes it to path with
-// user-only permissions (0o600), matching every config file's original
-// write behavior.
+// user-only permissions (0o600). Written atomically: these files are
+// the whole of what the app remembers, and a truncate-then-write that
+// dies between the two steps leaves sessions.json empty, which the next
+// launch reports as "unexpected end of JSON input" for everything.
 func saveJSON[T any](path string, v T) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+	return atomicfile.Write(path, data, 0o600)
 }
 
 // UpsertByID replaces the element of items whose ID (per getID) matches

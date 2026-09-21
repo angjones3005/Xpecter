@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -208,5 +209,142 @@ func TestResetAllClearsEverythingAndBacksUpFirst(t *testing.T) {
 	}
 	if settings.FontSize != 21 {
 		t.Errorf("FontSize = %d after restore, want 21", settings.FontSize)
+	}
+}
+
+// The encrypted export is the file most likely to be picked by mistake:
+// it sits beside the plain one and passes the dialog's *.json filter.
+// It decoded as an empty bundle, and Replace then erased everything.
+func TestParseBundleRejectsWhatIsNotAnExport(t *testing.T) {
+	cases := map[string]string{
+		"encrypted envelope": `{"version":1,"salt":"c2FsdA==","nonce":"bm9uY2U=","data":"ZGF0YQ=="}`,
+		"package.json":       `{"name":"xpecter","version":"1.0.0","scripts":{}}`,
+		"empty object":       `{}`,
+		"an array":           `[{"id":"1","name":"a session"}]`,
+		"not json":           `sessions: []`,
+	}
+	for name, data := range cases {
+		if _, err := ParseBundle([]byte(data)); err == nil {
+			t.Errorf("%s was accepted as a config bundle", name)
+		}
+	}
+}
+
+func TestParseBundleAcceptsARealExport(t *testing.T) {
+	isolateConfig(t)
+	seedTwoSessions(t)
+	bundle, err := ExportBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseBundle(data)
+	if err != nil {
+		t.Fatalf("a genuine export was refused: %v", err)
+	}
+	if len(parsed.Sessions) != 2 {
+		t.Fatalf("parsed %d sessions, want 2", len(parsed.Sessions))
+	}
+	// An export with nothing in it is still an export.
+	if _, err := ParseBundle([]byte(`{"version":1,"settings":{},"sessions":[],"groups":[],"localShellProfiles":[]}`)); err != nil {
+		t.Errorf("an empty export was refused: %v", err)
+	}
+	if _, err := ParseBundle([]byte(`{"version":9,"sessions":[]}`)); err == nil {
+		t.Error("a bundle from a newer format version was accepted")
+	}
+}
+
+// Replace mode discards what is here, so what is here is backed up
+// first, the same rule ResetAll keeps.
+func TestImportReplaceWritesABackupFirst(t *testing.T) {
+	isolateConfig(t)
+	seedTwoSessions(t)
+
+	if err := ImportBundle(incomingBundle(), ImportReplace); err != nil {
+		t.Fatalf("ImportBundle: %v", err)
+	}
+	backups, err := ListBackups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("got %d backups after a replace import, want the one taken beforehand", len(backups))
+	}
+	if err := RestoreBackup(backups[0]); err != nil {
+		t.Fatalf("RestoreBackup: %v", err)
+	}
+	sessions, err := LoadSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 2 || sessions[0].ID != "local-1" {
+		t.Fatalf("the pre-import backup restored %+v, want the two seeded sessions", sessions)
+	}
+}
+
+// Merging your own export back in collides on every id. A group that is
+// given a fresh id must still be the folder of its sessions and the
+// parent of its child groups, or the result is an empty duplicate of
+// every folder with the sessions left in the originals.
+func TestImportMergeRepointsGroupLinksAfterReroll(t *testing.T) {
+	isolateConfig(t)
+	if err := SaveGroups([]SessionGroup{
+		{ID: "g-parent", Name: "Datacentre"},
+		{ID: "g-child", Name: "Rack 1", ParentID: "g-parent"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveSessions([]SessionProfile{{ID: "s-1", Name: "sw1", GroupID: "g-child"}}); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := ExportBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ImportBundle(bundle, ImportMerge); err != nil {
+		t.Fatalf("ImportBundle: %v", err)
+	}
+	groups, err := LoadGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := LoadSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 4 || len(sessions) != 2 {
+		t.Fatalf("got %d groups and %d sessions, want 4 and 2", len(groups), len(sessions))
+	}
+	byID := map[string]SessionGroup{}
+	for _, g := range groups {
+		byID[g.ID] = g
+	}
+	for _, s := range sessions {
+		g, ok := byID[s.GroupID]
+		if !ok {
+			t.Errorf("session %s points at group %q, which does not exist", s.ID, s.GroupID)
+			continue
+		}
+		if g.Name != "Rack 1" {
+			t.Errorf("session %s landed in %q, want Rack 1", s.ID, g.Name)
+		}
+		parent, ok := byID[g.ParentID]
+		if !ok || parent.Name != "Datacentre" {
+			t.Errorf("group %s has parent %q, want a Datacentre group", g.ID, g.ParentID)
+		}
+	}
+	// The two imported copies must not share ids with the originals.
+	seen := map[string]int{}
+	for _, g := range groups {
+		seen[g.ID]++
+	}
+	for id, n := range seen {
+		if n != 1 {
+			t.Errorf("group id %q appears %d times", id, n)
+		}
 	}
 }

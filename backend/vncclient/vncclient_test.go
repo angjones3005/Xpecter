@@ -12,6 +12,8 @@ func TestAddress(t *testing.T) {
 		{Host: "srv01", Port: 5900}:    "srv01",
 		{Host: "srv01", Port: 5901}:    "srv01::5901",
 		{Host: "10.0.0.5", Port: 5905}: "10.0.0.5::5905",
+		{Host: "::1"}:                  "[::1]",
+		{Host: "fe80::1", Port: 5901}:  "[fe80::1]::5901",
 	}
 	for o, want := range cases {
 		if got := o.Address(); got != want {

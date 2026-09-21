@@ -259,3 +259,190 @@ func TestFindLocalFilesSearchesTheWholeFolder(t *testing.T) {
 		t.Error("FindLocalFiles accepted a folder that does not exist")
 	}
 }
+
+func TestCleanupStaleRemoteFilesAlsoSweepsUpdateDownloads(t *testing.T) {
+	stale, err := os.MkdirTemp(os.TempDir(), "xpecter-update-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stale)
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.WriteFile(filepath.Join(stale, "setup.exe"), []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanupStaleRemoteFiles()
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale update download still exists, stat error: %v", err)
+	}
+}
+
+func TestCleanupStaleRDPFiles(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Now().Add(-48 * time.Hour)
+	stale := filepath.Join(dir, "session-1.rdp")
+	fresh := filepath.Join(dir, "session-2.rdp")
+	other := filepath.Join(dir, "notes.txt")
+	for _, p := range []string{stale, fresh, other} {
+		if err := os.WriteFile(p, []byte("full address:s:host\r\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, p := range []string{stale, other} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cleanupStaleRDPFiles(dir)
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("a day-old .rdp file was kept: %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("a fresh .rdp file was removed: %v", err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Errorf("a file that is not an .rdp was removed: %v", err)
+	}
+	// A directory that does not exist yet is simply nothing to sweep.
+	cleanupStaleRDPFiles(filepath.Join(dir, "missing"))
+}
+
+// The log filename is built from the label and the session id. The id
+// comes from idgen today, but the sanitiser is what makes that true
+// rather than an accident of where the argument came from.
+func TestAppendSessionLogSanitizesTheSessionID(t *testing.T) {
+	dir := t.TempDir()
+	a := NewApp("")
+	if err := a.AppendSessionLog(dir, `..\..\escaped`, "lab", "hello\n"); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries in the log directory, want 1", len(entries))
+	}
+	if name := entries[0].Name(); strings.ContainsAny(name, `\/`) || !strings.HasPrefix(name, "lab-") {
+		t.Fatalf("log file named %q", name)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(dir), "escaped.log")); err == nil {
+		t.Fatal("a log file was written outside the chosen directory")
+	}
+}
+
+func TestWriteLocalFileReplacesWithoutLeavingTemporaries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "notes.md")
+	a := NewApp("")
+	if err := a.WriteLocalFile(path, "first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.WriteLocalFile(path, "second"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "second" {
+		t.Fatalf("file holds %q, want the second write", got)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("%d entries in the directory after two saves, want just the file", len(entries))
+	}
+}
+
+func TestUpdateAssetAllowed(t *testing.T) {
+	allowed := []string{
+		releaseDownloadPrefix + "v1.2.3/xpecter-windows-amd64-setup.exe",
+		releaseDownloadPrefix + "v1.2.3/xpecter-linux-amd64.tar.gz",
+	}
+	for _, u := range allowed {
+		if !updateAssetAllowed(u) {
+			t.Errorf("%s refused", u)
+		}
+	}
+	refused := []string{
+		"",
+		"http://github.com/Dawnrail/Dawnrail/releases/download/v1/x.exe",
+		"https://github.com/Someone/Else/releases/download/v1/x.exe",
+		"https://evil.example/xpecter.exe",
+		releaseDownloadPrefix + "v1.2.3/",
+		releaseDownloadPrefix + "v1.2.3/a/b.exe",
+		releaseDownloadPrefix + "v1.2.3/..",
+		releaseDownloadPrefix + "v1.2.3/x.exe?download=1",
+	}
+	for _, u := range refused {
+		if updateAssetAllowed(u) {
+			t.Errorf("%q allowed", u)
+		}
+	}
+}
+
+func TestDownloadAndInstallUpdateRefusesAnythingButTheOffer(t *testing.T) {
+	a := NewApp("")
+	// Nothing checked yet: nothing may be installed.
+	if err := a.DownloadAndInstallUpdate(releaseDownloadPrefix + "v9/xpecter-windows-amd64-setup.exe"); err == nil {
+		t.Fatal("an update was accepted before any check had offered one")
+	}
+	a.update = updateOffer{assetURL: releaseDownloadPrefix + "v9/xpecter-windows-amd64-setup.exe", sumsURL: releaseDownloadPrefix + "v9/SHA256SUMS.txt"}
+	if err := a.DownloadAndInstallUpdate("https://evil.example/setup.exe"); err == nil {
+		t.Fatal("a URL other than the offered one was accepted")
+	}
+	if err := a.DownloadAndInstallUpdate(""); err == nil {
+		t.Fatal("an empty URL was accepted")
+	}
+	a.update.sumsURL = ""
+	if err := a.DownloadAndInstallUpdate(a.update.assetURL); err == nil {
+		t.Fatal("an update with no checksum list to verify against was accepted")
+	}
+}
+
+func TestVerifyChecksum(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "xpecter-setup.exe")
+	if err := os.WriteFile(path, []byte("installer bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// sha256("installer bytes")
+	const sum = "e34210a6de4f653edf588301431c3d69a633638cbf587345cc50a7fed9f38f4c"
+	sums := []byte("deadbeef  other.zip\n" + sum + "  xpecter-setup.exe\n" + "cafe *starred.tar.gz\n")
+	if got, ok := expectedChecksum(sums, "starred.tar.gz"); !ok || got != "cafe" {
+		t.Errorf("the binary-mode marker was not stripped: %q, %v", got, ok)
+	}
+	if _, ok := expectedChecksum(sums, "missing.exe"); ok {
+		t.Error("a file that is not listed had a checksum")
+	}
+	err := verifyChecksum(path, sums, "xpecter-setup.exe")
+	if err != nil {
+		// The constant above is checked against the real digest so a
+		// typo in the test reads as one.
+		t.Fatalf("verifyChecksum on matching contents: %v", err)
+	}
+	if err := verifyChecksum(path, []byte("0000  xpecter-setup.exe\n"), "xpecter-setup.exe"); err == nil {
+		t.Fatal("a wrong checksum verified")
+	}
+	if err := verifyChecksum(path, sums, "missing.exe"); err == nil {
+		t.Fatal("an unlisted file verified")
+	}
+}
+
+// A path that does not exist is refused before anything is launched:
+// the file manager would open on nothing, or on whatever it falls
+// back to, and say nothing about why.
+func TestRevealInFileManagerRefusesAMissingPath(t *testing.T) {
+	a := NewApp("")
+	missing := filepath.Join(t.TempDir(), "not-here")
+	if err := a.RevealInFileManager(missing); err == nil {
+		t.Fatal("a missing path was accepted")
+	}
+}

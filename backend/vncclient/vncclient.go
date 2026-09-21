@@ -39,6 +39,12 @@ type Options struct {
 // is left implicit because a bare "host" is what every viewer assumes.
 func (o Options) Address() string {
 	host := strings.TrimSpace(o.Host)
+	// An IPv6 literal is bracketed, as every viewer expects: without
+	// the brackets "::1::5901" is unreadable, and even the default
+	// port leaves "fe80::1" looking like a host with a display number.
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
 	if o.Port == 0 || o.Port == DefaultPort {
 		return host
 	}

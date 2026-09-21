@@ -35,6 +35,18 @@ Working directories pin to the sidebar the way saved sessions do. A pinned folde
 ### Sidebar filtering
 One field filters saved sessions and local shell profiles together, matching on name, host, serial port, or tag. Arrow keys and Enter work from the field, and folders stay out of the way while a filter is active.
 
+### Pick up where you left off
+The tabs that were open when Xpecter last quit are remembered as you work and offered on Home at the next launch, or reopened automatically if you prefer. Tabs, split panes, the folder and files open in each editor, local shells, serial consoles and Remote Desktop or VNC cards all come back. SSH sessions reconnect on their own wherever a key, an agent or a saved password can; one that needs a password asks for it, and a cancelled one waits in its pane with R to connect. Passwords are never part of what is remembered.
+
+### Activity and bells
+A tab that is not on screen shows a dot when output arrives in it and a bell when its terminal rings, both cleared by looking. A bell in a background tab, or while the window is behind something else, also raises a system notification, so the long job that rings when it finishes is noticed from wherever you are.
+
+### Find in output
+Ctrl+Shift+F opens a find bar over the focused terminal. Every match in the scrollback is highlighted and counted, Enter and Shift+Enter step through them, with match-case and regular-expression toggles, and Escape returns to the prompt.
+
+### Paste line delay
+Consoles that drop characters when a whole configuration is pasted at once can be given a pause after every line. The setting lives beside the multi-line paste warning, and the warning itself offers the same choice next to a preview of what is about to be sent, and remembers it.
+
 ## Connectivity
 
 ### SSH agent support
@@ -145,6 +157,8 @@ Each editor pane keeps a strip of open documents and switches between them with 
 ### Workspace folder tree
 Open a folder and it appears as a tree inside the pane, not in the application chrome, so a split can hold a folder on one side and a shell on the other. The tree marks which files are currently open, and folders expand independently.
 
+One click on the tree header opens the same folder in the system's file manager, File Explorer, Finder or the desktop's own, and any row's right-click menu does the same for that folder, or shows that file selected in its folder. The action is also on the folder menu, on document tabs, in the command palette, and beside each pinned folder in the sidebar.
+
 ### Resizing and renaming in the tree
 Drag the edge of the workspace tree to give a long filename the room to show, or double-click it to go back to the default. The width is one setting rather than one per pane, so a split with two folders open stays even, and it is remembered between sessions. Every row can be renamed in place. A name already taken is refused rather than overwritten, a renamed folder stays expanded along with everything open inside it, and a file that is currently open follows its new name without losing unsaved changes.
 
@@ -210,6 +224,9 @@ Files and directories can be removed from the remote browser, with the same conf
 
 ### The remote browser keeps up with the directory
 The remote file list re-reads the directory it is showing and updates when its contents change, so a file written by the session in the terminal beside it shows up without a manual refresh. It runs on a slower clock than the local tree because each listing is a round trip to the host, and it stops entirely when the sidebar or the section is closed, when the window is in the background, or when the browser is pointed at a host that is not the focused tab.
+
+### Downloads and uploads with progress
+A file in the remote browser downloads to a place you choose, and a folder downloads whole, as a folder of the same name inside the one you pick. Uploads go through a file dialog as well as by dropping files onto the list. Both directions stream through the application rather than through the page, with a progress bar under the list, and every file lands under a temporary name and is renamed when complete, so a transfer cut short never leaves half a file wearing the real name.
 
 ### SFTP timestamp preservation
 Remote-to-local downloads preserve remote modification times. Drag-and-drop uploads carry the local file modification time to the remote file when supported.

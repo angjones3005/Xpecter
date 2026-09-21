@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"xpecter/backend/atomicfile"
 	"xpecter/backend/config"
 	"xpecter/backend/fswatch"
 	"xpecter/backend/idgen"
@@ -41,19 +42,24 @@ import (
 	"golang.org/x/crypto/pbkdf2"
 )
 
+// Every live thing the frontend can name by id. These are registries
+// rather than maps because Wails calls each bound method on its own
+// goroutine; see livemap.go for what a plain map costs here.
 type App struct {
 	ctx      context.Context
-	sessions map[string]*sshclient.Session
-	locals   map[string]*pty.LocalTerminal
-	serials  map[string]*serialclient.Session
+	sessions *liveMap[*sshclient.Session]
+	locals   *liveMap[*pty.LocalTerminal]
+	serials  *liveMap[*serialclient.Session]
 	// Remote Desktop clients this app launched, by session id. Each is
 	// an external process; see backend/rdpclient for why the desktop is
 	// not drawn here.
-	rdps map[string]*rdpclient.Session
+	rdps *liveMap[*rdpclient.Session]
 	// VNC viewers this app launched, by session id — the same external
 	// process model as rdps.
-	vncs     map[string]*vncclient.Session
-	forwards map[string]net.Listener
+	vncs *liveMap[*vncclient.Session]
+	// Local port forwards, each bound to the SSH session it tunnels
+	// through so they can go when it does.
+	forwards *liveMap[localForward]
 	// startupDir (SPE-86): a directory passed on the command line at
 	// launch, from Windows Explorer's "Open in Xpecter" context menu.
 	// Read once by the frontend via GetStartupDir() during its own
@@ -66,16 +72,35 @@ type App struct {
 	// since WatchLocalDirs is reachable from the frontend at any time.
 	fsWatch   *fswatch.Watcher
 	fsWatchMu sync.Mutex
+	// The release CheckForUpdate last offered, which is the only one
+	// DownloadAndInstallUpdate will install. See update.go.
+	updateMu sync.Mutex
+	update   updateOffer
+	// closeGuard is how the window asks the frontend whether it may
+	// close, so an unsaved buffer gets its prompt. See closeguard.go.
+	closeGuard closeGuard
+	// notificationsReady is whether the platform's notification service
+	// came up at startup; NotifyBell does nothing otherwise.
+	notificationsReady bool
+}
+
+// localForward is one bound local port and the session it forwards
+// through. The session id is what lets CloseSSH, and an unexpected
+// drop, take every forward down with the connection rather than leaving
+// a listener that accepts and then refuses everything.
+type localForward struct {
+	listener  net.Listener
+	sessionID string
 }
 
 func NewApp(startupDir string) *App {
 	return &App{
-		sessions:   make(map[string]*sshclient.Session),
-		locals:     make(map[string]*pty.LocalTerminal),
-		serials:    make(map[string]*serialclient.Session),
-		rdps:       make(map[string]*rdpclient.Session),
-		vncs:       make(map[string]*vncclient.Session),
-		forwards:   make(map[string]net.Listener),
+		sessions:   newLiveMap[*sshclient.Session](),
+		locals:     newLiveMap[*pty.LocalTerminal](),
+		serials:    newLiveMap[*serialclient.Session](),
+		rdps:       newLiveMap[*rdpclient.Session](),
+		vncs:       newLiveMap[*vncclient.Session](),
+		forwards:   newLiveMap[localForward](),
 		startupDir: startupDir,
 	}
 }
@@ -84,6 +109,13 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	_ = registerContextMenu()
 	cleanupStaleRemoteFiles()
+	cleanupStaleRDPFiles(rdpclient.TempDir())
+	// Best-effort: a platform whose notification service will not come
+	// up (a Linux session with no D-Bus, say) still runs, it just does
+	// not get toast notifications for terminal bells.
+	if err := runtime.InitializeNotifications(ctx); err == nil {
+		a.notificationsReady = true
+	}
 	// SPE-87: best-effort, fire-and-forget. A slow disk or a failed
 	// write should never delay or block app startup, and there's no
 	// user-visible feedback needed on success, it's a silent safety net.
@@ -92,17 +124,28 @@ func (a *App) startup(ctx context.Context) {
 	}()
 }
 
+// staleTempAge is how long a temporary directory or file is left alone
+// before a launch sweeps it: long enough that the external application
+// it was handed to has certainly finished opening it.
+const staleTempAge = 24 * time.Hour
+
 func cleanupStaleRemoteFiles() {
 	entries, err := os.ReadDir(os.TempDir())
 	if err != nil {
 		return
 	}
-	cutoff := time.Now().Add(-24 * time.Hour)
+	cutoff := time.Now().Add(-staleTempAge)
 	for _, entry := range entries {
 		name := entry.Name()
-		// Both prefixes: a temp dir left behind by a pre-rename build
-		// would otherwise never be swept up by anything.
-		if !entry.IsDir() || (!strings.HasPrefix(name, "xpecter-remote-file-") && !strings.HasPrefix(name, "specter-remote-file-")) {
+		// Both remote-file prefixes: a temp dir left behind by a
+		// pre-rename build would otherwise never be swept up by
+		// anything. Update downloads are the same shape: an installer
+		// that has run, or an archive that has been extracted, is of no
+		// use a day later and was never removed by anything either.
+		swept := strings.HasPrefix(name, "xpecter-remote-file-") ||
+			strings.HasPrefix(name, "specter-remote-file-") ||
+			strings.HasPrefix(name, "xpecter-update-")
+		if !entry.IsDir() || !swept {
 			continue
 		}
 		info, err := entry.Info()
@@ -113,24 +156,47 @@ func cleanupStaleRemoteFiles() {
 	}
 }
 
+// cleanupStaleRDPFiles removes the .rdp files of Remote Desktop clients
+// that were still running when Xpecter last quit. shutdown deliberately
+// leaves those clients open, so nothing was left to remove their files
+// when they eventually closed, and each one names a host and a user.
+func cleanupStaleRDPFiles(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-staleTempAge)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".rdp") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, entry.Name()))
+	}
+}
+
 func (a *App) shutdown(ctx context.Context) {
-	for _, s := range a.sessions {
-		s.Close()
+	for _, s := range a.sessions.drain() {
+		_ = s.Close()
 	}
-	for _, l := range a.locals {
-		l.Close()
+	for _, l := range a.locals.drain() {
+		_ = l.Close()
 	}
-	for _, sc := range a.serials {
-		sc.Close()
+	for _, sc := range a.serials.drain() {
+		_ = sc.Close()
 	}
 	// Deliberately NOT closed: the Remote Desktop window is the user's
 	// session with that machine, and Xpecter quitting is no reason to
 	// pull it out from under them mid-task. The .rdp file each one was
 	// started from is removed by its own exit handler when the client
-	// eventually goes, and by the next launch's directory sweep if it
-	// never does. VNC viewers are left running for the same reason.
-	for _, listener := range a.forwards {
-		listener.Close()
+	// eventually goes, and by the next launch's cleanupStaleRDPFiles
+	// sweep if it never does. VNC viewers are left running for the same
+	// reason.
+	for _, fwd := range a.forwards.drain() {
+		_ = fwd.listener.Close()
 	}
 	a.fsWatchMu.Lock()
 	if a.fsWatch != nil {
@@ -138,6 +204,30 @@ func (a *App) shutdown(ctx context.Context) {
 		a.fsWatch = nil
 	}
 	a.fsWatchMu.Unlock()
+	if a.notificationsReady {
+		runtime.CleanupNotifications(ctx)
+	}
+}
+
+// NotifyBell shows an operating-system notification for a terminal
+// whose bell rang while it was not on screen: another tab, or the
+// window in the background. The frontend decides when that is; this
+// only knows how to put a notification up.
+func (a *App) NotifyBell(title string, body string) error {
+	if !a.notificationsReady || a.ctx == nil {
+		return errors.New("notifications are not available")
+	}
+	// macOS asks once; everywhere else this answers yes without asking.
+	if ok, _ := runtime.CheckNotificationAuthorization(a.ctx); !ok {
+		if granted, err := runtime.RequestNotificationAuthorization(a.ctx); err != nil || !granted {
+			return errors.New("notifications are not permitted")
+		}
+	}
+	return runtime.SendNotification(a.ctx, runtime.NotificationOptions{
+		ID:    idgen.New(),
+		Title: title,
+		Body:  body,
+	})
 }
 
 // SessionClosedEvent is emitted as "ssh:closed:<id>" / "serial:closed:<id>"
@@ -162,12 +252,12 @@ func (a *App) StartLocalTerminal(shell string, dir string, cols int, rows int) (
 	if err != nil {
 		return "", err
 	}
-	a.locals[id] = lt
+	a.locals.put(id, lt)
 	return id, nil
 }
 
 func (a *App) WriteLocalTerminal(id string, data string) error {
-	lt, ok := a.locals[id]
+	lt, ok := a.locals.get(id)
 	if !ok {
 		return fmt.Errorf("no such local terminal: %s", id)
 	}
@@ -175,7 +265,7 @@ func (a *App) WriteLocalTerminal(id string, data string) error {
 }
 
 func (a *App) ResizeLocalTerminal(id string, cols, rows int) error {
-	lt, ok := a.locals[id]
+	lt, ok := a.locals.get(id)
 	if !ok {
 		return fmt.Errorf("no such local terminal: %s", id)
 	}
@@ -183,11 +273,10 @@ func (a *App) ResizeLocalTerminal(id string, cols, rows int) error {
 }
 
 func (a *App) CloseLocalTerminal(id string) error {
-	lt, ok := a.locals[id]
+	lt, ok := a.locals.take(id)
 	if !ok {
 		return nil
 	}
-	delete(a.locals, id)
 	return lt.Close()
 }
 
@@ -212,12 +301,12 @@ func (a *App) ConnectSerial(portName string, baud int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	a.serials[id] = sc
+	a.serials.put(id, sc)
 	return id, nil
 }
 
 func (a *App) WriteSerial(id string, data string) error {
-	sc, ok := a.serials[id]
+	sc, ok := a.serials.get(id)
 	if !ok {
 		return fmt.Errorf("no such serial session: %s", id)
 	}
@@ -252,24 +341,31 @@ func (a *App) LaunchRDP(profile config.SessionProfile) (RDPLaunch, error) {
 		Height:       profile.Height,
 		AdminSession: profile.AdminSession,
 	}
-	session, err := rdpclient.Launch(opts, rdpclient.TempDir(), func(exitErr error, deliberate bool) {
-		delete(a.rdps, id)
-		if deliberate || a.ctx == nil {
-			return
-		}
-		// A clean exit is the user closing the Remote Desktop window,
-		// which is the ordinary way an RDP session ends and is reported
-		// as such rather than as a failure.
-		message := "Remote Desktop window closed"
-		if exitErr != nil {
-			message = "Remote Desktop client exited: " + exitErr.Error()
-		}
-		runtime.EventsEmit(a.ctx, "rdp:closed:"+id, SessionClosedEvent{EOF: exitErr == nil, Message: message})
+	// Launched inside the map's create so the exit callback, which
+	// can fire within milliseconds when the client refuses its
+	// arguments, cannot delete the entry before it has been stored.
+	var session *rdpclient.Session
+	err := a.rdps.create(id, func() (*rdpclient.Session, error) {
+		var launchErr error
+		session, launchErr = rdpclient.Launch(opts, rdpclient.TempDir(), func(exitErr error, deliberate bool) {
+			a.rdps.take(id)
+			if deliberate || a.ctx == nil {
+				return
+			}
+			// A clean exit is the user closing the Remote Desktop window,
+			// which is the ordinary way an RDP session ends and is reported
+			// as such rather than as a failure.
+			message := "Remote Desktop window closed"
+			if exitErr != nil {
+				message = "Remote Desktop client exited: " + exitErr.Error()
+			}
+			runtime.EventsEmit(a.ctx, "rdp:closed:"+id, SessionClosedEvent{EOF: exitErr == nil, Message: message})
+		})
+		return session, launchErr
 	})
 	if err != nil {
 		return RDPLaunch{}, err
 	}
-	a.rdps[id] = session
 	return RDPLaunch{ID: id, Client: session.Client, Tracked: session.Tracked}, nil
 }
 
@@ -278,11 +374,10 @@ func (a *App) LaunchRDP(profile config.SessionProfile) (RDPLaunch, error) {
 // follows it; the frontend draws the stopped state itself, the same
 // contract CloseSSH and CloseSerial keep.
 func (a *App) CloseRDP(id string) error {
-	session, ok := a.rdps[id]
+	session, ok := a.rdps.take(id)
 	if !ok {
 		return nil
 	}
-	delete(a.rdps, id)
 	return session.Close()
 }
 
@@ -300,41 +395,43 @@ type VNCLaunch struct {
 // Port; no password is passed, the viewer asks.
 func (a *App) LaunchVNC(profile config.SessionProfile) (VNCLaunch, error) {
 	id := idgen.New()
-	session, err := vncclient.Launch(vncclient.Options{Host: profile.Host, Port: profile.Port}, func(exitErr error, deliberate bool) {
-		delete(a.vncs, id)
-		if deliberate || a.ctx == nil {
-			return
-		}
-		message := "VNC viewer closed"
-		if exitErr != nil {
-			message = "VNC viewer exited: " + exitErr.Error()
-		}
-		runtime.EventsEmit(a.ctx, "vnc:closed:"+id, SessionClosedEvent{EOF: exitErr == nil, Message: message})
+	var session *vncclient.Session
+	err := a.vncs.create(id, func() (*vncclient.Session, error) {
+		var launchErr error
+		session, launchErr = vncclient.Launch(vncclient.Options{Host: profile.Host, Port: profile.Port}, func(exitErr error, deliberate bool) {
+			a.vncs.take(id)
+			if deliberate || a.ctx == nil {
+				return
+			}
+			message := "VNC viewer closed"
+			if exitErr != nil {
+				message = "VNC viewer exited: " + exitErr.Error()
+			}
+			runtime.EventsEmit(a.ctx, "vnc:closed:"+id, SessionClosedEvent{EOF: exitErr == nil, Message: message})
+		})
+		return session, launchErr
 	})
 	if err != nil {
 		return VNCLaunch{}, err
 	}
-	a.vncs[id] = session
 	return VNCLaunch{ID: id, Client: session.Client, Tracked: session.Tracked}, nil
 }
 
 // CloseVNC ends the viewer Xpecter launched for id. Deliberate, so no
 // vnc:closed event follows; the frontend draws the stopped state itself.
 func (a *App) CloseVNC(id string) error {
-	session, ok := a.vncs[id]
+	session, ok := a.vncs.take(id)
 	if !ok {
 		return nil
 	}
-	delete(a.vncs, id)
 	return session.Close()
 }
 
 func (a *App) CloseSerial(id string) error {
-	sc, ok := a.serials[id]
+	sc, ok := a.serials.take(id)
 	if !ok {
 		return nil
 	}
-	delete(a.serials, id)
 	return sc.Close()
 }
 
@@ -436,7 +533,7 @@ func (a *App) Connect(req ConnectRequest) (ConnectResult, error) {
 	}
 
 	id := sess.ID()
-	a.sessions[id] = sess
+	a.sessions.put(id, sess)
 
 	// SPE-126: authenticated, but deliberately no shell yet.
 	// StartShellSSH below opens it, once the frontend has a real
@@ -462,9 +559,9 @@ func (a *App) Connect(req ConnectRequest) (ConnectResult, error) {
 // creates, so it can only run here, and one parameter beats a map of
 // pending flags to keep clean.
 func (a *App) StartShellSSH(id string, cols int, rows int, x11 bool) error {
-	sess, ok := a.sessions[id]
-	if !ok {
-		return fmt.Errorf("no such session: %s", id)
+	sess, err := a.session(id)
+	if err != nil {
+		return err
 	}
 	if err := sess.StartShell(cols, rows, func(data []byte) {
 		runtime.EventsEmit(a.ctx, "ssh:data:"+id, string(data))
@@ -472,6 +569,16 @@ func (a *App) StartShellSSH(id string, cols int, rows int, x11 bool) error {
 		if reason.Deliberate {
 			return
 		}
+		// The transport is gone, so nothing behind this id can answer
+		// again. Release what it still holds (an agent socket, a bastion
+		// connection) and its forwards now, rather than when the tab is
+		// closed: CloseSSH on an id that is no longer here is a no-op,
+		// which is what lets a tab whose connection already died still
+		// be closed.
+		if dead, ok := a.sessions.take(id); ok {
+			_ = dead.Close()
+		}
+		a.closeForwardsFor(id)
 		runtime.EventsEmit(a.ctx, "ssh:closed:"+id, SessionClosedEvent{
 			EOF:     reason.EOF,
 			Message: closeErrorMessage(reason.Err),
@@ -481,12 +588,21 @@ func (a *App) StartShellSSH(id string, cols int, rows int, x11 bool) error {
 	}
 	if x11 {
 		if err := sess.EnableX11(); err != nil {
-			delete(a.sessions, id)
+			a.sessions.take(id)
 			_ = sess.Close()
 			return err
 		}
 	}
 	return nil
+}
+
+// session looks up a live SSH session by the id Connect handed out.
+func (a *App) session(id string) (*sshclient.Session, error) {
+	sess, ok := a.sessions.get(id)
+	if !ok {
+		return nil, fmt.Errorf("no such session: %s", id)
+	}
+	return sess, nil
 }
 
 // closeErrorMessage renders a CloseReason's error for display, matching
@@ -743,9 +859,9 @@ func (a *App) ReadLocalFileBase64(path string) (string, error) {
 // be downloaded first. Sized before it is fetched: the point of the
 // limit is not to pull 400 MB across an SSH connection to find out.
 func (a *App) ReadRemoteFileBase64(id string, path string) (string, error) {
-	sess, ok := a.sessions[id]
-	if !ok {
-		return "", fmt.Errorf("no such session: %s", id)
+	sess, err := a.session(id)
+	if err != nil {
+		return "", err
 	}
 	size, err := sftpclient.StatFile(sess.SSHClient(), path)
 	if err != nil {
@@ -773,6 +889,20 @@ func (a *App) OpenLocalPathExternally(path string) error {
 	return openExternalPath(path)
 }
 
+// RevealInFileManager opens the operating system's file manager on a
+// local path: a folder opens as itself, a file opens its folder with
+// the file selected where the platform can do that. The workspace tree
+// is a view of a directory that is open in Explorer or Finder half the
+// time as well, and getting from one to the other used to mean
+// retyping the path.
+func (a *App) RevealInFileManager(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	return revealInFileManager(path, info.IsDir())
+}
+
 func (a *App) ReadLocalFile(path string) (string, error) {
 	// Checked here as well as in ClassifyLocalFile, because this is
 	// reached by Reload From Disk too, and a file that has turned into
@@ -796,8 +926,17 @@ func (a *App) ReadLocalFile(path string) (string, error) {
 	return string(data), nil
 }
 
+// WriteLocalFile saves an editor buffer. Atomically, so a crash or a
+// full disk mid-save leaves the file as it was rather than empty. The
+// one fallback is a directory the temporary file cannot be created in:
+// the file itself may still be writable there, and refusing to save a
+// buffer whose only copy is on screen is the worse failure.
 func (a *App) WriteLocalFile(path string, content string) error {
-	return os.WriteFile(path, []byte(content), 0o644)
+	err := atomicfile.Write(path, []byte(content), 0o644)
+	if errors.Is(err, atomicfile.ErrTempFile) {
+		return os.WriteFile(path, []byte(content), 0o644)
+	}
+	return err
 }
 
 // CreateLocalFile and CreateLocalDir back New File and New Folder in
@@ -1107,8 +1246,9 @@ func (a *App) FindLocalFiles(root string, name string) ([]string, error) {
 }
 
 // AppendSessionLog appends raw terminal output to one file per session.
-// The directory is user-selected and the filename is sanitized so labels
-// cannot escape it. A per-App mutex keeps concurrent output chunks ordered.
+// The directory is user-selected and the filename is sanitized so
+// neither the label nor the id can escape it. A per-App mutex keeps
+// concurrent output chunks ordered.
 func (a *App) AppendSessionLog(directory, sessionID, label, content string) error {
 	if directory == "" || content == "" {
 		return nil
@@ -1117,7 +1257,11 @@ func (a *App) AppendSessionLog(directory, sessionID, label, content string) erro
 	if name == "" {
 		name = "session"
 	}
-	path := filepath.Join(directory, name+"-"+sessionID+".log")
+	id := sanitizeLogName(sessionID)
+	if id == "" {
+		id = "unknown"
+	}
+	path := filepath.Join(directory, name+"-"+id+".log")
 	a.logMu.Lock()
 	defer a.logMu.Unlock()
 	if err := os.MkdirAll(directory, 0o700); err != nil {
@@ -1233,12 +1377,44 @@ func (a *App) SaveSession(profile config.SessionProfile) error {
 	return config.SaveSessions(config.UpsertByID(sessions, profile, sessionID))
 }
 
+// DeleteSession removes a saved session and, with it, any password the
+// OS keychain was holding for it. The two go together here, in the one
+// place a session is removed, rather than being left to each caller:
+// the sidebar's delete button and its context menu already disagreed
+// about it, and a password filed under an id that no longer exists is
+// unreachable from the app but still sitting in the keychain.
 func (a *App) DeleteSession(id string) error {
 	sessions, err := config.LoadSessions()
 	if err != nil {
 		return err
 	}
-	return config.SaveSessions(config.RemoveByID(sessions, id, sessionID))
+	if err := config.SaveSessions(config.RemoveByID(sessions, id, sessionID)); err != nil {
+		return err
+	}
+	_ = a.DeleteSessionPassword(id)
+	return nil
+}
+
+// forgetOrphanedPasswords removes the stored password of every session
+// in before that is no longer saved. Called after the operations that
+// replace the session list wholesale (a replace-mode import, a backup
+// restore, a reset), which otherwise leave passwords in the keychain
+// under ids nothing will ever look up again. Best-effort: a keychain
+// that refuses is not a reason to report the import as failed.
+func (a *App) forgetOrphanedPasswords(before []config.SessionProfile) {
+	after, err := config.LoadSessions()
+	if err != nil {
+		return
+	}
+	still := make(map[string]bool, len(after))
+	for _, s := range after {
+		still[s.ID] = true
+	}
+	for _, s := range before {
+		if !still[s.ID] {
+			_ = a.DeleteSessionPassword(s.ID)
+		}
+	}
 }
 
 // --- Local shell profiles (SPE-102) ---
@@ -1398,13 +1574,15 @@ func (a *App) ImportConfigFile(replace bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var bundle config.ConfigBundle
-	if err := json.Unmarshal(data, &bundle); err != nil {
-		return "", fmt.Errorf("not a valid Xpecter config file: %w", err)
+	bundle, err := config.ParseBundle(data)
+	if err != nil {
+		return "", err
 	}
+	before, _ := config.LoadSessions()
 	if err := config.ImportBundle(bundle, importMode(replace)); err != nil {
 		return "", err
 	}
+	a.forgetOrphanedPasswords(before)
 	return path, nil
 }
 
@@ -1423,7 +1601,13 @@ func importMode(replace bool) config.ImportMode {
 // can tell the user exactly what to restore from if they change their
 // mind. See config.ResetAll.
 func (a *App) ResetConfiguration() (string, error) {
-	return config.ResetAll()
+	before, _ := config.LoadSessions()
+	backup, err := config.ResetAll()
+	if err != nil {
+		return backup, err
+	}
+	a.forgetOrphanedPasswords(before)
+	return backup, nil
 }
 
 // MobaImportResult is a struct rather than a (path, count, error)
@@ -1753,13 +1937,15 @@ func (a *App) ImportEncryptedConfigFile(passphrase string, replace bool) (string
 	if err != nil {
 		return "", fmt.Errorf("wrong passphrase or corrupted encrypted config")
 	}
-	var bundle config.ConfigBundle
-	if err := json.Unmarshal(plain, &bundle); err != nil {
+	bundle, err := config.ParseBundle(plain)
+	if err != nil {
 		return "", fmt.Errorf("decrypted config is invalid: %w", err)
 	}
+	before, _ := config.LoadSessions()
 	if err := config.ImportBundle(bundle, importMode(replace)); err != nil {
 		return "", err
 	}
+	a.forgetOrphanedPasswords(before)
 	return path, nil
 }
 
@@ -1776,31 +1962,40 @@ func (a *App) ListBackups() ([]string, error) {
 // this REPLACES outright, it does not merge like ImportConfigFile
 // above).
 func (a *App) RestoreBackup(filename string) error {
-	return config.RestoreBackup(filename)
+	before, _ := config.LoadSessions()
+	if err := config.RestoreBackup(filename); err != nil {
+		return err
+	}
+	a.forgetOrphanedPasswords(before)
+	return nil
 }
 
 func (a *App) WriteSSH(id string, data string) error {
-	sess, ok := a.sessions[id]
-	if !ok {
-		return fmt.Errorf("no such session: %s", id)
+	sess, err := a.session(id)
+	if err != nil {
+		return err
 	}
 	return sess.Write([]byte(data))
 }
 
 func (a *App) ResizeSSH(id string, cols, rows int) error {
-	sess, ok := a.sessions[id]
-	if !ok {
-		return fmt.Errorf("no such session: %s", id)
+	sess, err := a.session(id)
+	if err != nil {
+		return err
 	}
 	return sess.Resize(cols, rows)
 }
 
+// CloseSSH ends a session the user is done with, and every local
+// forward running through it. An id that is not here is not an error:
+// a session whose connection already dropped was removed when the drop
+// was reported, and the tab it belonged to still has to be closable.
 func (a *App) CloseSSH(id string) error {
-	sess, ok := a.sessions[id]
+	a.closeForwardsFor(id)
+	sess, ok := a.sessions.take(id)
 	if !ok {
 		return nil
 	}
-	delete(a.sessions, id)
 	return sess.Close()
 }
 
@@ -1882,16 +2077,16 @@ func (a *App) ScanPorts(host string, ports []int) ([]int, error) {
 // StartLocalForward binds a local TCP port and forwards each connection
 // through an existing SSH session to remoteHost:remotePort.
 func (a *App) StartLocalForward(sessionID string, localPort int, remoteHost string, remotePort int) (string, error) {
-	sess, ok := a.sessions[sessionID]
-	if !ok {
-		return "", fmt.Errorf("no such session: %s", sessionID)
+	sess, err := a.session(sessionID)
+	if err != nil {
+		return "", err
 	}
 	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", localPort))
 	if err != nil {
 		return "", err
 	}
 	forwardID := idgen.New()
-	a.forwards[forwardID] = listener
+	a.forwards.put(forwardID, localForward{listener: listener, sessionID: sessionID})
 	go func() {
 		for {
 			local, err := listener.Accept()
@@ -1909,6 +2104,30 @@ func (a *App) StartLocalForward(sessionID string, localPort int, remoteHost stri
 	return forwardID, nil
 }
 
+// closeForwardsFor tears down every forward bound to a session. Without
+// this a forward outlived its session: the local port stayed bound,
+// every connection to it was accepted and then dropped when the dial
+// through the dead client failed, and re-adding the same forward after
+// reconnecting failed with "address already in use".
+func (a *App) closeForwardsFor(sessionID string) {
+	for _, fwd := range a.forwards.takeWhere(func(_ string, f localForward) bool { return f.sessionID == sessionID }) {
+		_ = fwd.listener.Close()
+	}
+}
+
+// ListForwardsFor reports the forward ids still running through a
+// session, so the frontend's manager can drop entries the backend has
+// already closed.
+func (a *App) ListForwardsFor(sessionID string) []string {
+	ids := []string{}
+	for id, fwd := range a.forwards.snapshot() {
+		if fwd.sessionID == sessionID {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 func proxyTCP(left, right net.Conn) {
 	defer left.Close()
 	defer right.Close()
@@ -1919,12 +2138,11 @@ func proxyTCP(left, right net.Conn) {
 }
 
 func (a *App) StopForward(id string) error {
-	listener, ok := a.forwards[id]
+	fwd, ok := a.forwards.take(id)
 	if !ok {
 		return nil
 	}
-	delete(a.forwards, id)
-	return listener.Close()
+	return fwd.listener.Close()
 }
 
 // --- SFTP / remote file editing ---
@@ -1937,9 +2155,9 @@ type RemoteFile struct {
 }
 
 func (a *App) ListRemoteDir(id string, path string) ([]RemoteFile, error) {
-	sess, ok := a.sessions[id]
-	if !ok {
-		return nil, fmt.Errorf("no such session: %s", id)
+	sess, err := a.session(id)
+	if err != nil {
+		return nil, err
 	}
 	entries, err := sftpclient.ListDir(sess.SSHClient(), path)
 	if err != nil {
@@ -1977,11 +2195,11 @@ func validRemoteName(name string) (string, error) {
 // already has. Each takes the parent and the new name separately so the
 // name can be checked as a name, matching the local pair.
 func (a *App) CreateRemoteFile(id string, dir string, name string) (string, error) {
-	sess, ok := a.sessions[id]
-	if !ok {
-		return "", fmt.Errorf("no such session: %s", id)
+	sess, err := a.session(id)
+	if err != nil {
+		return "", err
 	}
-	name, err := validRemoteName(name)
+	name, err = validRemoteName(name)
 	if err != nil {
 		return "", err
 	}
@@ -1989,11 +2207,11 @@ func (a *App) CreateRemoteFile(id string, dir string, name string) (string, erro
 }
 
 func (a *App) CreateRemoteDir(id string, dir string, name string) (string, error) {
-	sess, ok := a.sessions[id]
-	if !ok {
-		return "", fmt.Errorf("no such session: %s", id)
+	sess, err := a.session(id)
+	if err != nil {
+		return "", err
 	}
-	name, err := validRemoteName(name)
+	name, err = validRemoteName(name)
 	if err != nil {
 		return "", err
 	}
@@ -2004,11 +2222,11 @@ func (a *App) CreateRemoteDir(id string, dir string, name string) (string, error
 // path, so a rename can never turn into a move to somewhere the user
 // can't see.
 func (a *App) RenameRemoteEntry(id string, oldPath string, newName string) (string, error) {
-	sess, ok := a.sessions[id]
-	if !ok {
-		return "", fmt.Errorf("no such session: %s", id)
+	sess, err := a.session(id)
+	if err != nil {
+		return "", err
 	}
-	newName, err := validRemoteName(newName)
+	newName, err = validRemoteName(newName)
 	if err != nil {
 		return "", err
 	}
@@ -2021,9 +2239,9 @@ func (a *App) RenameRemoteEntry(id string, oldPath string, newName string) (stri
 // identify without another round trip, and the browser cannot navigate
 // above the login directory to offer one anyway.
 func (a *App) DeleteRemoteEntry(id string, target string, recursive bool) error {
-	sess, ok := a.sessions[id]
-	if !ok {
-		return fmt.Errorf("no such session: %s", id)
+	sess, err := a.session(id)
+	if err != nil {
+		return err
 	}
 	target = strings.TrimSpace(target)
 	// "." is how the browser spells the directory it opened in, so it
@@ -2038,9 +2256,9 @@ func (a *App) DeleteRemoteEntry(id string, target string, recursive bool) error 
 }
 
 func (a *App) ReadRemoteFile(id string, path string) (string, error) {
-	sess, ok := a.sessions[id]
-	if !ok {
-		return "", fmt.Errorf("no such session: %s", id)
+	sess, err := a.session(id)
+	if err != nil {
+		return "", err
 	}
 	return sftpclient.ReadFile(sess.SSHClient(), path)
 }
@@ -2050,9 +2268,9 @@ func (a *App) ReadRemoteFile(id string, path string) (string, error) {
 // copy remains available after Xpecter returns so the external application
 // can finish opening it.
 func (a *App) OpenRemoteFile(id string, remotePath string) error {
-	sess, ok := a.sessions[id]
-	if !ok {
-		return fmt.Errorf("no such session: %s", id)
+	sess, err := a.session(id)
+	if err != nil {
+		return err
 	}
 
 	tmpDir, err := os.MkdirTemp("", "xpecter-remote-file-*")
@@ -2080,9 +2298,9 @@ func remoteTempFilePath(tmpDir, remotePath string) string {
 }
 
 func (a *App) WriteRemoteFile(id string, path string, content string) error {
-	sess, ok := a.sessions[id]
-	if !ok {
-		return fmt.Errorf("no such session: %s", id)
+	sess, err := a.session(id)
+	if err != nil {
+		return err
 	}
 	return sftpclient.WriteFile(sess.SSHClient(), path, content)
 }
@@ -2092,9 +2310,9 @@ func (a *App) WriteRemoteFile(id string, path string, content string) error {
 // valid UTF-8 strings, arbitrary binary data (images, executables, etc.)
 // is not valid UTF-8 and would be corrupted if sent as a raw string.
 func (a *App) UploadRemoteFile(id string, path string, base64Content string, modifiedAt int64) error {
-	sess, ok := a.sessions[id]
-	if !ok {
-		return fmt.Errorf("no such session: %s", id)
+	sess, err := a.session(id)
+	if err != nil {
+		return err
 	}
 	data, err := base64.StdEncoding.DecodeString(base64Content)
 	if err != nil {

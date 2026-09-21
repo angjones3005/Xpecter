@@ -45,6 +45,16 @@ produces a build warning and, across larger gaps, real breakage.
 Both scripts put the toolchain on `PATH` themselves, so they work from a
 shell that has never seen it.
 
+The frontend has unit tests too (`npm test` in `frontend/`, Vitest),
+for the pure pieces that were pulled out of `main.ts` so they could be
+tested: ANSI colour-state reading (`ansi.ts`), shell quoting
+(`shellquote.ts`), the Markdown task-marker scan (`markdown.ts`),
+paste line splitting (`paste.ts`) and the saved-workspace format
+(`workspace.ts`).
+`check.ps1` and CI run them between eslint and the Vite build. Anything
+that touches the DOM stays in `main.ts` and is exercised in the running
+app instead.
+
 ## The Frontend Build Has A Prepare Step
 
 `npm run dev` and `npm run build` both run `npm run prepare-assets`

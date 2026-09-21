@@ -39,6 +39,25 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+// A line break in a value would write a second setting into the .rdp
+// file. Each field that reaches the file is checked.
+func TestValidateRefusesLineBreaksInFileValues(t *testing.T) {
+	injected := "1.2.3.4\r\ndrivestoredirect:s:*"
+	for name, o := range map[string]Options{
+		"host":   {Host: injected},
+		"user":   {Host: "h", User: injected},
+		"domain": {Host: "h", Domain: injected},
+		"nul":    {Host: "h\x00"},
+	} {
+		if err := o.Validate(); err == nil {
+			t.Errorf("%s with an embedded line break was accepted", name)
+		}
+	}
+	if got := File(Options{Host: "srv01", User: "angjo"}); strings.Count(got, "\r\n") != 7 {
+		t.Errorf("a clean profile wrote an unexpected number of lines:\n%q", got)
+	}
+}
+
 func TestFileDefaultWindowIsDynamic(t *testing.T) {
 	// Host only, no size: a window that follows its frame, opened at the
 	// default size. This is the case that used to write a bare

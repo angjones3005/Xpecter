@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"xpecter/backend/atomicfile"
 )
 
 // SPE-87: periodic, automatic safety-net backups of the whole config
@@ -117,7 +119,7 @@ func BackupNow() (string, error) {
 		return "", err
 	}
 	filename := backupFilePrefix + time.Now().UTC().Format("20060102-150405") + backupFileSuffix
-	if err := os.WriteFile(filepath.Join(dir, filename), data, 0o600); err != nil {
+	if err := atomicfile.Write(filepath.Join(dir, filename), data, 0o600); err != nil {
 		return "", err
 	}
 	if err := pruneBackups(); err != nil {
@@ -166,8 +168,8 @@ func RestoreBackup(filename string) error {
 	if err != nil {
 		return err
 	}
-	var bundle ConfigBundle
-	if err := json.Unmarshal(data, &bundle); err != nil {
+	bundle, err := ParseBundle(data)
+	if err != nil {
 		return fmt.Errorf("corrupt backup file: %w", err)
 	}
 	// Exactly ImportReplace's semantics, so there is one definition of

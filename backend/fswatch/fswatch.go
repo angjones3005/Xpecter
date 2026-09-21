@@ -131,6 +131,16 @@ func (w *Watcher) SetDirs(dirs []string) {
 	if w.closed {
 		return
 	}
+	// What the kernel is still watching, which is not always what was
+	// added: on Windows, fsnotify drops a watch itself when the
+	// directory is deleted. A folder removed and recreated inside one
+	// debounce window (`rm -rf build && mkdir build`) therefore looked
+	// watched here while nothing was watching it, and every change in
+	// it went unreported until the slow reconciliation pass.
+	live := make(map[string]struct{})
+	for _, dir := range w.inner.WatchList() {
+		live[filepath.Clean(dir)] = struct{}{}
+	}
 	for dir := range w.watched {
 		if _, keep := want[dir]; keep {
 			continue
@@ -140,7 +150,10 @@ func (w *Watcher) SetDirs(dirs []string) {
 	}
 	for dir := range want {
 		if _, have := w.watched[dir]; have {
-			continue
+			if _, still := live[filepath.Clean(dir)]; still {
+				continue
+			}
+			delete(w.watched, dir)
 		}
 		// A directory that can't be watched (gone already, a filesystem
 		// with no notification support, or the platform's watch limit)

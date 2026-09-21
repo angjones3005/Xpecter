@@ -8,11 +8,7 @@ import (
 )
 
 func TestSessionsRoundTripPreservesPinned(t *testing.T) {
-	path, err := sessionsPath()
-	if err != nil {
-		t.Fatalf("sessionsPath: %v", err)
-	}
-	preserveAndCleanup(t, path)
+	isolateConfig(t)
 
 	want := []SessionProfile{
 		{ID: "1", Name: "prod-web", Host: "10.0.0.5", Port: 22, User: "root", Pinned: true},
@@ -34,11 +30,11 @@ func TestSessionsRoundTripPreservesPinned(t *testing.T) {
 // A sessions.json written before Pinned existed must still load, with
 // every session simply unpinned rather than erroring out.
 func TestLoadSessionsWithoutPinnedField(t *testing.T) {
+	isolateConfig(t)
 	path, err := sessionsPath()
 	if err != nil {
 		t.Fatalf("sessionsPath: %v", err)
 	}
-	preserveAndCleanup(t, path)
 
 	legacy := `[{"id":"1","name":"old","host":"10.0.0.5","user":"root"}]`
 	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
@@ -70,5 +66,31 @@ func TestUnpinnedSessionOmitsPinnedKey(t *testing.T) {
 	}
 	if _, present := decoded["pinned"]; present {
 		t.Errorf("unpinned session serialized a pinned key: %s", encoded)
+	}
+}
+
+// A save that replaces a file must never leave a half-written one: the
+// temporary file is renamed over the original, so the directory holds
+// exactly the config files and nothing else afterwards.
+func TestSaveSessionsLeavesNoTemporaryFile(t *testing.T) {
+	isolateConfig(t)
+	for i := 0; i < 3; i++ {
+		if err := SaveSessions([]SessionProfile{{ID: "1", Name: "again"}}); err != nil {
+			t.Fatalf("SaveSessions: %v", err)
+		}
+	}
+	path, err := sessionsPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := path[:len(path)-len("sessions.json")]
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "sessions.json" {
+			t.Errorf("unexpected file left in the config directory: %s", e.Name())
+		}
 	}
 }

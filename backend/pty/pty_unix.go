@@ -88,8 +88,12 @@ func (t *unixTerminal) Resize(cols, rows int) error {
 
 func (t *unixTerminal) Close() error {
 	_ = t.f.Close()
-	if t.cmd.Process != nil {
-		return t.cmd.Process.Kill()
+	if t.cmd.Process == nil {
+		return nil
 	}
-	return nil
+	err := t.cmd.Process.Kill()
+	// Reap it. A killed child that is never waited for stays a zombie
+	// until Xpecter itself exits, one per closed tab.
+	go func() { _ = t.cmd.Wait() }()
+	return err
 }

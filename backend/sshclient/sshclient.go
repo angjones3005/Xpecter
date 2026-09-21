@@ -4,6 +4,8 @@
 package sshclient
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -19,10 +21,36 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
 
+	"xpecter/backend/atomicfile"
 	"xpecter/backend/idgen"
 )
 
 var ErrPassphraseRequired = errors.New("private key is encrypted, passphrase required")
+
+// ErrKeepaliveTimeout is the CloseReason.Err of a session whose peer
+// stopped answering keepalive probes: the connection was still open as
+// far as this side's kernel knew, and nothing else would ever have said
+// otherwise.
+var ErrKeepaliveTimeout = errors.New("the host stopped responding (no reply to keepalive probes)")
+
+// How long a TCP connection and then the SSH handshake itself may take.
+// ClientConfig.Timeout only bounds the connect; a host that accepts the
+// connection and never sends a banner, or a bastion whose channel never
+// answers, used to leave Connect blocked forever with no way to cancel.
+const (
+	dialTimeout      = 10 * time.Second
+	handshakeTimeout = 45 * time.Second
+)
+
+// Keepalive (SPE-79): a probe every interval, a probe that goes
+// unanswered for replyTimeout is a miss, and maxMisses in a row is a
+// dead connection. The same shape as OpenSSH's ServerAliveInterval and
+// ServerAliveCountMax, and the same numbers.
+const (
+	keepaliveInterval     = 30 * time.Second
+	keepaliveReplyTimeout = 20 * time.Second
+	keepaliveMaxMisses    = 3
+)
 
 type Config struct {
 	Host          string
@@ -63,10 +91,25 @@ type Config struct {
 type Session struct {
 	id        string
 	client    *ssh.Client
-	sess      *ssh.Session
-	stdin     io.WriteCloser
 	agentConn net.Conn
-	closing   atomic.Bool
+	// sess and stdin exist once StartShell has run. They are written
+	// there and read by Write, Resize and Close, each of which arrives
+	// on its own goroutine, so they are guarded.
+	shellMu sync.Mutex
+	sess    *ssh.Session
+	stdin   io.WriteCloser
+	// closing is set by Close(): the user ended this session, and the
+	// read loop's report of it is nobody's news. dropped is set by the
+	// keepalive loop when it tears the transport down because the peer
+	// stopped answering, which is the opposite: exactly the drop the
+	// disconnect panel exists to report.
+	closing atomic.Bool
+	dropped atomic.Bool
+	// Close is safe to call more than once and after the transport has
+	// already gone, which is what a session whose connection dropped
+	// looks like by the time its tab is closed.
+	closeOnce sync.Once
+	closeErr  error
 	// usedLegacyCompat records whether this session had to fall back to
 	// the widened SPE-99 algorithm set to connect, exposed via
 	// UsedLegacyCompat() below.
@@ -102,6 +145,11 @@ type CloseReason struct {
 // HostKeyUnknownError means this host has never been seen before — not in
 // known_hosts at all. The frontend should show the fingerprint and, if the
 // user accepts, call TrustHost before retrying Connect.
+//
+// It is also what a host that is on record with keys of other types
+// gets: an RSA key in the file and an ed25519 key offered is a server
+// that has a key this machine has not seen, not a server whose key has
+// changed. OpenSSH draws the same line.
 type HostKeyUnknownError struct {
 	Host        string
 	Fingerprint string
@@ -194,18 +242,41 @@ func knownHostsPath() (string, error) {
 	return path, nil
 }
 
-func hostKeyCallback() (ssh.HostKeyCallback, error) {
+// hostAddr is a net.Addr for a "host:port" string, so the known_hosts
+// callback can be asked about a host before any connection to it
+// exists. The callback prefers the hostname it is given over this and
+// only needs it to parse.
+type hostAddr string
+
+func (h hostAddr) Network() string { return "tcp" }
+func (h hostAddr) String() string  { return string(h) }
+
+// hostKeyVerifier is the known_hosts file as x/crypto reads it, plus
+// the questions this package asks of it beyond "is this key right".
+type hostKeyVerifier struct {
+	path string
+	base ssh.HostKeyCallback
+}
+
+func newHostKeyVerifier() (*hostKeyVerifier, error) {
 	path, err := knownHostsPath()
 	if err != nil {
 		return nil, err
 	}
 	base, err := knownhosts.New(path)
 	if err != nil {
-		return nil, err
+		// x/crypto refuses the whole file over one line it cannot parse,
+		// and names the line. Say so, or every connection fails with an
+		// error that reads as if the file were missing.
+		return nil, fmt.Errorf("%w — fix or remove that line", err)
 	}
+	return &hostKeyVerifier{path: path, base: base}, nil
+}
 
+// callback is the ssh.HostKeyCallback handed to the connection.
+func (v *hostKeyVerifier) callback() ssh.HostKeyCallback {
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-		err := base(hostname, remote, key)
+		err := v.base(hostname, remote, key)
 		if err == nil {
 			return nil
 		}
@@ -218,13 +289,114 @@ func hostKeyCallback() (ssh.HostKeyCallback, error) {
 			pendingKeysMu.Unlock()
 
 			fp := ssh.FingerprintSHA256(key)
-			if len(keyErr.Want) == 0 {
+			if !hasKeyOfType(keyErr.Want, key.Type()) {
 				return &HostKeyUnknownError{Host: hostname, Fingerprint: fp, KeyType: key.Type()}
 			}
 			return &HostKeyChangedError{Host: hostname, NewFingerprint: fp, KeyType: key.Type()}
 		}
 		return err
-	}, nil
+	}
+}
+
+// hasKeyOfType reports whether any recorded key for the host is of the
+// type the server offered. Only then has the key *changed*; a recorded
+// RSA key and an offered ed25519 key is a key this machine has never
+// seen, and asking to trust it is the right prompt.
+func hasKeyOfType(known []knownhosts.KnownKey, keyType string) bool {
+	for _, k := range known {
+		if k.Key.Type() == keyType {
+			return true
+		}
+	}
+	return false
+}
+
+// The public key used to ask known_hosts what it already holds for a
+// host. Any valid key that is not on record does: the file answers a
+// mismatch with the list of keys it does have. Generated once.
+var (
+	probeKeyOnce sync.Once
+	probeKey     ssh.PublicKey
+)
+
+func hostProbeKey() ssh.PublicKey {
+	probeKeyOnce.Do(func() {
+		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			return
+		}
+		if key, err := ssh.NewPublicKey(pub); err == nil {
+			probeKey = key
+		}
+	})
+	return probeKey
+}
+
+// recordedKeyTypes lists the key types known_hosts holds for addr
+// ("host:port"), in file order, and nothing for a host it has not seen.
+func (v *hostKeyVerifier) recordedKeyTypes(addr string) []string {
+	probe := hostProbeKey()
+	if probe == nil {
+		return nil
+	}
+	err := v.base(addr, hostAddr(addr), probe)
+	var keyErr *knownhosts.KeyError
+	if !errors.As(err, &keyErr) {
+		return nil
+	}
+	var types []string
+	for _, want := range keyErr.Want {
+		types = appendUnique(types, want.Key.Type())
+	}
+	return types
+}
+
+// hostKeyAlgorithms orders the host key algorithms the client offers so
+// the types already on record for this host come first, the way OpenSSH
+// does. Without it a server that has an RSA key in the file and also an
+// ed25519 key offered the ed25519 one (first in the default list), and
+// the perfectly good server got the MITM warning. pool is every
+// algorithm allowed on this connection; only those are offered.
+func hostKeyAlgorithms(recorded []string, pool []string) []string {
+	allowed := make(map[string]bool, len(pool))
+	for _, alg := range pool {
+		allowed[alg] = true
+	}
+	var out []string
+	for _, keyType := range recorded {
+		for _, alg := range algorithmsForKeyType(keyType) {
+			if allowed[alg] {
+				out = appendUnique(out, alg)
+			}
+		}
+	}
+	for _, alg := range pool {
+		out = appendUnique(out, alg)
+	}
+	return out
+}
+
+// algorithmsForKeyType is the signature algorithms a recorded key type
+// can be verified with. An RSA key signs with SHA-2 on any modern
+// server, under names that differ from the key's own.
+func algorithmsForKeyType(keyType string) []string {
+	switch keyType {
+	case ssh.KeyAlgoRSA:
+		return []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSA}
+	case ssh.CertAlgoRSAv01:
+		return []string{ssh.CertAlgoRSASHA512v01, ssh.CertAlgoRSASHA256v01, ssh.CertAlgoRSAv01}
+	default:
+		return []string{keyType}
+	}
+}
+
+func appendUnique(list []string, item string) []string {
+	for _, existing := range list {
+		if existing == item {
+			return list
+		}
+	}
+	return append(list, item)
 }
 
 // TrustHost records a genuinely new host's key in known_hosts. Only valid
@@ -259,41 +431,100 @@ func writeTrustedKey(hostname string, replacing bool) error {
 	if err != nil {
 		return err
 	}
-
-	if replacing {
-		if err := removeHostLines(path, hostname); err != nil {
-			return err
-		}
-	}
-
-	line := knownhosts.Line([]string{hostname}, pk.key)
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := f.WriteString(line + "\n"); err != nil {
-		_ = f.Close()
-		return err
-	}
-	return f.Close()
-}
-
-// removeHostLines strips existing known_hosts lines for hostname before a
-// changed-key override is written, avoiding a stale, conflicting entry.
-func removeHostLines(path, hostname string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	lines := strings.Split(string(data), "\n")
-	kept := make([]string, 0, len(lines))
-	for _, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), hostname+" ") {
+
+	var stale map[int]bool
+	if replacing {
+		stale, err = staleHostLines(path, string(data), hostname, pk)
+		if err != nil {
+			return err
+		}
+	}
+	updated := appendKnownHostsLine(string(data), stale, knownhosts.Line([]string{hostname}, pk.key))
+	return atomicfile.Write(path, []byte(updated), 0o600)
+}
+
+// appendKnownHostsLine drops the 1-based lines in stale from a
+// known_hosts file and appends line to what is left. The result always
+// ends in a newline: a file whose last line lacked one (hand-edited,
+// written by another tool) used to have the new entry glued onto it,
+// which corrupted both and made the whole file unreadable.
+func appendKnownHostsLine(data string, stale map[int]bool, line string) string {
+	var kept []string
+	for i, existing := range strings.Split(data, "\n") {
+		if stale[i+1] {
 			continue
 		}
-		kept = append(kept, line)
+		kept = append(kept, existing)
 	}
-	return os.WriteFile(path, []byte(strings.Join(kept, "\n")), 0o600)
+	// Split leaves one trailing empty element for a file that ended in
+	// a newline, and nothing for an empty file; drop the trailing empties
+	// and add exactly one newline back.
+	for len(kept) > 0 && strings.TrimSpace(kept[len(kept)-1]) == "" {
+		kept = kept[:len(kept)-1]
+	}
+	kept = append(kept, line)
+	return strings.Join(kept, "\n") + "\n"
+}
+
+// staleHostLines finds the known_hosts lines a changed-key override
+// should retire: every line the file matched against this host whose
+// key is not the one being trusted now. The file is asked directly,
+// with the same hostname and key the failed connection presented, so
+// this understands every form a line can take (a port, an IP beside
+// the name, a hashed host) without a second parser of the format.
+//
+// The one thing not retired is a wildcard pattern: "*.lab.example"
+// speaks for other hosts too, and a changed key on one of them is not
+// a reason to forget the rest.
+func staleHostLines(path string, data string, hostname string, pk pendingKey) (map[int]bool, error) {
+	base, err := knownhosts.New(path)
+	if err != nil {
+		return nil, err
+	}
+	err = base(hostname, hostAddr(pk.addr), pk.key)
+	var keyErr *knownhosts.KeyError
+	if !errors.As(err, &keyErr) {
+		// Trusted already, or a host the file has no line for: nothing
+		// to remove either way.
+		return nil, nil
+	}
+	lines := strings.Split(data, "\n")
+	stale := make(map[int]bool)
+	for _, want := range keyErr.Want {
+		if want.Filename != path || want.Line < 1 || want.Line > len(lines) {
+			continue
+		}
+		if knownHostsLineIsWildcard(lines[want.Line-1]) {
+			continue
+		}
+		stale[want.Line] = true
+	}
+	return stale, nil
+}
+
+// knownHostsLineIsWildcard reports whether a known_hosts line's host
+// field carries a pattern rather than a name.
+func knownHostsLineIsWildcard(line string) bool {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return false
+	}
+	hosts := fields[0]
+	if strings.HasPrefix(hosts, "@") {
+		// A marker (@cert-authority, @revoked) precedes the host field.
+		if len(fields) < 2 {
+			return false
+		}
+		hosts = fields[1]
+	}
+	if strings.HasPrefix(hosts, "|") {
+		return false
+	}
+	return strings.ContainsAny(hosts, "*?")
 }
 
 func Dial(cfg Config) (*Session, error) {
@@ -351,7 +582,7 @@ func Dial(cfg Config) (*Session, error) {
 		authMethods = append(authMethods, ssh.PublicKeys(signer))
 	}
 	if cfg.Password != "" {
-		authMethods = append(authMethods, ssh.Password(cfg.Password))
+		authMethods = append(authMethods, ssh.Password(cfg.Password), passwordAsKeyboardInteractive(cfg.Password))
 	}
 	var agentConn net.Conn
 	if cfg.UseAgent {
@@ -364,29 +595,37 @@ func Dial(cfg Config) (*Session, error) {
 		authMethods = append(authMethods, ssh.PublicKeysCallback(agentClient.Signers))
 	}
 
-	hkCallback, err := hostKeyCallback()
+	verifier, err := newHostKeyVerifier()
 	if err != nil {
 		if agentConn != nil {
 			_ = agentConn.Close()
 		}
 		return nil, fmt.Errorf("setting up host key verification: %w", err)
 	}
-
-	sshCfg := &ssh.ClientConfig{
-		User:            cfg.User,
-		Auth:            authMethods,
-		Timeout:         10 * time.Second,
-		HostKeyCallback: hkCallback,
-	}
+	hkCallback := verifier.callback()
+	supported := ssh.SupportedAlgorithms()
 
 	addr := net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", cfg.Port))
+	recorded := verifier.recordedKeyTypes(addr)
+
+	sshCfg := &ssh.ClientConfig{
+		User:              cfg.User,
+		Auth:              authMethods,
+		Timeout:           dialTimeout,
+		HostKeyCallback:   hkCallback,
+		HostKeyAlgorithms: hostKeyAlgorithms(recorded, supported.HostKeys),
+	}
 
 	// A plain TCP dial. The target uses this directly, or through the
 	// jump host's tunnel below; either way establish() wraps it with the
 	// SPE-99 legacy-algorithm fallback, so bastion and target each get
 	// that fallback on their own terms.
 	directDial := func(a string, c *ssh.ClientConfig) (*ssh.Client, error) {
-		return ssh.Dial("tcp", a, c)
+		conn, err := net.DialTimeout("tcp", a, c.Timeout)
+		if err != nil {
+			return nil, err
+		}
+		return handshake(conn, a, c)
 	}
 
 	var jump *ssh.Client
@@ -396,12 +635,13 @@ func Dial(cfg Config) (*Session, error) {
 		jumpCfg := &ssh.ClientConfig{
 			User:    juser,
 			Auth:    authMethods,
-			Timeout: 10 * time.Second,
+			Timeout: dialTimeout,
 			// The bastion is verified against known_hosts exactly like
 			// the target: an unknown bastion key raises the same
 			// HostKeyUnknownError, and the existing trust prompt names
 			// the bastion, so trusting it and retrying just works.
-			HostKeyCallback: hkCallback,
+			HostKeyCallback:   hkCallback,
+			HostKeyAlgorithms: hostKeyAlgorithms(verifier.recordedKeyTypes(jaddr), supported.HostKeys),
 		}
 		var jerr error
 		jump, _, jerr = establish(jaddr, jumpCfg, directDial)
@@ -414,16 +654,11 @@ func Dial(cfg Config) (*Session, error) {
 			return nil, fmt.Errorf("jump host %s: %w", jaddr, jerr)
 		}
 		dialTarget = func(a string, c *ssh.ClientConfig) (*ssh.Client, error) {
-			conn, err := jump.Dial("tcp", a)
+			conn, err := dialThroughJump(jump, a, c.Timeout)
 			if err != nil {
 				return nil, err
 			}
-			ncc, chans, reqs, err := ssh.NewClientConn(conn, a, c)
-			if err != nil {
-				_ = conn.Close()
-				return nil, err
-			}
-			return ssh.NewClient(ncc, chans, reqs), nil
+			return handshake(conn, a, c)
 		}
 	}
 
@@ -446,6 +681,92 @@ func Dial(cfg Config) (*Session, error) {
 		go sess.keepaliveLoop()
 	}
 	return sess, nil
+}
+
+// passwordAsKeyboardInteractive answers every keyboard-interactive
+// prompt with the password. Plenty of servers, network appliances
+// especially, are configured with PasswordAuthentication off and
+// KbdInteractiveAuthentication on; to them a client that only offers
+// "password" has offered nothing, and the right password was refused.
+func passwordAsKeyboardInteractive(password string) ssh.AuthMethod {
+	return ssh.KeyboardInteractive(keyboardInteractiveAnswers(password))
+}
+
+func keyboardInteractiveAnswers(password string) ssh.KeyboardInteractiveChallenge {
+	return func(name, instruction string, questions []string, echos []bool) ([]string, error) {
+		answers := make([]string, len(questions))
+		for i := range questions {
+			answers[i] = password
+		}
+		return answers, nil
+	}
+}
+
+// handshake runs the SSH handshake and authentication on an open
+// connection, bounded by handshakeTimeout. A deadline on the connection
+// would do for TCP, but a channel through a jump host has no deadlines,
+// so the wait is bounded from the outside for both.
+func handshake(conn net.Conn, addr string, cfg *ssh.ClientConfig) (*ssh.Client, error) {
+	return handshakeWithin(conn, addr, cfg, handshakeTimeout)
+}
+
+func handshakeWithin(conn net.Conn, addr string, cfg *ssh.ClientConfig, timeout time.Duration) (*ssh.Client, error) {
+	type result struct {
+		client *ssh.Client
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		ncc, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
+		if err != nil {
+			done <- result{err: err}
+			return
+		}
+		done <- result{client: ssh.NewClient(ncc, chans, reqs)}
+	}()
+	select {
+	case r := <-done:
+		if r.err != nil {
+			_ = conn.Close()
+		}
+		return r.client, r.err
+	case <-time.After(timeout):
+		// Closing the connection unblocks the handshake; whatever it
+		// then reports is collected so nothing is left dangling.
+		_ = conn.Close()
+		go func() {
+			if r := <-done; r.client != nil {
+				_ = r.client.Close()
+			}
+		}()
+		return nil, fmt.Errorf("%s did not complete the SSH handshake within %s", addr, timeout)
+	}
+}
+
+// dialThroughJump opens a channel to addr on the bastion, giving up
+// after timeout. jump.Dial itself waits as long as the bastion takes,
+// which for a target that is down can be forever.
+func dialThroughJump(jump *ssh.Client, addr string, timeout time.Duration) (net.Conn, error) {
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		conn, err := jump.Dial("tcp", addr)
+		done <- result{conn: conn, err: err}
+	}()
+	select {
+	case r := <-done:
+		return r.conn, r.err
+	case <-time.After(timeout):
+		go func() {
+			if r := <-done; r.conn != nil {
+				_ = r.conn.Close()
+			}
+		}()
+		return nil, fmt.Errorf("the jump host did not reach %s within %s", addr, timeout)
+	}
 }
 
 // establish connects an SSH client to addr with cfg, and on an algorithm
@@ -472,7 +793,10 @@ func establish(addr string, cfg *ssh.ClientConfig, dial func(string, *ssh.Client
 			KeyExchanges: append(append([]string{}, supported.KeyExchanges...), insecure.KeyExchanges...),
 			MACs:         append(append([]string{}, supported.MACs...), insecure.MACs...),
 		}
-		legacy.HostKeyAlgorithms = append(append([]string{}, supported.HostKeys...), insecure.HostKeys...)
+		// The recorded-first ordering cfg already carries is kept and
+		// the widened pool appended, so a known RSA host still verifies
+		// by its recorded key rather than by whatever comes first.
+		legacy.HostKeyAlgorithms = hostKeyAlgorithms(cfg.HostKeyAlgorithms, append(append([]string{}, supported.HostKeys...), insecure.HostKeys...))
 		client, err = dial(addr, &legacy)
 		if err == nil {
 			return client, true, nil
@@ -511,21 +835,70 @@ func (s *Session) UsedLegacyCompat() bool { return s.usedLegacyCompat }
 // keepalives on its own, meaning an idle session behind a firewall/NAT
 // that silently drops idle connections (no TCP RST ever sent) can hang
 // forever on read() rather than erroring, the session just looks frozen
-// with zero feedback. A failed keepalive closes the client, which
-// unblocks the shell's read loop and correctly fires onClose (SPE-59's
-// disconnect panel) through the existing path, reusing Close() rather
-// than duplicating its cleanup.
+// with zero feedback.
+//
+// A dead peer is torn down without going through Close(): Close marks
+// the session as deliberately closed, and the read loop then reported
+// the drop as the user's own doing, so the disconnect panel this exists
+// to trigger never appeared and the tab simply froze. The transport is
+// closed directly instead, with dropped set so the read loop reports
+// what actually happened.
 func (s *Session) keepaliveLoop() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(keepaliveInterval)
 	defer ticker.Stop()
+	misses := 0
 	for range ticker.C {
 		if s.closing.Load() {
 			return
 		}
-		if _, _, err := s.client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
-			_ = s.Close()
+		switch s.probe() {
+		case probeOK:
+			misses = 0
+			continue
+		case probeSlow:
+			misses++
+			if misses < keepaliveMaxMisses {
+				continue
+			}
+		case probeFailed:
+			// The transport already reported an error; the read loop
+			// is about to see it too. Nothing to tear down.
 			return
 		}
+		if s.closing.Load() {
+			return
+		}
+		s.dropped.Store(true)
+		_ = s.client.Close()
+		return
+	}
+}
+
+type probeResult int
+
+const (
+	probeOK probeResult = iota
+	probeSlow
+	probeFailed
+)
+
+// probe sends one keepalive and waits keepaliveReplyTimeout for the
+// answer. A request that errors out is a transport that is already
+// gone; one that is merely unanswered is a miss.
+func (s *Session) probe() probeResult {
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := s.client.SendRequest("keepalive@openssh.com", true, nil)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			return probeFailed
+		}
+		return probeOK
+	case <-time.After(keepaliveReplyTimeout):
+		return probeSlow
 	}
 }
 
@@ -584,8 +957,10 @@ func (s *Session) StartShell(cols, rows int, onData func([]byte), onClose func(C
 		_ = sess.Close()
 		return err
 	}
+	s.shellMu.Lock()
 	s.sess = sess
 	s.stdin = stdin
+	s.shellMu.Unlock()
 	go func() {
 		buf := make([]byte, 4096)
 		for {
@@ -597,11 +972,7 @@ func (s *Session) StartShell(cols, rows int, onData func([]byte), onClose func(C
 			}
 			if err != nil {
 				if onClose != nil {
-					onClose(CloseReason{
-						Deliberate: s.closing.Load(),
-						EOF:        errors.Is(err, io.EOF),
-						Err:        err,
-					})
+					onClose(s.closeReason(err))
 				}
 				return
 			}
@@ -610,11 +981,30 @@ func (s *Session) StartShell(cols, rows int, onData func([]byte), onClose func(C
 	return nil
 }
 
+// closeReason describes why the read loop stopped. A keepalive
+// tear-down reads to the loop as an ordinary closed connection, so it
+// is named here for what it was.
+func (s *Session) closeReason(err error) CloseReason {
+	reason := CloseReason{
+		Deliberate: s.closing.Load(),
+		EOF:        errors.Is(err, io.EOF),
+		Err:        err,
+	}
+	if s.dropped.Load() && !reason.Deliberate {
+		reason.EOF = false
+		reason.Err = ErrKeepaliveTimeout
+	}
+	return reason
+}
+
 func (s *Session) Write(data []byte) error {
-	if s.stdin == nil {
+	s.shellMu.Lock()
+	stdin := s.stdin
+	s.shellMu.Unlock()
+	if stdin == nil {
 		return fmt.Errorf("shell not started")
 	}
-	_, err := s.stdin.Write(data)
+	_, err := stdin.Write(data)
 	return err
 }
 
@@ -624,25 +1014,45 @@ func (s *Session) Resize(cols, rows int) error {
 	// in the gap between the two (the frontend fits the pane on its way
 	// to measuring it), and there is nothing to report: the size that
 	// call carried is the one StartShell is about to request anyway.
-	if s.sess == nil {
+	s.shellMu.Lock()
+	sess := s.sess
+	s.shellMu.Unlock()
+	if sess == nil {
 		return nil
 	}
-	return s.sess.WindowChange(rows, cols)
+	return sess.WindowChange(rows, cols)
 }
 
+// shellSession is the ssh.Session StartShell opened, or nil.
+func (s *Session) shellSession() *ssh.Session {
+	s.shellMu.Lock()
+	defer s.shellMu.Unlock()
+	return s.sess
+}
+
+// Close ends the session. Safe to call more than once and after the
+// transport has already gone: closing a connection the peer dropped
+// answers "use of closed network connection", which is not a failure to
+// close anything and used to make a dead session's tab impossible to
+// close.
 func (s *Session) Close() error {
 	s.closing.Store(true)
-	if s.sess != nil {
-		_ = s.sess.Close()
-	}
-	if s.agentConn != nil {
-		_ = s.agentConn.Close()
-	}
-	err := s.client.Close()
-	// The bastion outlives the target's channel and has to be closed too,
-	// or its TCP connection and goroutines leak for the life of the app.
-	if s.jumpClient != nil {
-		_ = s.jumpClient.Close()
-	}
-	return err
+	s.closeOnce.Do(func() {
+		if sess := s.shellSession(); sess != nil {
+			_ = sess.Close()
+		}
+		if s.agentConn != nil {
+			_ = s.agentConn.Close()
+		}
+		err := s.client.Close()
+		// The bastion outlives the target's channel and has to be closed too,
+		// or its TCP connection and goroutines leak for the life of the app.
+		if s.jumpClient != nil {
+			_ = s.jumpClient.Close()
+		}
+		if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.EOF) {
+			s.closeErr = err
+		}
+	})
+	return s.closeErr
 }

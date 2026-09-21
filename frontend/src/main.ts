@@ -12,6 +12,11 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import * as monaco from 'monaco-editor';
 import DOMPurify, { type Config as PurifyConfig } from 'dompurify';
 import { renderMarkdown, headingSlug, taskMarkerAt, countWords, type FrontMatter } from './markdown';
+import { sgrLeavesColorActive } from './ansi';
+import { quoteForShell } from './shellquote';
+import { chunkPasteLines, countPasteLines, normalizePasteNewlines } from './paste';
+import { describeWorkspace, parseWorkspaceSnapshot, WORKSPACE_STORAGE_KEY, type PaneSpec, type TabSpec, type WorkspaceSnapshot } from './workspace';
+import { SearchAddon } from '@xterm/addon-search';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import JsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
 import CssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker';
@@ -40,7 +45,7 @@ import '@fontsource/victor-mono/400.css';
 import '@fontsource/victor-mono/700.css';
 import '@fontsource/ubuntu-mono/400.css';
 import '@fontsource/ubuntu-mono/700.css';
-import type { RemoteFile, LocalFile, Folder, ConnectRequest, SessionProfile, SessionGroup, SessionClosedEvent, Settings, UpdateInfo, LocalShellProfile, RDPLaunch, VNCLaunch } from '../wailsjs.d.ts';
+import type { RemoteFile, LocalFile, Folder, ConnectRequest, SessionProfile, SessionGroup, SessionClosedEvent, Settings, UpdateInfo, LocalShellProfile, RDPLaunch, VNCLaunch, TransferProgress } from '../wailsjs.d.ts';
 
 
 // The app was renamed from Specter to Xpecter, and every localStorage
@@ -1103,7 +1108,7 @@ function applyFontSize(size: number) {
   updateAllEditors({ fontSize: clamped });
   const fontSizeSelect = document.getElementById('font-size-select') as HTMLSelectElement;
   fontSizeSelect.value = String(clamped);
-  App.SaveSettings(appSettings);
+  persistSettings();
 }
 
 // SPE-127: the terminal is 80 columns wide. Always, whatever the window
@@ -1170,7 +1175,7 @@ function applyScrollback(lines: number) {
       if (s.term) s.term.options.scrollback = lines;
     }
   }
-  App.SaveSettings(appSettings);
+  persistSettings();
 }
 
 // SPE-132: auto-wrap (DECAWM), decided per session kind, because the two kinds
@@ -1271,21 +1276,25 @@ window.addEventListener('wheel', (event) => {
 
 function applyColorScheme(name: ColorScheme) {
   appSettings.colorScheme = name;
-  App.SaveSettings(appSettings);
+  persistSettings();
   refreshAllTerminalThemes();
 }
 
 function applyFont(fontId: string) {
   appSettings.fontFamily = fontId;
-  App.SaveSettings(appSettings);
+  persistSettings();
   const stack = fontStack(fontId);
   // SPE-61 originally only touched the terminal itself; the picker
   // should also cover the rest of the app chrome (sidebar, menus, tab
   // bar), otherwise the terminal font visibly doesn't match everything
   // around it.
   document.body.style.fontFamily = stack;
+  // Every pane, not just each tab's primary terminal: a split's other
+  // panes kept the old face and were then re-measured with its metrics.
   for (const tab of tabs.values()) {
-    if (tab.term) tab.term.options.fontFamily = stack;
+    for (const s of allSessions(tab)) {
+      if (s.term) s.term.options.fontFamily = stack;
+    }
   }
   // SPE-103: editor sessions share the terminal's coding font, the same
   // reasoning as the shared font size.
@@ -1420,14 +1429,14 @@ async function setEditorWallpaper(path: string) {
   appSettings.editorWallpaperPath = path;
   appSettings.editorWallpaperDataUrl = await App.ReadImageFile(path);
   if (!appSettings.editorWallpaperOpacity) appSettings.editorWallpaperOpacity = 0.15;
-  await App.SaveSettings(appSettings);
+  await persistSettings();
   applyEditorWallpaperVisual();
 }
 
 async function clearEditorWallpaper() {
   appSettings.editorWallpaperPath = '';
   appSettings.editorWallpaperDataUrl = undefined;
-  await App.SaveSettings(appSettings);
+  await persistSettings();
   applyEditorWallpaperVisual();
 }
 
@@ -1435,14 +1444,14 @@ async function setWallpaper(path: string) {
   appSettings.wallpaperPath = path;
   appSettings.wallpaperDataUrl = await App.ReadImageFile(path);
   if (!appSettings.wallpaperOpacity) appSettings.wallpaperOpacity = 0.15;
-  await App.SaveSettings(appSettings);
+  await persistSettings();
   applyWallpaperVisual();
 }
 
 async function clearWallpaper() {
   appSettings.wallpaperPath = '';
   appSettings.wallpaperDataUrl = undefined;
-  await App.SaveSettings(appSettings);
+  await persistSettings();
   applyWallpaperVisual();
 }
 
@@ -1527,17 +1536,30 @@ async function loadSettingsAndApply() {
   // already handles color.
   const stack = fontStack(appSettings.fontFamily || FONT_OPTIONS[0].value);
   document.body.style.fontFamily = stack;
-  for (const tab of tabs.values()) {
-    if (tab.term) tab.term.options.fontFamily = stack;
-  }
   // Same race-condition reasoning for font SIZE: an editor pane or a
   // terminal tab may already exist by the time this async settings load
   // resolves, if one was opened or connected fast enough.
   const savedFontSize = appSettings.fontSize || FONT_SIZE_DEFAULT;
   updateAllEditors({ fontSize: savedFontSize });
   for (const tab of tabs.values()) {
-    if (tab.term) tab.term.options.fontSize = savedFontSize;
+    for (const s of allSessions(tab)) {
+      if (!s.term) continue;
+      s.term.options.fontFamily = stack;
+      s.term.options.fontSize = savedFontSize;
+    }
   }
+}
+
+// Writes the settings to disk without the two wallpaper images. Those
+// are held on appSettings as data: URLs for the CSS to use and are not
+// part of what the backend keeps, so every zoom notch and font change
+// was pushing several megabytes of them across the bridge to be
+// discarded.
+function persistSettings(): Promise<void> {
+  const persisted: Settings = { ...appSettings };
+  delete persisted.wallpaperDataUrl;
+  delete persisted.editorWallpaperDataUrl;
+  return App.SaveSettings(persisted);
 }
 
 function applyTheme(name: ThemeName) {
@@ -1700,6 +1722,18 @@ interface Session {
   // orphaned behind the overwritten backendId. Guards the connect
   // entry points so only one dial per Session is ever in flight.
   connecting: boolean;
+  // The search addon loaded into this terminal, and the find bar built
+  // over it while one is open (Ctrl+Shift+F).
+  searchAddon: SearchAddon | null;
+  findBar: HTMLDivElement | null;
+  // Output arrived, or the bell rang, while this session's tab was not
+  // the one on screen. Shown on the tab until it is looked at.
+  hasActivity: boolean;
+  bellPending: boolean;
+  // How this session was started, so the tab set can be reopened on
+  // the next launch. Never carries a password. null until connected,
+  // and always null for an editor, whose state is read off the pane.
+  origin: PaneSpec | null;
 }
 
 // A split pane alongside a tab's primary session. Same shape as
@@ -1733,6 +1767,15 @@ interface Tab extends Session {
 }
 
 const tabs = new Map<string, Tab>();
+
+// --- Reopening what was open (see workspace.ts) ---
+// Declared up here, ahead of the first tab render, because renderTabBar
+// asks for a save on every change and runs during module evaluation.
+let workspacePersistTimer: ReturnType<typeof setTimeout> | null = null;
+// The previous launch's snapshot, until it has been reopened or
+// declined. While it stands, an empty tab set does not overwrite it.
+let pendingWorkspaceRestore: WorkspaceSnapshot | null = null;
+let restoringWorkspace = false;
 let activeTabId: string | null = null;
 let tabCounter = 0;
 
@@ -1762,6 +1805,11 @@ function createPendingTab(): Tab {
     highlightCarry: '',
     sessionProfileId: null,
     connecting: false,
+    searchAddon: null,
+    findBar: null,
+    hasActivity: false,
+    bellPending: false,
+    origin: null,
     layout: 'single',
     extraPanes: [],
     focusedPaneIndex: 0,
@@ -1805,6 +1853,9 @@ function paneIndexOf(tab: Tab, session: Session): number {
 let showTabNumbersEnabled = localStorage.getItem('xpecter-show-tab-numbers') === 'on';
 
 function renderTabBar() {
+  // Every change to the tab set passes through here, which makes it the
+  // one place the tab set has to be remembered from.
+  persistWorkspaceSoon();
   const bar = document.getElementById('tab-bar')!;
   bar.innerHTML = '';
   let tabIndex = 0;
@@ -1857,6 +1908,17 @@ function renderTabBar() {
     const label = document.createElement('span');
       label.textContent = tab.isHome ? '⌂ Home' : tab.mode === 'editor' ? editorTabLabel(tab) : (tab.mode === 'local' ? '💻 ' : tab.mode === 'ssh' ? '🌐 ' : tab.mode === 'serial' ? '🔌 ' : tab.mode === 'rdp' ? '🪟 ' : tab.mode === 'vnc' ? '🖥 ' : '') + tab.label + editorDirtyMarker(tab);
     el.appendChild(label);
+
+    // Something happened in a tab that is not the one on screen: a
+    // dot for output, a bell for the bell. Cleared by looking at it.
+    if (tab.id !== activeTabId && allSessions(tab).some((s) => s.hasActivity || s.bellPending)) {
+      const rang = allSessions(tab).some((s) => s.bellPending);
+      const mark = document.createElement('span');
+      mark.className = 'tab-activity' + (rang ? ' bell' : '');
+      mark.textContent = rang ? '🔔' : '●';
+      mark.title = rang ? 'The bell rang in this tab' : 'New output in this tab';
+      el.appendChild(mark);
+    }
 
       if (!tab.isHome) {
         const close = document.createElement('span');
@@ -1969,6 +2031,11 @@ function switchToTab(id: string) {
   // next tick.
   void runTreeWatchPass();
 
+  // Looking at a tab answers whatever it had been trying to say.
+  for (const s of allSessions(tab)) {
+    s.hasActivity = false;
+    s.bellPending = false;
+  }
   renderTabBar();
   // So Ctrl+S works the moment you land on an editor tab, rather than
   // only after clicking into the buffer.
@@ -1981,17 +2048,35 @@ function switchToTab(id: string) {
 // open).
 async function closeSessionBackend(s: Session) {
   if (s.mode === 'editor') disposeEditorPane(s);
+  // Each backend close is best-effort. A session whose connection had
+  // already died answered CloseSSH with an error, and that used to
+  // abort this function before any of the local teardown below ran:
+  // the tab could not be closed at all. The backend is told once, and
+  // what it says back does not decide whether the terminal goes away.
+  const tellBackend = async (close: () => Promise<unknown>) => {
+    try {
+      await close();
+    } catch (err) {
+      console.warn('Closing the backend session failed', err);
+    }
+  };
   if (s.mode === 'ssh' && s.backendId) {
     // A forward is a listener tunnelled through this session; once the
     // session is gone it can only refuse connections, so it is torn
     // down with the session rather than left as a dead open port.
     await stopForwardsForSession(s.backendId);
-    await App.CloseSSH(s.backendId);
+    await tellBackend(() => App.CloseSSH(s.backendId!));
     runtime.EventsOff('ssh:data:' + s.backendId, 'ssh:closed:' + s.backendId);
   }
-  if (s.mode === 'local' && s.backendId) await App.CloseLocalTerminal(s.backendId);
+  if (s.mode === 'local' && s.backendId) {
+    await tellBackend(() => App.CloseLocalTerminal(s.backendId!));
+    // Every other kind turns its listener off here; a local shell's was
+    // left registered, holding the disposed terminal for the life of
+    // the app and writing any trailing output into it.
+    runtime.EventsOff('local:data:' + s.backendId);
+  }
   if (s.mode === 'serial' && s.backendId) {
-    await App.CloseSerial(s.backendId);
+    await tellBackend(() => App.CloseSerial(s.backendId!));
     runtime.EventsOff('serial:data:' + s.backendId, 'serial:closed:' + s.backendId);
   }
   if (s.mode === 'rdp' && s.backendId) {
@@ -1999,12 +2084,12 @@ async function closeSessionBackend(s: Session) {
     // window, the way closing a shell pane ends the shell. The
     // "still connected" confirmation on the way here is what stands
     // between a stray click and a desktop vanishing mid-task.
-    await App.CloseRDP(s.backendId);
+    await tellBackend(() => App.CloseRDP(s.backendId!));
     runtime.EventsOff('rdp:closed:' + s.backendId);
     sessionCards.delete(s);
   }
   if (s.mode === 'vnc' && s.backendId) {
-    await App.CloseVNC(s.backendId);
+    await tellBackend(() => App.CloseVNC(s.backendId!));
     runtime.EventsOff('vnc:closed:' + s.backendId);
     sessionCards.delete(s);
   }
@@ -2014,6 +2099,8 @@ async function closeSessionBackend(s: Session) {
   s.webglAddon = null;
   s.overlay?.remove();
   s.term?.dispose();
+  s.searchAddon = null;
+  s.findBar = null;
   s.container?.remove();
 }
 
@@ -2113,6 +2200,11 @@ function createEmptyPane(tab: Tab): Pane {
     highlightCarry: '',
     sessionProfileId: null,
     connecting: false,
+    searchAddon: null,
+    findBar: null,
+    hasActivity: false,
+    bellPending: false,
+    origin: null,
   };
 }
 
@@ -2580,58 +2672,123 @@ function writeToSession(session: Session, data: string) {
   if (session.mode === 'serial' && session.backendId) App.WriteSerial(session.backendId, data);
 }
 
-// A terminal's Enter is carriage return, not newline. Clipboard text
-// carries whatever its source used: CRLF from anything Windows, bare LF
-// from a Unix file or a web page. Sending those through untranslated is
-// what mangles a pasted block. CRLF arrives as "execute, then a stray
-// LF", which many shells count as a second empty line, and a bare LF is
-// not the key a terminal is waiting for at all.
-function newlinesToCarriageReturns(text: string): string {
-  return text.replace(/\r\n|\n/g, '\r');
+// Line endings are translated on the way in (paste.ts): a terminal's
+// Enter is a carriage return, and clipboard text carries whatever its
+// source used. Bracketed paste (DECSET 2004) is how a program says
+// "tell me when text is pasted rather than typed": wrapped in the
+// markers sendPaste adds, bash and zsh hold a multi-line block on the
+// prompt instead of running each line as it arrives, and vim leaves
+// autoindent off for the duration. xterm.js does this for pastes it
+// handles itself, but the paste guard deliberately intercepts before
+// xterm sees the event, so the brackets are added here.
+
+// How long to wait after each pasted line, in milliseconds; 0 sends the
+// whole paste at once. A console that drops characters when a config
+// is pasted in one go (most switches over a serial link, and a few
+// over SSH) wants a pause after every Enter, which is what SecureCRT
+// and MobaXterm call a line send delay.
+let pasteLineDelayMs = Number(localStorage.getItem('xpecter-paste-line-delay')) || 0;
+const PASTE_DELAY_OPTIONS = [0, 25, 50, 100, 250, 500];
+
+function setPasteLineDelay(ms: number) {
+  pasteLineDelayMs = ms;
+  localStorage.setItem('xpecter-paste-line-delay', String(ms));
+  const select = document.getElementById('paste-delay-select') as HTMLSelectElement | null;
+  if (select) select.value = String(ms);
 }
 
-// Bracketed paste (DECSET 2004) is how a program says "tell me when
-// text is pasted rather than typed". Wrapped in these markers, bash and
-// zsh hold a multi-line block on the prompt instead of running each
-// line as it arrives, and vim leaves autoindent off for the duration
-// rather than indenting every line under the one above it, which is the
-// staircase that pasted code turns into without this.
-//
-// xterm.js does this for pastes it handles itself, but the paste guard
-// below deliberately intercepts before xterm sees the event, which had
-// the side effect of dropping the brackets along with it.
-function bracketPaste(session: Session, text: string): string {
-  return session.term?.modes.bracketedPasteMode ? `\x1b[200~${text}\x1b[201~` : text;
+function pasteDelayLabel(ms: number): string {
+  return ms === 0 ? 'No delay' : `${ms} ms between lines`;
 }
 
-// Returns false if the user backed out. Only asked for text that will
-// actually be executed line by line: under bracketed paste the block
-// lands on the prompt and waits, so the old warning's "each line may
-// run as a separate command" was not true there. Where it is true, and
-// on the network hardware this guard was written for, nothing has
-// bracketed paste and the warning still appears.
-function confirmMultiline(text: string, willExecuteEachLine: boolean): boolean {
-  if (!warnMultilinePasteEnabled || !willExecuteEachLine) return true;
-  const lines = text.split(/\r\n|\r|\n/).filter((l, i, arr) => !(i === arr.length - 1 && l === ''));
-  if (lines.length <= 1) return true;
-  return confirm(`You're about to send ${lines.length} lines. Each line may run as a separate command on the remote end. Continue?`);
+// The multi-line paste question, with the line delay as part of the
+// answer, since the paste that needs one is the paste that gets asked
+// about. Resolves ok=false if the user backed out. Only asked for text
+// that will actually be executed line by line: under bracketed paste
+// the block lands on the prompt and waits, so "each line may run as a
+// separate command" is not true there. Where it is true, and on the
+// network hardware this guard was written for, nothing has bracketed
+// paste and the question still appears.
+function confirmMultilinePaste(text: string, willExecuteEachLine: boolean): Promise<{ ok: boolean; delayMs: number }> {
+  const lines = countPasteLines(text);
+  if (lines <= 1 || !warnMultilinePasteEnabled || !willExecuteEachLine) {
+    return Promise.resolve({ ok: true, delayMs: pasteLineDelayMs });
+  }
+  return new Promise((resolve) => {
+    const select = document.createElement('select');
+    select.className = 'dialog-field';
+    for (const ms of PASTE_DELAY_OPTIONS) {
+      const option = document.createElement('option');
+      option.value = String(ms);
+      option.textContent = pasteDelayLabel(ms);
+      select.appendChild(option);
+    }
+    select.value = String(pasteLineDelayMs);
+    buildDialog({
+      title: `Paste ${lines} lines?`,
+      tone: 'warning',
+      onDismiss: () => resolve({ ok: false, delayMs: pasteLineDelayMs }),
+      fill: (body) => {
+        dialogText(body, 'Each line may run as a separate command on the remote end.');
+        const preview = document.createElement('pre');
+        preview.className = 'paste-preview';
+        const shown = text.split(/\r\n|\r|\n/).slice(0, 6);
+        preview.textContent = shown.join('\n') + (lines > shown.length ? `\n… ${lines - shown.length} more` : '');
+        body.appendChild(preview);
+        const row = document.createElement('label');
+        row.className = 'paste-delay-row';
+        row.append('Line delay: ', select);
+        body.appendChild(row);
+      },
+      actions: [
+        { label: 'Cancel', kind: 'secondary', run: () => resolve({ ok: false, delayMs: pasteLineDelayMs }) },
+        {
+          label: 'Paste',
+          run: () => {
+            // Remembered: the delay that suits this console suits the
+            // next paste into it too.
+            const ms = Number(select.value) || 0;
+            setPasteLineDelay(ms);
+            resolve({ ok: true, delayMs: ms });
+          },
+        },
+      ],
+    });
+  });
+}
+
+// Sends pasted text, one line at a time with a pause between them when
+// a delay is set. Under bracketed paste the markers go round the whole
+// block whatever the pacing: the program on the other end still sees
+// one paste. Stops if the session goes away mid-way.
+async function sendPaste(session: Session, normalized: string, delayMs: number, bracketed: boolean) {
+  const chunks = delayMs > 0 ? chunkPasteLines(normalized) : [normalized];
+  if (bracketed) writeToSession(session, '\x1b[200~');
+  for (let i = 0; i < chunks.length; i += 1) {
+    if (i > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    if (!session.backendId || session.stopped) return;
+    writeToSession(session, chunks[i]);
+  }
+  if (bracketed) writeToSession(session, '\x1b[201~');
 }
 
 // A clipboard paste: the text is what the user copied, and the program
 // on the other end decides what to do with it.
-function pasteIntoSession(session: Session, text: string) {
+async function pasteIntoSession(session: Session, text: string) {
   const bracketed = !!session.term?.modes.bracketedPasteMode;
-  if (!confirmMultiline(text, !bracketed)) return;
-  writeToSession(session, bracketPaste(session, newlinesToCarriageReturns(text)));
+  const { ok, delayMs } = await confirmMultilinePaste(text, !bracketed);
+  if (!ok) return;
+  await sendPaste(session, normalizePasteNewlines(text), delayMs, bracketed);
 }
 
 // Text Xpecter is sending on the user's behalf to be run, currently
 // command snippets. Never bracketed: brackets tell the shell to treat
 // the text as literal input, which would leave a snippet sitting on the
 // prompt unexecuted rather than running it.
-function sendTextToSession(session: Session, text: string) {
-  if (!confirmMultiline(text, true)) return;
-  writeToSession(session, newlinesToCarriageReturns(text));
+async function sendTextToSession(session: Session, text: string) {
+  const { ok, delayMs } = await confirmMultilinePaste(text, true);
+  if (!ok) return;
+  await sendPaste(session, normalizePasteNewlines(text), delayMs, false);
 }
 
 // SPE-128: tears down a session's terminal view (terminal, scrollbar,
@@ -2647,8 +2804,12 @@ function disposeTerminalView(session: Session) {
   session.overlay?.remove();
   session.overlay = null;
   const termFrame = termFrameOf(session);
+  // Disposing the terminal disposes the addons loaded into it; the bar
+  // goes with the frame.
   session.term?.dispose();
   session.term = null;
+  session.searchAddon = null;
+  session.findBar = null;
   termFrame?.remove();
 }
 
@@ -2866,6 +3027,8 @@ function createTerminalForSession(session: Session, tab: Tab) {
   });
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
+  const searchAddon = new SearchAddon();
+  term.loadAddon(searchAddon);
   term.open(container);
   // After open(): the provider needs term.element to hang its hover on,
   // and that only exists once the terminal has a home in the DOM.
@@ -2887,13 +3050,22 @@ function createTerminalForSession(session: Session, tab: Tab) {
     const parts = data.split(';');
     if (parts.length < 2) return true;
     try {
-      const text = atob(parts[1]);
+      // atob yields one char per byte; the payload is UTF-8, so it is
+      // decoded as such or every accent, box-drawing character and CJK
+      // glyph copied from tmux or vim arrived as mojibake.
+      const bytes = Uint8Array.from(atob(parts[1]), (c) => c.charCodeAt(0));
+      const text = new TextDecoder().decode(bytes);
       navigator.clipboard.writeText(text).catch(() => {});
     } catch {
       // ignore malformed OSC 52 payloads
     }
     return true;
   });
+
+  // The bell: a tab that is not being looked at gets a marker, and a
+  // window in the background gets an OS notification, so a long job
+  // that rings when it finishes is noticed from wherever you are.
+  term.onBell(() => onTerminalBell(session, tab));
 
   // Auto-copy on selection (classic X11/xterm/PuTTY-style behavior),
   // gated by copyOnSelectEnabled toggle since not everyone wants this.
@@ -2962,6 +3134,10 @@ function createTerminalForSession(session: Session, tab: Tab) {
       navigator.clipboard.readText().then((text) => pasteIntoSession(session, text)).catch(() => {});
       return false;
     }
+    if (e.type === 'keydown' && shortcutMatches(e, 'find')) {
+      openFindBar(session);
+      return false;
+    }
     if (e.type === 'keydown' && shortcutMatches(e, 'zoomIn')) {
       // SPE-77. Accepts both '=' and '+' since Plus is Shift+Equals on
       // most layouts, matching how browsers handle Ctrl+= zoom too.
@@ -3028,11 +3204,177 @@ function createTerminalForSession(session: Session, tab: Tab) {
 
   session.term = term;
   session.fitAddon = fitAddon;
+  session.searchAddon = searchAddon;
+  session.findBar = null;
   session.webglAddon = webglAddon;
   session.disposeScrollbar = null;
   session.container = wrapper;
   applyWallpaperToSession(session);
   setupCustomScrollbar(session);
+}
+
+// --- Find in terminal output ---
+// Ctrl+Shift+F over a terminal. A bar at the top of the pane, every
+// match highlighted in the scrollback, Enter and Shift+Enter to step
+// through them, Escape to go back to the prompt. The one thing a
+// terminal has always had over a pager is that the output is still
+// there; this is what makes it findable.
+
+const FIND_DECORATIONS = {
+  matchBackground: '#facc1566',
+  matchBorder: '#facc15',
+  matchOverviewRuler: '#facc15',
+  activeMatchBackground: '#f97316aa',
+  activeMatchBorder: '#f97316',
+  activeMatchColorOverviewRuler: '#f97316',
+};
+
+function openFindBar(session: Session) {
+  const term = session.term;
+  const addon = session.searchAddon;
+  const frame = termFrameOf(session);
+  if (!term || !addon || !frame) return;
+  if (session.findBar) {
+    const existing = session.findBar.querySelector('input')!;
+    existing.focus();
+    existing.select();
+    return;
+  }
+  const bar = document.createElement('div');
+  bar.className = 'term-find';
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = 'Find in output';
+  input.spellcheck = false;
+  const count = document.createElement('span');
+  count.className = 'term-find-count';
+  let caseSensitive = false;
+  let regex = false;
+  const options = (incremental: boolean) => ({ caseSensitive, regex, incremental, decorations: FIND_DECORATIONS });
+  const search = (forward: boolean, incremental = false) => {
+    const query = input.value;
+    if (!query) {
+      addon.clearDecorations();
+      count.textContent = '';
+      bar.classList.remove('no-match');
+      return;
+    }
+    let found = false;
+    try {
+      found = forward ? addon.findNext(query, options(incremental)) : addon.findPrevious(query, options(incremental));
+    } catch {
+      // A regular expression that is not one yet, mid-typing.
+    }
+    bar.classList.toggle('no-match', !found);
+  };
+  const toggle = (label: string, title: string, get: () => boolean, set: (v: boolean) => void) => {
+    const el = document.createElement('span');
+    el.className = 'term-find-toggle';
+    el.textContent = label;
+    el.title = title;
+    el.onclick = () => {
+      set(!get());
+      el.classList.toggle('on', get());
+      search(true, true);
+      input.focus();
+    };
+    return el;
+  };
+  const button = (label: string, title: string, run: () => void) => {
+    const el = document.createElement('span');
+    el.className = 'term-find-btn';
+    el.textContent = label;
+    el.title = title;
+    el.onclick = () => {
+      run();
+      input.focus();
+    };
+    return el;
+  };
+  const results = addon.onDidChangeResults(({ resultIndex, resultCount }) => {
+    count.textContent = resultCount === 0
+      ? 'No results'
+      : resultIndex >= 0 ? `${resultIndex + 1} of ${resultCount}` : `${resultCount}`;
+  });
+  const close = () => {
+    results.dispose();
+    addon.clearDecorations();
+    bar.remove();
+    if (session.findBar === bar) session.findBar = null;
+    term.focus();
+  };
+  input.oninput = () => search(true, true);
+  input.onkeydown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      search(!e.shiftKey);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      close();
+    } else if (shortcutMatches(e, 'find')) {
+      e.preventDefault();
+      input.select();
+    }
+  };
+  bar.append(
+    input,
+    count,
+    toggle('Aa', 'Match case', () => caseSensitive, (v) => { caseSensitive = v; }),
+    toggle('.*', 'Regular expression', () => regex, (v) => { regex = v; }),
+    button('▲', 'Previous match (Shift+Enter)', () => search(false)),
+    button('▼', 'Next match (Enter)', () => search(true)),
+    button('✕', 'Close (Escape)', close),
+  );
+  frame.appendChild(bar);
+  session.findBar = bar;
+  // Starts from whatever is selected in the terminal, the way an editor
+  // does; a multi-line selection is not a search term.
+  const selection = term.getSelection().trim();
+  if (selection && !selection.includes('\n')) input.value = selection;
+  input.focus();
+  input.select();
+  if (input.value) search(true, true);
+}
+
+// The find bar of whichever terminal has focus in the active tab, for
+// the Terminal menu.
+function openFindBarForActiveTerminal() {
+  const tab = activeTabId ? tabs.get(activeTabId) : null;
+  const session = tab ? focusedSession(tab) : null;
+  if (!session?.term) {
+    flashStatus('Find works in a terminal pane', true);
+    return;
+  }
+  openFindBar(session);
+}
+
+// --- Activity and the bell ---
+
+// Output arrived in a session that is not on screen: a dot on its tab
+// until it is looked at. A pane in a split of the active tab is on
+// screen, so it never marks; a tab behind the active one does.
+function markActivity(session: Session) {
+  if (session.hasActivity || session.ownerTabId === activeTabId) return;
+  session.hasActivity = true;
+  renderTabBar();
+}
+
+const lastBellNotice = new WeakMap<Session, number>();
+
+function onTerminalBell(session: Session, tab: Tab) {
+  const onScreen = tab.id === activeTabId;
+  if (!onScreen) {
+    session.bellPending = true;
+    session.hasActivity = true;
+    renderTabBar();
+  }
+  if (!bellNotifyEnabled || (onScreen && document.hasFocus())) return;
+  // One notice per session every few seconds: a bell in a loop is one
+  // thing to be told about, not a hundred.
+  const now = Date.now();
+  if (now - (lastBellNotice.get(session) ?? 0) < 5000) return;
+  lastBellNotice.set(session, now);
+  App.NotifyBell(session.label, onScreen ? 'The terminal rang its bell.' : 'The terminal rang its bell in a background tab.').catch(() => {});
 }
 
 // SPE-92: Alt+Arrow moves focus between panes by rough screen
@@ -3539,6 +3881,14 @@ function disposeEditorPane(session: Session) {
     const doc = editorDocs.get(docId);
     if (!doc) continue;
     editorDocs.delete(docId);
+    // The same teardown discardDoc gives one document. A viewer holds a
+    // PDF.js document and its worker, a decoded image, or a pending
+    // render timer, and none of those go with the model: closing a tab
+    // full of PDFs used to leak every one, and a Markdown timer fired
+    // later against a disposed model.
+    if (doc.pdf) destroyPdfView(doc.pdf);
+    if (doc.image) destroyImageView(doc.image);
+    if (doc.markdown) destroyMarkdownView(doc.markdown);
     doc.model.dispose();
   }
   pane.editor.dispose();
@@ -3620,6 +3970,16 @@ function newEditorTabPane(): EditorPane {
   createEditorForSession(tab, tab);
   switchToTab(tab.id);
   return editorPanes.get(tab.id)!;
+}
+
+// The pane an open was aimed at, if it is still on screen. A load can
+// take a while (a large file over SFTP) and outlive the pane it was
+// meant for; landing the document in a pane that had been closed left
+// it registered but unreachable, and the file could not be opened
+// again until a restart.
+function paneStillOpen(pane: EditorPane | undefined): EditorPane | null {
+  if (!pane) return null;
+  return editorPanes.get(pane.session.id) === pane ? pane : null;
 }
 
 // Where an open-file action should land.
@@ -4203,8 +4563,15 @@ async function openImageFile(path: string, isLocal: boolean, remoteSessionId: st
     flashStatus(`Open failed: ${err}`, true);
     return;
   }
+  // Checked again on the far side of the load: a second click while it
+  // was in flight may have opened the same file already.
+  const openedMeanwhile = findOpenDoc(path, isLocal, remoteSessionId);
+  if (openedMeanwhile) {
+    revealDoc(openedMeanwhile);
+    return;
+  }
 
-  const pane = into ?? editorPaneForOpening();
+  const pane = paneStillOpen(into) ?? editorPaneForOpening();
   const doc = createDoc(pane, { title: name, path, isLocal, remoteSessionId, content: '', kind: 'image' });
   try {
     doc.image = await buildImageView(pane, dataUrl);
@@ -4249,8 +4616,13 @@ async function openPdfFile(path: string, isLocal: boolean, remoteSessionId: stri
     flashStatus(`Open failed: ${err}`, true);
     return;
   }
+  const openedMeanwhile = findOpenDoc(path, isLocal, remoteSessionId);
+  if (openedMeanwhile) {
+    revealDoc(openedMeanwhile);
+    return;
+  }
 
-  const pane = into ?? editorPaneForOpening();
+  const pane = paneStillOpen(into) ?? editorPaneForOpening();
   const doc = createDoc(pane, { title: name, path, isLocal, remoteSessionId, content: '', kind: 'pdf' });
   try {
     doc.pdf = await buildPdfView(pane, doc, base64ToBytes(encoded));
@@ -5315,7 +5687,9 @@ const OPENS_EXTERNALLY = new Set([
   '.db', '.sqlite', '.sqlite3', '.pyc', '.pyo', '.pdb', '.bin', '.dat',
 ]);
 
-const RUNS_WHEN_OPENED = new Set(['.exe', '.msi', '.com', '.scr', '.cpl']);
+// .jar is here as well as above: with a Java runtime installed, handing
+// one to the OS runs it, the same as an .exe.
+const RUNS_WHEN_OPENED = new Set(['.exe', '.msi', '.com', '.scr', '.cpl', '.jar']);
 
 // Returns true when it dealt with the file, false when the editor
 // should go ahead and open it.
@@ -5326,7 +5700,7 @@ async function openWithSystemApp(path: string, reason?: string): Promise<boolean
     // takes one. That difference is the whole reason for this prompt:
     // starting a program is not what a single click anywhere else in
     // this app does.
-    if (!confirm(`Run ${name}?\n\nXpecter cannot show this file, so opening it means handing it to Windows to execute.`)) return true;
+    if (!confirm(`Run ${name}?\n\nXpecter cannot show this file, so opening it means handing it to your system to execute.`)) return true;
   } else if (reason && !confirm(`${reason}\n\nOpen ${name} with the application your system uses for it instead?`)) {
     return true;
   }
@@ -5389,7 +5763,12 @@ async function openLocalFile(path?: string, into?: EditorPane) {
     flashStatus(`Open failed: ${err}`, true);
     return;
   }
-  const pane = into ?? editorPaneForOpening();
+  const openedMeanwhile = findOpenDoc(target, true, null);
+  if (openedMeanwhile) {
+    revealDoc(openedMeanwhile);
+    return;
+  }
+  const pane = paneStillOpen(into) ?? editorPaneForOpening();
   const doc = createDoc(pane, {
     title: baseName(target),
     path: target,
@@ -5527,8 +5906,10 @@ async function saveDocAs(doc: EditorDoc): Promise<boolean> {
 // Save As, but onto a host: the replacement for the old editor pane's
 // "Save As -> Remote path" menu, now a command like everything else.
 async function saveDocToRemote(doc: EditorDoc): Promise<boolean> {
-  if (doc.kind === 'pdf') {
-    flashStatus(`${doc.title} is open for reading; Xpecter does not edit PDFs`, true);
+  // The same guard saveDoc keeps: a viewer document's model is empty,
+  // and writing it over the file on the host would destroy the file.
+  if (doc.kind !== 'text') {
+    flashStatus(`${doc.title} is open for reading; Xpecter does not edit ${doc.kind === 'pdf' ? 'PDFs' : 'images'}`, true);
     return false;
   }
   const sessionId = doc.remoteSessionId ?? remoteTargetSessionId();
@@ -5706,17 +6087,11 @@ function extensionOf(path: string): string {
   return dot > 0 ? name.slice(dot) : '';
 }
 
-// Both PowerShell and POSIX shells read a double-quoted path as a single
-// argument, which is the whole requirement here: paths with spaces in
-// them are ordinary on every platform this runs on. The quote itself
-// cannot appear in a Windows filename, and is escaped for the shells
-// where it can.
-function quoteForShell(path: string): string {
-  return `"${path.replace(/"/g, '\\"')}"`;
-}
-
+// Quoted for the shell the command is typed into: PowerShell on
+// Windows (the local default), a POSIX shell elsewhere and on every
+// host. See shellquote.ts for why that is not one rule.
 function runActionFor(path: string, windows: boolean): RunAction | null {
-  const file = quoteForShell(path);
+  const file = quoteForShell(path, windows ? 'powershell' : 'posix');
   switch (extensionOf(path)) {
     case '.html': case '.htm':
       return { how: 'browser' };
@@ -5737,7 +6112,9 @@ function runActionFor(path: string, windows: boolean): RunAction | null {
     case '.sh': case '.bash':
       return { how: 'shell', command: `bash ${file}` };
     case '.bat': case '.cmd':
-      return windows ? { how: 'shell', command: `cmd /c ${file}` } : null;
+      // cmd reads its own quoting once PowerShell has handed it the
+      // argument, and double quotes are the only kind it knows.
+      return windows ? { how: 'shell', command: `cmd /c ${quoteForShell(path, 'cmd')}` } : null;
     default:
       return null;
   }
@@ -5950,6 +6327,10 @@ function showDocTabMenu(pane: EditorPane, doc: EditorDoc, x: number, y: number) 
     items.push({ label: 'Close Saved', run: () => { void closeSavedDocs(pane); } });
   }
   items.push({ label: `Close All (${pane.docIds.length})`, run: () => { void closeAllDocs(pane); } });
+  if (doc.path && doc.isLocal) {
+    const path = doc.path;
+    items.push({ label: revealLabel(), run: () => { void revealInFileManager(path); } });
+  }
   if (doc.path) items.push({ label: 'Copy Path', run: () => { void navigator.clipboard.writeText(doc.path!); } });
   showPaneContextMenu(x, y, items);
 }
@@ -6280,12 +6661,11 @@ async function renameInTree(pane: EditorPane, path: string, isDir: boolean) {
     return;
   }
 
-  // A buffer open on the renamed file follows it, so saving writes the
-  // new name instead of recreating the old one. Deliberately repoint
-  // rather than retarget: nothing was written, so an unsaved buffer is
-  // still unsaved.
-  const doc = findOpenDoc(path, true, null);
-  if (doc) repointDoc(doc, { path: renamed, isLocal: true, remoteSessionId: null });
+  // A buffer open on the renamed file, or on anything inside a renamed
+  // folder, follows it, so saving writes the new name instead of
+  // recreating the old one. Deliberately repoint rather than retarget:
+  // nothing was written, so an unsaved buffer is still unsaved.
+  repointDocsUnder(path, renamed, true, null);
 
   if (isDir) {
     // Every expanded path under the old name still refers to it, so a
@@ -6324,6 +6704,28 @@ async function renameInTree(pane: EditorPane, path: string, isDir: boolean) {
 // always use the other, and this is asked about both.
 function isPathUnder(candidate: string, dir: string): boolean {
   return candidate.startsWith(`${dir}/`) || candidate.startsWith(`${dir}\\`);
+}
+
+// Every open document on a renamed entry, or inside it when it is a
+// folder, is pointed at the new name. Only the exact path used to be
+// repointed, so a buffer on a file inside a renamed folder kept the old
+// path and its next save failed with "no such file". Returns how many
+// documents moved.
+function repointDocsUnder(oldPath: string, newPath: string, isLocal: boolean, remoteSessionId: string | null): number {
+  let moved = 0;
+  for (const doc of editorDocs.values()) {
+    if (!doc.path || doc.isLocal !== isLocal) continue;
+    if (!isLocal && doc.remoteSessionId !== remoteSessionId) continue;
+    if (doc.path === oldPath) {
+      repointDoc(doc, { path: newPath, isLocal, remoteSessionId });
+    } else if (isPathUnder(doc.path, oldPath)) {
+      repointDoc(doc, { path: newPath + doc.path.slice(oldPath.length), isLocal, remoteSessionId });
+    } else {
+      continue;
+    }
+    moved += 1;
+  }
+  return moved;
 }
 
 // What a directory holds, so the confirmation can say it. A listing that
@@ -6439,6 +6841,7 @@ async function renderEditorTree(pane: EditorPane) {
   head.appendChild(treeAction('＋', `New file in ${baseName(folder)}`, () => { void createInTree(pane, folder, 'file'); }));
   head.appendChild(treeAction('⊞', `New folder in ${baseName(folder)}`, () => { void createInTree(pane, folder, 'folder'); }));
   head.appendChild(treeAction('⟳', 'Reread this folder from disk', () => { void refreshFolder(pane); }));
+  head.appendChild(treeAction('⧉', `${revealLabel()}: ${baseName(folder)}`, () => { void revealInFileManager(folder); }));
   head.appendChild(treeAction('\u{1F4C1}', 'Open a different folder', () => { void chooseFolder(pane); }));
   head.appendChild(treeAction('✕', 'Close this folder', () => closeFolder(pane)));
   pane.tree.appendChild(head);
@@ -6508,6 +6911,25 @@ async function appendTreeLevel(pane: EditorPane, parent: HTMLElement, dir: strin
     }
     row.appendChild(treeAction('✎', `Rename ${entry.name}`, () => { void renameInTree(pane, entry.path, entry.isDir); }));
     row.appendChild(treeAction('\u{1F5D1}', `Delete ${entry.name}`, () => { void deleteInTree(pane, entry.path, entry.isDir); }, 'danger'));
+    // Right-click: the row's actions by name, plus the two that have no
+    // icon of their own. A folder is opened in the file manager as
+    // itself; a file is shown selected in its folder.
+    row.oncontextmenu = (e) => {
+      e.preventDefault();
+      const items: { label: string; run: () => void }[] = entry.isDir
+        ? [
+          { label: 'New File…', run: () => { void createInTree(pane, entry.path, 'file'); } },
+          { label: 'New Folder…', run: () => { void createInTree(pane, entry.path, 'folder'); } },
+        ]
+        : [{ label: 'Open', run: () => { void openLocalFile(entry.path, pane); } }];
+      items.push(
+        { label: 'Rename…', run: () => { void renameInTree(pane, entry.path, entry.isDir); } },
+        { label: 'Delete…', run: () => { void deleteInTree(pane, entry.path, entry.isDir); } },
+        { label: revealLabel(), run: () => { void revealInFileManager(entry.path); } },
+        { label: 'Copy Path', run: () => { void navigator.clipboard.writeText(entry.path); } },
+      );
+      showPaneContextMenu(e.clientX, e.clientY, items);
+    };
     row.onclick = () => {
       if (!entry.isDir) {
         void openLocalFile(entry.path, pane);
@@ -6763,6 +7185,16 @@ function buildFolderRow(folder: Folder, isOpen: boolean): HTMLDivElement {
   };
   row.appendChild(rename);
 
+  const reveal = document.createElement('span');
+  reveal.className = 'act neutral';
+  reveal.textContent = '⧉';
+  reveal.title = revealLabel();
+  reveal.onclick = (e) => {
+    e.stopPropagation();
+    void revealInFileManager(folder.path);
+  };
+  row.appendChild(reveal);
+
   const unpin = document.createElement('span');
   unpin.className = 'act';
   unpin.textContent = '✕';
@@ -6794,6 +7226,32 @@ async function pinFolder() {
   if (!existing) await App.SaveFolder({ id: '', path });
   await renderFolderList();
   await openFolderInEditor(path);
+}
+
+// --- The folder you are in, in the system's file manager ---
+// The workspace tree is a view of a directory that is also open in
+// Explorer or Finder half the time: to drag something into it, to see
+// what a build left behind, to hand a path to another program. Getting
+// from one to the other used to mean copying the path and pasting it
+// into the other window's address bar.
+
+// What the platform calls the thing a path is shown in, for the labels.
+function fileManagerName(): string {
+  if (platformName === 'darwin') return 'Finder';
+  if (platformName === 'windows') return 'File Explorer';
+  return 'file manager';
+}
+
+function revealLabel(): string {
+  return platformName === 'darwin' ? 'Reveal in Finder' : `Show in ${fileManagerName()}`;
+}
+
+async function revealInFileManager(path: string) {
+  try {
+    await App.RevealInFileManager(path);
+  } catch (err) {
+    flashStatus(`Could not open ${fileManagerName()}: ${err}`, true);
+  }
 }
 
 function buildFolderButton(pane: EditorPane): HTMLDivElement {
@@ -6839,7 +7297,9 @@ async function openFolderMenu(pane: EditorPane, anchor: HTMLElement) {
 
   popupMenuItem(menu, '\u{1F4C1}', 'Open Folder…', () => { void chooseFolder(pane); });
   if (pane.folder) {
+    const folder = pane.folder;
     popupMenuItem(menu, '⟳', 'Refresh folder', () => { void refreshFolder(pane); });
+    popupMenuItem(menu, '⧉', revealLabel(), () => { void revealInFileManager(folder); });
     popupMenuItem(menu, '\u{1F4CC}', 'Pin this folder to the sidebar', () => { void pinCurrentFolder(pane); });
     popupMenuItem(menu, '✕', 'Close folder', () => closeFolder(pane));
   }
@@ -7160,10 +7620,16 @@ function openCommandPalette(pane: EditorPane) {
     { label: 'Open Folder…', detail: pane.folder ?? 'no folder open in this pane', run: () => { void chooseFolder(pane); } },
   ];
   if (pane.folder) {
+    const folder = pane.folder;
     items.push(
-      { label: 'Refresh Folder', detail: pane.folder, run: () => { void refreshFolder(pane); } },
-      { label: 'Close Folder', detail: pane.folder, run: () => closeFolder(pane) },
+      { label: 'Refresh Folder', detail: folder, run: () => { void refreshFolder(pane); } },
+      { label: `Folder: ${revealLabel()}`, detail: folder, run: () => { void revealInFileManager(folder); } },
+      { label: 'Close Folder', detail: folder, run: () => closeFolder(pane) },
     );
+  }
+  if (doc?.path && doc.isLocal) {
+    const path = doc.path;
+    items.push({ label: `File: ${revealLabel()}`, detail: path, run: () => { void revealInFileManager(path); } });
   }
   // A PDF answers to the handful of these that are about the file
   // rather than about a buffer. Listing the rest would be listing
@@ -7390,8 +7856,13 @@ document.addEventListener('keydown', (e) => {
 // this fills that pane, so an editor can sit beside a live shell;
 // otherwise it becomes a whole editor tab.
 function newEditorSession() {
-  const target = pendingPaneTarget;
+  // Only an empty pane is taken over. A target that has since become a
+  // live terminal or client (a saved session launched from the sidebar
+  // into a split pane left it set) used to get an editor built on top
+  // of it, with the session it was showing orphaned underneath.
+  const target = pendingPaneTarget && pendingPaneTarget.mode === 'pending' ? pendingPaneTarget : null;
   if (!target) {
+    pendingPaneTarget = null;
     newUntitledDoc(newEditorTabPane());
     return;
   }
@@ -7551,9 +8022,26 @@ function parentPath(path: string): string {
 async function refreshFileList(path = '.', sessionId?: string) {
   const id = sessionId ?? (activeTabId ? tabs.get(activeTabId)?.backendId : null);
   if (!id) return;
+  const previousPath = currentRemotePath;
+  const previousId = currentRemoteSessionId;
   currentRemotePath = path;
   currentRemoteSessionId = id;
-  const entries: RemoteFile[] = await App.ListRemoteDir(id, path);
+  let entries: RemoteFile[];
+  try {
+    entries = await App.ListRemoteDir(id, path);
+  } catch (err) {
+    // A folder that cannot be read (no permission, or a session that
+    // just dropped). The browser stays where it was: it used to keep
+    // the new path while still showing the old listing, so the next
+    // upload, "new file" and ".." were all aimed at a directory that
+    // was never shown, and nothing said why.
+    if (currentRemotePath === path && currentRemoteSessionId === id) {
+      currentRemotePath = previousPath;
+      currentRemoteSessionId = previousId;
+    }
+    flashStatus(`Could not list ${path}: ${err}`, true);
+    return;
+  }
   // Clicking through folders faster than SFTP answers would otherwise
   // let an older listing land on top of the one just asked for.
   if (currentRemotePath !== path || currentRemoteSessionId !== id) return;
@@ -7611,11 +8099,107 @@ function renderFileList(entries: RemoteFile[], path: string, id: string) {
         });
       };
     }
+    div.appendChild(remoteAction('⤓', e.isDir ? `Download folder ${e.name}…` : `Download ${e.name}…`, () => {
+      void (e.isDir ? downloadRemoteFolder(id, e.path) : downloadRemoteFile(id, e.path));
+    }));
     div.appendChild(remoteAction('✎', `Rename ${e.name}`, () => { void renameRemote(id, e.path, e.name); }));
     div.appendChild(remoteAction('\u{1F5D1}', `Delete ${e.name}`, () => { void deleteRemote(id, e.path, e.isDir); }, 'danger'));
     list.appendChild(div);
   }
 }
+
+// --- Transfers: download, and upload through a dialog ---
+// The browser could take a file (dropped onto it) and could not give
+// one back: a remote file opened through a temporary copy, and that
+// was all. Both directions stream through Go now, with progress on the
+// "transfer:progress" event drawn under the file list. Dragging a file
+// out of the list onto the desktop is not something a webview can do,
+// so a download is a button.
+
+async function downloadRemoteFile(id: string, remotePath: string) {
+  try {
+    const local = await App.SaveRemoteFileAs(id, remotePath);
+    if (local) flashStatus(`Downloaded ${baseName(remotePath)} to ${local}`);
+  } catch (err) {
+    flashStatus(`Download failed: ${err}`, true);
+  }
+}
+
+async function downloadRemoteFolder(id: string, remotePath: string) {
+  try {
+    const local = await App.DownloadRemoteFolder(id, remotePath);
+    if (local) flashStatus(`Downloaded ${baseName(remotePath)} to ${local}`);
+  } catch (err) {
+    flashStatus(`Download failed: ${err}`, true);
+  }
+}
+
+async function uploadFilesViaDialog(id: string, dir: string) {
+  try {
+    const names = await App.UploadLocalFiles(id, dir);
+    if (names.length === 0) return;
+    flashStatus(`Uploaded ${names.length === 1 ? names[0] : `${names.length} files`}`);
+  } catch (err) {
+    flashStatus(`Upload failed: ${err}`, true);
+  }
+  if (currentRemoteSessionId === id && currentRemotePath === dir) await refreshFileList(dir, id);
+}
+
+const transferRows = new Map<string, HTMLDivElement>();
+
+function transferSize(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function renderTransfer(p: TransferProgress) {
+  const list = document.getElementById('transfer-list')!;
+  let row = transferRows.get(p.id);
+  if (!row) {
+    row = document.createElement('div');
+    row.className = 'transfer-row';
+    transferRows.set(p.id, row);
+    list.appendChild(row);
+  }
+  const done = row;
+  const pct = p.total > 0 ? Math.min(100, Math.round((p.done / p.total) * 100)) : 0;
+  const glyph = p.direction === 'download' ? '⤓' : '⤒';
+  const files = p.files && p.files > 1 ? ` (${p.filesDone ?? 0}/${p.files} files)` : '';
+  row.classList.toggle('failed', p.state === 'failed');
+  row.classList.toggle('done', p.state === 'done');
+  row.textContent = '';
+  const label = document.createElement('div');
+  label.className = 'transfer-label';
+  label.textContent = p.state === 'failed'
+    ? `${glyph} ${p.name}: ${p.error ?? 'failed'}`
+    : p.state === 'done'
+      ? `${glyph} ${p.name}: done${files}`
+      : `${glyph} ${p.name} ${pct}% · ${transferSize(p.done)} of ${transferSize(p.total)}${files}`;
+  row.appendChild(label);
+  if (p.state === 'running') {
+    const bar = document.createElement('div');
+    bar.className = 'transfer-bar';
+    const fill = document.createElement('div');
+    fill.className = 'transfer-fill';
+    fill.style.width = `${pct}%`;
+    bar.appendChild(fill);
+    row.appendChild(bar);
+    row.onclick = null;
+    return;
+  }
+  const dismiss = () => {
+    done.remove();
+    transferRows.delete(p.id);
+  };
+  row.title = 'Click to dismiss';
+  row.onclick = dismiss;
+  // A finished transfer clears itself; a failed one stays until read.
+  if (p.state === 'done') setTimeout(dismiss, 6000);
+}
+
+runtime.EventsOn('transfer:progress', (payload: unknown) => renderTransfer(payload as TransferProgress));
 
 // SPE-105 parity: the remote browser gets the editor tree's three
 // workspace actions. Everything else about remote files already routes
@@ -7672,13 +8256,12 @@ async function renameRemote(id: string, oldPath: string, currentName: string) {
     flashStatus(String(err), true);
     return;
   }
-  // A buffer opened from the old path would otherwise still be pointing
-  // at it, and saving would recreate the name that was just renamed
-  // away. Retarget it instead, which is what Save As already does.
-  const doc = findOpenDoc(oldPath, false, id);
-  if (doc) {
-    repointDoc(doc, { path: renamed, isLocal: false, remoteSessionId: id });
-    flashStatus(`Renamed to ${baseName(renamed)}; the open buffer now points at it`);
+  // A buffer opened from the old path, or from inside a renamed folder,
+  // would otherwise still be pointing at it, and saving would recreate
+  // the name that was just renamed away.
+  const moved = repointDocsUnder(oldPath, renamed, false, id);
+  if (moved > 0) {
+    flashStatus(`Renamed to ${baseName(renamed)}; ${moved === 1 ? 'the open buffer now points' : `${moved} open buffers now point`} at it`);
   } else {
     flashStatus(`Renamed to ${baseName(renamed)}`);
   }
@@ -7758,7 +8341,12 @@ setInterval(() => { void watchRemoteFileList(); }, REMOTE_WATCH_INTERVAL_MS);
 window.addEventListener('focus', () => { void watchRemoteFileList(); });
 
 async function uploadFilesToCurrentDir(files: FileList) {
-  if (!currentRemoteSessionId) return;
+  // Fixed for the whole batch. Switching tabs or clicking into another
+  // folder mid-upload changes the browser's current host and directory,
+  // and the files still to go used to follow it there.
+  const id = currentRemoteSessionId;
+  const dir = currentRemotePath;
+  if (!id) return;
   const list = document.getElementById('file-list')!;
   const status = document.createElement('div');
   status.className = 'side-empty';
@@ -7766,6 +8354,7 @@ async function uploadFilesToCurrentDir(files: FileList) {
   status.style.fontStyle = 'italic';
   list.appendChild(status);
 
+  const failed: string[] = [];
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     status.textContent = `Uploading ${file.name}...`;
@@ -7774,15 +8363,19 @@ async function uploadFilesToCurrentDir(files: FileList) {
     let binary = '';
     for (let j = 0; j < bytes.length; j++) binary += String.fromCharCode(bytes[j]);
     const base64 = btoa(binary);
-    const remotePath = currentRemotePath === '.' ? file.name : `${currentRemotePath}/${file.name}`;
+    const remotePath = dir === '.' ? file.name : `${dir}/${file.name}`;
     try {
-      await App.UploadRemoteFile(currentRemoteSessionId, remotePath, base64, file.lastModified);
+      await App.UploadRemoteFile(id, remotePath, base64, file.lastModified);
     } catch (err) {
       console.error('Upload failed for', file.name, err);
+      failed.push(`${file.name}: ${err}`);
     }
   }
+  status.remove();
 
-  refreshFileList(currentRemotePath, currentRemoteSessionId);
+  if (failed.length) flashStatus(`Upload failed for ${failed.join('; ')}`, true);
+  else if (files.length) flashStatus(`Uploaded ${files.length === 1 ? files[0].name : `${files.length} files`}`);
+  if (currentRemoteSessionId === id && currentRemotePath === dir) await refreshFileList(dir, id);
 }
 
 (() => {
@@ -8002,6 +8595,10 @@ async function useSSHSession(s: SessionProfile) {
       // "connect a saved session" flow reusing the picker's password
       // field, not a fresh New Session.
       pendingPaneTarget = paneTarget;
+      // The picker has no port field; its Connect handler reads the
+      // port from here. Reset by openSessionPicker and never refilled,
+      // a saved session on any port but 22 was dialled on 22.
+      pendingQuickPort = s.port && s.port !== 22 ? s.port : null;
 
       document.getElementById('picker-grid')!.style.display = 'none';
 
@@ -8171,6 +8768,9 @@ async function connectRDPInActiveTab(profile: SessionProfile) {
     launch = await App.LaunchRDP(profile);
   } catch (err) {
     target.connecting = false;
+    // The saved-session flag is one-shot; a failed launch used to leave
+    // it set for the next ad-hoc connect to skip its save prompt.
+    skipRDPSavePrompt = false;
     reportRDPError(String(err));
     return;
   }
@@ -8183,6 +8783,7 @@ async function connectRDPInActiveTab(profile: SessionProfile) {
   mountRDPPane(target, ownerTab, profile, launch);
   wireRDPEvents(target, launch.id);
   target.reconnect = () => reconnectRDP(target, profile);
+  target.origin = { kind: 'rdp', label: target.label, profile };
   // Same session, its own client window, in the target pane.
   target.duplicate = async (pane) => {
     const previous = pendingPaneTarget;
@@ -8216,7 +8817,13 @@ function wireRDPEvents(session: Session, id: string) {
 }
 
 async function reconnectRDP(session: Session, profile: SessionProfile) {
-  if (session.backendId) runtime.EventsOff('rdp:closed:' + session.backendId);
+  if (session.backendId) {
+    runtime.EventsOff('rdp:closed:' + session.backendId);
+    // A restart while the client is still up replaces it. Left running,
+    // the earlier window was no longer tracked by anything: the pane's
+    // close only reached the newest, and its exit was never reported.
+    if (!session.stopped) await App.CloseRDP(session.backendId).catch(() => {});
+  }
   let launch: RDPLaunch;
   try {
     launch = await App.LaunchRDP(profile);
@@ -8455,6 +9062,7 @@ async function connectVNCInActiveTab(profile: SessionProfile) {
     launch = await App.LaunchVNC(profile);
   } catch (err) {
     target.connecting = false;
+    skipVNCSavePrompt = false;
     reportVNCError(String(err));
     return;
   }
@@ -8467,6 +9075,7 @@ async function connectVNCInActiveTab(profile: SessionProfile) {
   mountVNCPane(target, ownerTab, profile, launch);
   wireVNCEvents(target, launch.id);
   target.reconnect = () => reconnectVNC(target, profile);
+  target.origin = { kind: 'vnc', label: target.label, profile };
   target.duplicate = async (pane) => {
     const previous = pendingPaneTarget;
     pendingPaneTarget = pane;
@@ -8499,7 +9108,10 @@ function wireVNCEvents(session: Session, id: string) {
 }
 
 async function reconnectVNC(session: Session, profile: SessionProfile) {
-  if (session.backendId) runtime.EventsOff('vnc:closed:' + session.backendId);
+  if (session.backendId) {
+    runtime.EventsOff('vnc:closed:' + session.backendId);
+    if (!session.stopped) await App.CloseVNC(session.backendId).catch(() => {});
+  }
   let launch: VNCLaunch;
   try {
     launch = await App.LaunchVNC(profile);
@@ -8715,9 +9327,11 @@ function showSessionContextMenu(x: number, y: number, s: SessionProfile) {
   deleteItem.onmouseleave = () => { deleteItem.style.background = ''; };
   deleteItem.onclick = async () => {
     menu.remove();
-    // A deleted session leaves nothing to reach a stored password with,
-    // so forget it here rather than orphaning it in the keychain.
-    await App.DeleteSessionPassword(s.id).catch(() => {});
+    // The same confirmation the row's own delete button asks for. This
+    // is the last item on the menu, one slip away from the one above it,
+    // and there is no undo. The backend forgets any stored password
+    // along with the session.
+    if (!confirm(`Delete saved session "${s.name}"?`)) return;
     await App.DeleteSession(s.id);
     renderSessionList();
   };
@@ -9039,12 +9653,14 @@ function saveCollapsedGroups() {
 // including from a host you haven't decided to trust yet, the exact
 // TOFU moment Xpecter's own host-key verification exists to gate.
 // Opt-in via Settings for anyone who wants the convenience.
+// A bell in a terminal that is not on screen becomes an OS notification.
+let bellNotifyEnabled = localStorage.getItem('xpecter-bell-notify') !== 'off';
 let osc52Enabled = localStorage.getItem('xpecter-osc52') === 'on';
 let copyOnSelectEnabled = localStorage.getItem('xpecter-copy-on-select') === 'on';
 let rightClickPasteEnabled = localStorage.getItem('xpecter-rclick-paste') !== 'off';
 let highlightEnabled = localStorage.getItem('xpecter-highlight') !== 'off';
 
-type ShortcutId = 'disconnect' | 'paste' | 'sidebar' | 'zoomIn' | 'zoomOut' | 'resetZoom' | 'fullscreen' | 'splitVertical' | 'splitHorizontal' | 'closePane' | 'saveOutput' | 'print';
+type ShortcutId = 'disconnect' | 'paste' | 'sidebar' | 'zoomIn' | 'zoomOut' | 'resetZoom' | 'fullscreen' | 'splitVertical' | 'splitHorizontal' | 'closePane' | 'saveOutput' | 'print' | 'find';
 type ShortcutBinding = { ctrl: boolean; shift: boolean; alt: boolean; key: string };
 const DEFAULT_SHORTCUTS: Record<ShortcutId, ShortcutBinding> = {
   disconnect: { ctrl: true, shift: true, alt: false, key: 'x' },
@@ -9065,6 +9681,9 @@ const DEFAULT_SHORTCUTS: Record<ShortcutId, ShortcutBinding> = {
   // it is bound on Monaco rather than here, for the same reason as
   // saveOutput above.
   print: { ctrl: true, shift: true, alt: false, key: 'p' },
+  // Not plain Ctrl+F: that is forward-word in Emacs and readline, and a
+  // shell keystroke in a terminal is never Xpecter's to take.
+  find: { ctrl: true, shift: true, alt: false, key: 'f' },
 };
 let shortcuts: Record<ShortcutId, ShortcutBinding> = loadShortcuts();
 
@@ -9476,21 +10095,8 @@ function highlightPlainText(text: string): string {
   });
 }
 
-// True when an SGR sequence leaves a foreground colour in effect, false
-// when it clears one. Anything that is not an SGR sequence leaves the
-// current state alone.
-function sgrLeavesColorActive(sequence: string, current: boolean): boolean {
-  if (!sequence.startsWith('\x1b[') || !sequence.endsWith('m')) return current;
-  const params = sequence.slice(2, -1);
-  if (params === '' || params === '0') return false;
-  let active = current;
-  for (const part of params.split(';')) {
-    const code = Number(part);
-    if (code === 0 || code === 39) active = false;
-    else if ((code >= 30 && code <= 38) || (code >= 90 && code <= 97)) active = true;
-  }
-  return active;
-}
+// sgrLeavesColorActive (whether an SGR sequence leaves a foreground
+// colour in effect) lives in ansi.ts, where it can be tested.
 
 // Text the far end already coloured is left exactly as it sent it.
 // Recolouring inside a coloured run is how a highlighter breaks somebody's
@@ -9595,6 +10201,7 @@ function writeToTerminal(session: Session, data: string) {
   const chunk = highlightEnabled ? splitHighlightChunk(combined) : { ready: combined, carry: '' };
   session.highlightCarry = chunk.carry;
   session.term!.write(applyOutputHighlighting(chunk.ready));
+  markActivity(session);
   if (appSettings.sessionLogDirectory && session.backendId) {
     App.AppendSessionLog(appSettings.sessionLogDirectory, session.backendId, session.label, data).catch((err) => {
       console.error('Session log append failed', err);
@@ -9695,7 +10302,10 @@ async function disconnectSession(session: Session) {
   showDisconnectPanel(session, 'Disconnected.');
 }
 
-function showDisconnectPanel(session: Session, message: string) {
+// tone 'info' is the same panel for a session that has not connected
+// yet rather than one that stopped: a tab reopened from the last
+// launch, waiting for its password or for R.
+function showDisconnectPanel(session: Session, message: string, tone: 'error' | 'info' = 'error') {
   if (!session.term || !session.container) return;
   session.stopped = true;
   session.status = 'disconnected';
@@ -9704,24 +10314,25 @@ function showDisconnectPanel(session: Session, message: string) {
   const term = session.term;
   const cols = term.cols || 80;
   const divider = '-'.repeat(cols);
-  // Red inline message + divider, written as real terminal content so it
-  // scrolls, copies, and saves like everything else in the session.
-  term.write(`\r\n\x1b[31m${message}\x1b[0m\r\n`);
+  // Inline message + divider, written as real terminal content so it
+  // scrolls, copies, and saves like everything else in the session. Red
+  // for a drop, dim for a session that simply has not started.
+  term.write(`\r\n\x1b[${tone === 'error' ? '31' : '90'}m${message}\x1b[0m\r\n`);
   term.write(`\x1b[36m${divider}\x1b[0m\r\n`);
 
   session.overlay?.remove();
   const overlay = document.createElement('div');
-  overlay.className = 'disconnect-panel';
+  overlay.className = 'disconnect-panel' + (tone === 'info' ? ' info' : '');
 
   const title = document.createElement('div');
   title.className = 'disconnect-title';
-  title.textContent = 'Session stopped';
+  title.textContent = tone === 'error' ? 'Session stopped' : 'Not connected yet';
   overlay.appendChild(title);
 
   const ownerTab = tabs.get(session.ownerTabId)!;
   const actions: { key: string; label: string; run: () => void; enabled: boolean }[] = [
     { key: 'Enter', label: 'exit pane', run: () => closePane(ownerTab, paneIndexOf(ownerTab, session)), enabled: true },
-    { key: 'R', label: 'restart session', run: () => { reconnectSession(session); }, enabled: !!session.reconnect },
+    { key: 'R', label: tone === 'error' ? 'restart session' : 'connect', run: () => { reconnectSession(session); }, enabled: !!session.reconnect },
     { key: 'S', label: 'save terminal output to file', run: () => { saveSessionOutput(session); }, enabled: true },
   ];
 
@@ -10360,6 +10971,8 @@ async function renderHomeView() {
     }));
   }
 
+  renderHomeRestoreOffer();
+
   const chips = document.getElementById('home-shell-chips')!;
   chips.innerHTML = '';
   for (const p of shellProfiles) {
@@ -10632,6 +11245,15 @@ function showTrustPrompt(opts: {
 }
 
 function showConnectError(message: string) {
+  // The picker's own error line is only any use while the picker is
+  // open. A saved session launched from the sidebar, or a "duplicate
+  // this session" from the split menu, has no picker up, and its
+  // failure used to be written into a hidden container where nobody
+  // could see it.
+  if (!document.getElementById('session-picker-overlay')!.classList.contains('open')) {
+    flashStatus(message, true);
+    return;
+  }
 
   let el = document.getElementById('connect-error');
 
@@ -10661,11 +11283,55 @@ function clearConnectError() {
 // and (re)installs the tab's reconnect closure, used both on first
 // connect and after SPE-59's "R to restart session" action.
 function wireSSHEvents(session: Session, sessionId: string, req: ConnectRequest) {
+  session.origin = sshOrigin(session, req);
   runtime.EventsOn('ssh:data:' + sessionId, (data: unknown) => writeToTerminal(session, data as string));
   runtime.EventsOn('ssh:closed:' + sessionId, (payload: unknown) => {
+    // The backend closed this session's forwards along with it; the
+    // manager's list follows, rather than showing them as active.
+    void stopForwardsForSession(sessionId);
     showDisconnectPanel(session, (payload as SessionClosedEvent).message);
   });
   session.reconnect = () => reconnectSSH(session, req);
+}
+
+// The tab or pane a connect was aimed at, if it is still there. A
+// connect takes seconds and the tab can be closed in the meantime;
+// landing the result in it then threw on a deleted tab and left an
+// authenticated session on the backend that nothing could ever close.
+function connectTargetStillOpen(target: Session, ownerTab: Tab): boolean {
+  if (tabs.get(ownerTab.id) !== ownerTab) return false;
+  return target === ownerTab || ownerTab.extraPanes.includes(target);
+}
+
+// A connect that will not be retried: the backend said no, or the
+// person cancelled the modal. The one-shot flag a saved session sets on
+// its way in is cleared here rather than being left for the next ad-hoc
+// connect to trip over.
+function abandonConnect(target: Session) {
+  target.status = 'disconnected';
+  skipSavePrompt = false;
+  renderTabBar();
+}
+
+// What a successful connect owes the saved session it came from: the
+// password remembered, in memory for this run and in the keychain when
+// the box was ticked, and the tab named after the session rather than
+// user@host. Done here, at the point of success, because the picker's
+// Connect handler used to do it after connectActiveTab returned, which
+// is also where a trust or passphrase modal returns to. A new host's
+// first connection always hits the trust prompt, so for every new saved
+// session the "remember" tick was ignored and the label lost.
+function settleSavedSessionConnect(target: Session, req: ConnectRequest) {
+  if (req.password) {
+    passwordCache.set(passwordCacheKey(req.host, req.port, req.user), req.password);
+    const remember = document.getElementById('remember-password') as HTMLInputElement;
+    if (remember.checked && appSettings.passwordStoreEnabled && pendingSessionId) {
+      App.SetSessionPassword(pendingSessionId, req.password).catch((err) => flashStatus(`Could not save password: ${err}`, true));
+    }
+  }
+  if (pendingSessionName) target.label = pendingSessionName;
+  pendingSessionName = null;
+  pendingSessionId = null;
 }
 
 // reconnectSSH re-runs Connect() on an already-live tab (as opposed to
@@ -10681,9 +11347,38 @@ function notifyLegacyCompat(host: string) {
   alert(`Connected to ${host} using legacy compatibility mode: this device only supports older SSH algorithms, so this connection uses reduced security compared to Xpecter's normal defaults.`);
 }
 
-async function reconnectSSH(session: Session, req: ConnectRequest): Promise<void> {
+// What the workspace remembers about an SSH session: the request less
+// its password and passphrase.
+function sshOrigin(session: Session, req: ConnectRequest): PaneSpec {
+  return {
+    kind: 'ssh',
+    label: session.label,
+    host: req.host,
+    port: req.port,
+    user: req.user,
+    keyPath: req.keyPath || undefined,
+    useAgent: req.useAgent || undefined,
+    internalAgent: req.internalAgent || undefined,
+    x11: req.x11 || undefined,
+    jumpHost: req.jumpHost || undefined,
+    terminalSpeed: req.terminalSpeed || undefined,
+    sessionProfileId: session.sessionProfileId,
+  };
+}
+
+async function reconnectSSH(session: Session, req: ConnectRequest, banner = 'Reconnected.'): Promise<void> {
   session.status = 'connecting';
   renderTabBar();
+  const staleId = session.backendId;
+  if (staleId) {
+    // The listeners of the connection that died. Each restart used to
+    // register a fresh pair beside the old ones, which stayed for the
+    // life of the app holding this session and its terminal. The
+    // backend closed the old id's forwards when it went; the manager's
+    // list is caught up here.
+    runtime.EventsOff('ssh:data:' + staleId, 'ssh:closed:' + staleId);
+    await stopForwardsForSession(staleId);
+  }
 
   let result;
   try {
@@ -10693,9 +11388,16 @@ async function reconnectSSH(session: Session, req: ConnectRequest): Promise<void
     return;
   }
 
+  const ownerTab = tabs.get(session.ownerTabId);
+  if (!ownerTab || !connectTargetStillOpen(session, ownerTab)) {
+    // The pane was closed while the reconnect was in flight.
+    if (result.sessionId) App.CloseSSH(result.sessionId).catch(() => {});
+    return;
+  }
+
   if (result.needsPassphrase) {
     showPassphrasePrompt({
-      onSubmit: (passphrase) => { reconnectSSH(session, { ...req, passphrase }); },
+      onSubmit: (passphrase) => { reconnectSSH(session, { ...req, passphrase }, banner); },
       onCancel: () => showDisconnectPanel(session, 'Reconnect cancelled.'),
     });
     return;
@@ -10704,7 +11406,7 @@ async function reconnectSSH(session: Session, req: ConnectRequest): Promise<void
   if (result.needsKeyPermConfirm) {
     showKeyPermWarning({
       path: result.keyPermPath!, mode: result.keyPermMode!,
-      onProceed: () => { reconnectSSH(session, { ...req, ignoreKeyPermWarning: true }); },
+      onProceed: () => { reconnectSSH(session, { ...req, ignoreKeyPermWarning: true }, banner); },
       onCancel: () => showDisconnectPanel(session, 'Reconnect cancelled.'),
     });
     return;
@@ -10716,7 +11418,7 @@ async function reconnectSSH(session: Session, req: ConnectRequest): Promise<void
       onAccept: async () => {
         if (result.changed) await App.TrustHostDespiteChange(result.host!);
         else await App.TrustHost(result.host!);
-        await reconnectSSH(session, req);
+        await reconnectSSH(session, req, banner);
       },
       onReject: () => showDisconnectPanel(session, 'Reconnect cancelled.'),
     });
@@ -10727,7 +11429,7 @@ async function reconnectSSH(session: Session, req: ConnectRequest): Promise<void
     session.backendId = result.sessionId;
     session.status = 'connected';
     renderTabBar();
-    session.term!.write('\r\n\x1b[32mReconnected.\x1b[0m\r\n');
+    session.term!.write(`\r\n\x1b[32m${banner}\x1b[0m\r\n`);
     wireSSHEvents(session, result.sessionId, req);
     // SPE-126: the easy case, the terminal this session is going back
     // into has been on screen all along, so its size is exact.
@@ -10787,16 +11489,23 @@ async function runConnect(req: ConnectRequest) {
   try {
     result = await App.Connect(req);
   } catch (err) {
-    target.status = 'disconnected';
-    renderTabBar();
+    abandonConnect(target);
     showConnectError(String(err));
+    return;
+  }
+
+  if (!connectTargetStillOpen(target, ownerTab)) {
+    // The tab was closed while the connect was in flight. The session
+    // the backend just opened has nothing to belong to.
+    if (result.sessionId) App.CloseSSH(result.sessionId).catch(() => {});
+    skipSavePrompt = false;
     return;
   }
 
   if (result.needsPassphrase) {
     showPassphrasePrompt({
       onSubmit: (passphrase) => { connectActiveTab({ ...req, passphrase }); },
-      onCancel: () => { target.status = 'disconnected'; renderTabBar(); },
+      onCancel: () => abandonConnect(target),
     });
     return;
   }
@@ -10805,7 +11514,7 @@ async function runConnect(req: ConnectRequest) {
     showKeyPermWarning({
       path: result.keyPermPath!, mode: result.keyPermMode!,
       onProceed: () => { connectActiveTab({ ...req, ignoreKeyPermWarning: true }); },
-      onCancel: () => { target.status = 'disconnected'; renderTabBar(); },
+      onCancel: () => abandonConnect(target),
     });
     return;
   }
@@ -10818,7 +11527,7 @@ async function runConnect(req: ConnectRequest) {
         else await App.TrustHost(result.host!);
         await connectActiveTab(req);
       },
-      onReject: () => { target.status = 'disconnected'; renderTabBar(); },
+      onReject: () => abandonConnect(target),
     });
     return;
   }
@@ -10840,6 +11549,7 @@ async function runConnect(req: ConnectRequest) {
     // the shell channel before the frontend knew the id at all.
     createTerminalForSession(target, ownerTab);
     wireSSHEvents(target, result.sessionId, req);
+    settleSavedSessionConnect(target, req);
     // SPE-104: a second, independent connection to the same target for
     // the split menu's "Duplicate this session". Deliberately re-runs
     // Connect rather than opening another channel on this session, so
@@ -10921,58 +11631,14 @@ document.getElementById('connect')!.addEventListener('click', async () => {
     req = { host, port, user, password, jumpHost, terminalSpeed };
   }
 
-  // SPE-92: the same session connectActiveTab just used, a split pane
-  // if the picker was opened via openSplitPanePicker, otherwise the
-  // active tab's own primary session, exactly as before this feature
-  // existed.
-  const connectedTarget: Session | undefined = pendingPaneTarget ?? tabs.get(activeTabId!);
-
+  // Everything that follows a successful connect (closing the picker,
+  // remembering the password, naming the tab after its saved session)
+  // happens inside runConnect, at the point success is actually known.
+  // It used to happen here, after connectActiveTab returned, which is
+  // also where it returns to when a passphrase, trust or key-permission
+  // modal takes over; the picker was yanked shut mid-flow, and later the
+  // password and label were dropped whenever a modal had interrupted.
   await connectActiveTab(req);
-
-  if (authMode !== 'key') {
-
-    if (connectedTarget && connectedTarget.status === 'connected') {
-
-      const password = (document.getElementById('password') as HTMLInputElement).value;
-
-      passwordCache.set(passwordCacheKey(host, 22, user), password);
-
-      // Persist to the OS keychain only when the person ticked the box
-      // on this prompt and the setting is on, and only for a saved
-      // session, which is the one thing with a stable id to file it
-      // under (pendingSessionId).
-      const remember = (document.getElementById('remember-password') as HTMLInputElement).checked;
-      if (remember && appSettings.passwordStoreEnabled && pendingSessionId) {
-        App.SetSessionPassword(pendingSessionId, password).catch((err) => flashStatus(`Could not save password: ${err}`, true));
-      }
-
-    }
-
-  }
-  if (pendingSessionName) {
-
-    if (connectedTarget) {
-
-      connectedTarget.label = pendingSessionName;
-
-      renderTabBar();
-
-    }
-
-    pendingSessionName = null;
-
-  }
-  pendingSessionId = null;
-  // Bug fix: this used to unconditionally call closeSessionPicker()
-  // here, but connectActiveTab legitimately returns early (still
-  // "in progress" from the user's perspective) when it needs a
-  // passphrase/trust/key-permission confirmation via a modal. Closing
-  // the picker at that point yanked it shut mid-flow, before success
-  // or failure was even known, silently hiding the eventual error
-  // (showConnectError correctly wrote it into the picker's own DOM,
-  // just inside a container the user could no longer see). Closing on
-  // success now happens inside connectActiveTab itself, right where
-  // success is actually determined, not here.
 });
 
 // SPE-31: pre-1809 Windows (and any other local-shell startup failure)
@@ -11017,6 +11683,7 @@ async function startLocalShellInActiveTab(shell: string, label: string, dir = ''
 
   target.backendId = id;
   target.status = 'connected';
+  target.origin = { kind: 'local', label, shell, dir };
   // syncSessionSize is what normally tells a backend its size, but every
   // earlier call this session made returned at the !backendId guard
   // above, because the id only exists now. Without this a local shell
@@ -11085,7 +11752,11 @@ async function newLocalForward() {
   if (!localPort || !remoteHost || !remotePort) return;
   try {
     const id = await App.StartLocalForward(session.backendId, localPort, remoteHost, remotePort);
-    alert(`Forward active: 127.0.0.1:${localPort} -> ${remoteHost}:${remotePort}\nID: ${id}`);
+    // Listed with the manager's own, so it can be seen and stopped there
+    // and goes when its session does. A forward made here used to be
+    // tracked by nothing, and its port stayed bound until the app quit.
+    activeForwards.push({ id, sessionBackendId: session.backendId, sessionLabel: session.label, localPort, remoteHost, remotePort });
+    flashStatus(`Forwarding localhost:${localPort} → ${remoteHost}:${remotePort} via ${session.label}`);
   } catch (err) {
     alert(`Could not start port forward: ${err}`);
   }
@@ -11118,6 +11789,8 @@ function wireSerialEvents(session: Session, id: string, portName: string, baud: 
 async function reconnectSerial(session: Session, portName: string, baud: number): Promise<void> {
   session.status = 'connecting';
   renderTabBar();
+  // The dead port's listeners, or each restart stacks another pair.
+  if (session.backendId) runtime.EventsOff('serial:data:' + session.backendId, 'serial:closed:' + session.backendId);
   let id: string;
   try {
     id = await App.ConnectSerial(portName, baud);
@@ -11163,6 +11836,7 @@ async function connectSerialInActiveTab(portName: string, baud: number) {
   target.mode = 'serial';
   target.backendId = id;
   target.status = 'connected';
+  target.origin = { kind: 'serial', label: portName, port: portName, baud, sessionProfileId: target.sessionProfileId };
   createTerminalForSession(target, ownerTab);
   wireSerialEvents(target, id, portName, baud);
   switchToTab(ownerTab.id);
@@ -11194,6 +11868,13 @@ document.addEventListener('keydown', (e) => {
   // yet" landing screen, sidebar search box, etc.), the per-terminal
   // version above only fires while an xterm instance actually has
   // focus. Same Ctrl+Shift+B, not plain Ctrl+B (tmux's prefix key).
+  //
+  // A keystroke a terminal already handled still bubbles up to here:
+  // xterm's custom key handler returning false stops xterm, not the
+  // event. Without this check every one of these fired twice from a
+  // terminal, so Ctrl+Shift+B toggled the sidebar shut and open again
+  // and every zoom step was two.
+  if ((e.target as HTMLElement | null)?.closest?.('.xterm')) return;
   if (shortcutMatches(e, 'sidebar')) {
     e.preventDefault();
     toggleSidebar();
@@ -11336,6 +12017,9 @@ wireSidebarHeaderAction('remote-new-folder', () => {
 wireSidebarHeaderAction('remote-refresh', () => {
   withRemoteSession((id) => { void refreshFileList(currentRemotePath, id); });
 });
+wireSidebarHeaderAction('remote-upload', () => {
+  withRemoteSession((id) => { void uploadFilesViaDialog(id, currentRemotePath); });
+});
 
 applySidebarSections();
 
@@ -11438,7 +12122,7 @@ editorWallpaperOpacitySlider.addEventListener('input', () => {
 // Saved on change rather than input, so dragging the slider doesn't
 // write settings.json on every pixel. Same split as the terminal's.
 editorWallpaperOpacitySlider.addEventListener('change', () => {
-  App.SaveSettings(appSettings);
+  persistSettings();
 });
 
 document.getElementById('editor-wallpaper-clear')!.addEventListener('click', () => {
@@ -11451,14 +12135,31 @@ wallpaperOpacitySlider.addEventListener('input', () => {
   applyWallpaperVisual();
 });
 wallpaperOpacitySlider.addEventListener('change', () => {
-  App.SaveSettings(appSettings);
+  persistSettings();
 });
 
 document.getElementById('wallpaper-clear')!.addEventListener('click', () => {
   clearWallpaper();
 });
 
-loadSettingsAndApply();
+const settingsReady = loadSettingsAndApply();
+
+// The previous launch's tab set: offered on Home, or reopened as soon
+// as the settings are in (a reopened session reads them to know
+// whether the keychain may hold its password), according to the
+// setting. Held as pending in both cases so the launch's own empty tab
+// set does not overwrite it before anything has been decided.
+{
+  const snapshot = parseWorkspaceSnapshot(localStorage.getItem(WORKSPACE_STORAGE_KEY));
+  if (snapshot && restoreMode() !== 'never') {
+    pendingWorkspaceRestore = snapshot;
+    if (restoreMode() === 'always') {
+      void settingsReady.catch(() => {}).then(() => restoreWorkspace(snapshot));
+    } else {
+      void renderHomeView();
+    }
+  }
+}
 
 // Check-for-updates (not auto-update): one GitHub releases API check on
 // launch, dismissible per-version so it doesn't nag every time once
@@ -11488,7 +12189,10 @@ async function checkForUpdate(manual = false) {
   const downloadBtn = document.getElementById('update-banner-download') as HTMLButtonElement;
   downloadBtn.textContent = 'Download';
   downloadBtn.disabled = false;
-  downloadBtn.addEventListener('click', async () => {
+  // Assigned rather than added: this runs on every check, and each
+  // addEventListener stacked another handler on the same button, so a
+  // manual check after the startup one downloaded twice per click.
+  downloadBtn.onclick = async () => {
     if (!info.assetUrl) {
       // No matching asset found for this platform (shouldn't normally
       // happen, but a real release could legitimately be missing one,
@@ -11511,11 +12215,11 @@ async function checkForUpdate(manual = false) {
       downloadBtn.textContent = 'Download';
       alert(`Update download failed: ${err}\n\nYou can also grab it manually from the releases page.`);
     }
-  });
-  document.getElementById('update-banner-dismiss')!.addEventListener('click', () => {
+  };
+  (document.getElementById('update-banner-dismiss') as HTMLButtonElement).onclick = () => {
     localStorage.setItem('xpecter-update-dismissed', info.latestVersion);
     banner.style.display = 'none';
-  });
+  };
 }
 checkForUpdate();
 
@@ -11537,7 +12241,7 @@ osc52Toggle.addEventListener('change', () => {
 const passwordStoreToggle = document.getElementById('password-store-toggle') as HTMLInputElement;
 passwordStoreToggle.addEventListener('change', async () => {
   appSettings.passwordStoreEnabled = passwordStoreToggle.checked;
-  await App.SaveSettings(appSettings);
+  await persistSettings();
   if (!passwordStoreToggle.checked) {
     // Turning it off forgets every password Xpecter saved. The keychain
     // offers no listing, so the saved sessions are the enumeration:
@@ -11573,6 +12277,27 @@ warnMultilinePasteToggle.addEventListener('change', () => {
   localStorage.setItem('xpecter-warn-multiline-paste', warnMultilinePasteEnabled ? 'on' : 'off');
 });
 
+const pasteDelaySelect = document.getElementById('paste-delay-select') as HTMLSelectElement;
+for (const ms of PASTE_DELAY_OPTIONS) {
+  const option = document.createElement('option');
+  option.value = String(ms);
+  option.textContent = pasteDelayLabel(ms);
+  pasteDelaySelect.appendChild(option);
+}
+pasteDelaySelect.value = String(PASTE_DELAY_OPTIONS.includes(pasteLineDelayMs) ? pasteLineDelayMs : 0);
+pasteDelaySelect.addEventListener('change', () => setPasteLineDelay(Number(pasteDelaySelect.value) || 0));
+
+const bellNotifyToggle = document.getElementById('bell-notify-toggle') as HTMLInputElement;
+bellNotifyToggle.checked = bellNotifyEnabled;
+bellNotifyToggle.addEventListener('change', () => {
+  bellNotifyEnabled = bellNotifyToggle.checked;
+  localStorage.setItem('xpecter-bell-notify', bellNotifyEnabled ? 'on' : 'off');
+});
+
+const restoreModeSelect = document.getElementById('restore-mode-select') as HTMLSelectElement;
+restoreModeSelect.value = restoreMode();
+restoreModeSelect.addEventListener('change', () => setRestoreMode(restoreModeSelect.value as RestoreMode));
+
 // SPE-79: unlike the toggles above, this one lives in the Go-backed
 // config.Settings (App.SaveSettings), not localStorage, since Connect()
 // needs to read it fresh from settings.json at connect time, not just
@@ -11580,13 +12305,13 @@ warnMultilinePasteToggle.addEventListener('change', () => {
 const keepaliveToggle = document.getElementById('ssh-keepalive-toggle') as HTMLInputElement;
 keepaliveToggle.addEventListener('change', () => {
   appSettings.sshKeepaliveDisabled = !keepaliveToggle.checked;
-  App.SaveSettings(appSettings);
+  persistSettings();
 });
 
 const keepOpenToggle = document.getElementById('keep-open-last-tab-toggle') as HTMLInputElement;
 keepOpenToggle.addEventListener('change', () => {
   appSettings.keepOpenOnLastTab = keepOpenToggle.checked;
-  App.SaveSettings(appSettings);
+  persistSettings();
 });
 
 const scrollbackSelect = document.getElementById('scrollback-select') as HTMLSelectElement;
@@ -11598,13 +12323,13 @@ document.getElementById('session-log-browse')!.addEventListener('click', async (
   const directory = await App.SelectDirectory();
   if (!directory) return;
   appSettings.sessionLogDirectory = directory;
-  await App.SaveSettings(appSettings);
+  await persistSettings();
   document.getElementById('session-log-clear-row')!.style.display = 'block';
 });
 
 document.getElementById('session-log-clear')!.addEventListener('click', async () => {
   appSettings.sessionLogDirectory = '';
-  await App.SaveSettings(appSettings);
+  await persistSettings();
   document.getElementById('session-log-clear-row')!.style.display = 'none';
 });
 
@@ -11633,7 +12358,7 @@ document.getElementById('menu-reset-settings')!.addEventListener('click', async 
   commandSnippets = [];
   shortcuts = { ...DEFAULT_SHORTCUTS };
   appSettings = {};
-  await App.SaveSettings(appSettings);
+  await persistSettings();
   await loadSettingsAndApply();
   (document.getElementById('osc52-toggle') as HTMLInputElement).checked = false;
   (document.getElementById('copy-on-select-toggle') as HTMLInputElement).checked = false;
@@ -12002,6 +12727,11 @@ document.getElementById('menu-print')!.addEventListener('click', () => {
   printFocusedPane();
 });
 
+document.getElementById('menu-find')!.addEventListener('click', () => {
+  closeAllMenus();
+  openFindBarForActiveTerminal();
+});
+
 document.getElementById('menu-clear-screen')!.addEventListener('click', async () => {
   closeAllMenus();
   const tab = activeTabId ? tabs.get(activeTabId) : null;
@@ -12132,6 +12862,19 @@ function openSplitPanePicker(pane: Pane) {
 function closeSessionPicker() {
   document.getElementById('session-picker-overlay')!.classList.remove('open');
   resetPickerView();
+  // Whatever a saved session's password prompt was standing in for is
+  // over now, one way or the other. Left set, a cancelled prompt for
+  // session A leaked into the next ad-hoc connect: its "remember" tick
+  // filed host B's password under A's id, B's tab wore A's name, and the
+  // sidebar showed A as live. The pane the picker was aimed at is let
+  // go for the same reason: once the picker has closed, nothing else
+  // should land in it by accident.
+  const target = pendingPaneTarget ?? (activeTabId ? tabs.get(activeTabId) : null);
+  if (pendingSessionId && target && target.mode === 'pending') target.sessionProfileId = null;
+  pendingSessionName = null;
+  pendingSessionId = null;
+  (document.getElementById('remember-password') as HTMLInputElement).checked = false;
+  pendingPaneTarget = null;
 }
 function ensurePendingTab() {
   // The picker always operates on the current tab if it's already
@@ -12226,8 +12969,10 @@ document.getElementById('picker-vnc-fields')!.addEventListener('keydown', (e) =>
   }
 });
 document.getElementById('picker-editor')!.addEventListener('click', () => {
-  closeSessionPicker();
+  // The action first: it reads the split pane the picker was opened
+  // for, and closing the picker lets that target go.
   newEditorSession();
+  closeSessionPicker();
 });
 document.getElementById('serial-connect')!.addEventListener('click', async () => {
   const portName = (document.getElementById('serial-port') as HTMLInputElement).value;
@@ -12240,8 +12985,10 @@ document.getElementById('picker-shell')!.addEventListener('click', () => {
   // tab when this picker was actually opened for a split pane, only
   // needed for the ordinary "New Session" flow.
   if (!pendingPaneTarget) ensurePendingTab();
+  // Started before the picker closes, for the same reason as the editor
+  // item above: the pane target is read on the way in.
+  void startLocalShellInActiveTab('', 'Local shell');
   closeSessionPicker();
-  startLocalShellInActiveTab('', 'Local shell');
 });
 document.getElementById('menu-new-folder')!.addEventListener('click', () => {
   closeAllMenus();
@@ -12328,6 +13075,7 @@ const SHORTCUT_GROUPS: { title: string; items: [ShortcutId | null, string][] }[]
       ['paste', 'Paste'],
       ['saveOutput', 'Save terminal output to a file'],
       ['print', 'Print terminal output (or the open document)'],
+      ['find', 'Find in terminal output'],
     ],
   },
   {
@@ -12659,11 +13407,9 @@ async function openBackupRestoreDialog() {
         }
         try {
           await App.RestoreBackup(filename);
-          await Promise.all([
-            loadSettingsAndApply(),
-            renderSessionList(),
-            renderLocalShellProfilesMenu(),
-          ]);
+          // The same refresh an import gets, pinned folders included:
+          // the restore put them back but this list did not redraw.
+          await refreshAfterConfigChange();
           closeBackupRestoreDialog();
           alert('Backup restored.');
         } catch (err) {
@@ -13018,7 +13764,318 @@ function setupSidebarResize(minWidth: number) {
 
 setupSidebarResize(150);
 
-renderSessionList();renderSessionList();
+// Closing the window asks about unsaved buffers first. The backend
+// refuses the close and sends this event instead; the answer goes back
+// through FinishCloseRequest. Acknowledged at once, before any dialog,
+// so the backend knows the page is listening however long the person
+// takes over the decision; a page that never acknowledges is treated as
+// broken and the next close goes through.
+runtime.EventsOn('app:close-requested', () => {
+  void (async () => {
+    await App.AcknowledgeCloseRequest();
+    for (const tab of tabs.values()) {
+      for (const session of allSessions(tab)) {
+        if (session.mode !== 'editor') continue;
+        const pane = editorPanes.get(session.id);
+        if (!pane || !pane.docIds.some((docId) => editorDocs.get(docId)?.dirty)) continue;
+        // Brought on screen so the dialog is about something visible.
+        switchToTab(tab.id);
+        if (!(await confirmCloseEditorSession(session))) {
+          await App.FinishCloseRequest(false);
+          return;
+        }
+      }
+    }
+    // The last word on what was open, before the window goes.
+    persistWorkspace();
+    await App.FinishCloseRequest(true);
+  })();
+});
+App.ArmCloseGuard();
+
+// --- Reopening what was open ---
+// The tab set is written as it changes (renderTabBar asks for it) and
+// read back on the next launch, where Home offers it, or it is reopened
+// outright, according to the setting. See workspace.ts for the shape.
+
+type RestoreMode = 'ask' | 'always' | 'never';
+
+function restoreMode(): RestoreMode {
+  const stored = localStorage.getItem('xpecter-restore-mode');
+  return stored === 'always' || stored === 'never' ? stored : 'ask';
+}
+
+function setRestoreMode(mode: RestoreMode) {
+  localStorage.setItem('xpecter-restore-mode', mode);
+  const select = document.getElementById('restore-mode-select') as HTMLSelectElement | null;
+  if (select) select.value = mode;
+}
+
+function persistWorkspaceSoon() {
+  if (restoringWorkspace) return;
+  if (workspacePersistTimer) clearTimeout(workspacePersistTimer);
+  workspacePersistTimer = setTimeout(() => {
+    workspacePersistTimer = null;
+    persistWorkspace();
+  }, 500);
+}
+
+function persistWorkspace() {
+  if (restoringWorkspace) return;
+  const snapshot = captureWorkspace();
+  // Until the previous launch's snapshot has been reopened or declined,
+  // an empty tab set does not replace it: that is a fresh launch that
+  // has not decided yet, not a decision.
+  if (pendingWorkspaceRestore && snapshot.tabs.length === 0) return;
+  try {
+    localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(snapshot));
+  } catch {
+    // Storage unavailable or full: there is nothing to do about it here.
+  }
+}
+
+function captureWorkspace(): WorkspaceSnapshot {
+  const specs: TabSpec[] = [];
+  let activeTab = -1;
+  for (const tab of tabs.values()) {
+    if (tab.isHome) continue;
+    const panes = allSessions(tab).map(paneSpecOf);
+    if (!panes.some((pane) => pane !== null)) continue;
+    if (tab.id === activeTabId) activeTab = specs.length;
+    specs.push({
+      label: tab.label,
+      layout: tab.layout,
+      splitX: tab.splitX,
+      splitY: tab.splitY,
+      focusedPaneIndex: tab.focusedPaneIndex,
+      panes,
+    });
+  }
+  return { version: 1, savedAt: new Date().toISOString(), activeTab, tabs: specs };
+}
+
+// What one pane is, as far as reopening it goes. An editor is read off
+// its pane: the folder, and the local files open in it. Everything else
+// recorded how it was started when it connected.
+function paneSpecOf(session: Session): PaneSpec | null {
+  if (session.mode === 'editor') {
+    const pane = editorPanes.get(session.id);
+    if (!pane) return null;
+    const files: string[] = [];
+    for (const docId of pane.docIds) {
+      const doc = editorDocs.get(docId);
+      if (doc?.path && doc.isLocal) files.push(doc.path);
+    }
+    if (!pane.folder && files.length === 0) return null;
+    const active = pane.activeDocId ? editorDocs.get(pane.activeDocId) : null;
+    return {
+      kind: 'editor',
+      label: session.label,
+      folder: pane.folder,
+      files,
+      activeFile: active?.path && active.isLocal ? active.path : null,
+    };
+  }
+  if (!session.origin) return null;
+  return { ...session.origin, label: session.label };
+}
+
+async function restoreWorkspace(snapshot: WorkspaceSnapshot) {
+  restoringWorkspace = true;
+  pendingWorkspaceRestore = null;
+  document.getElementById('home-restore-section')!.style.display = 'none';
+  const created: Tab[] = [];
+  try {
+    for (const spec of snapshot.tabs) {
+      const tab = createPendingTab();
+      tab.label = spec.label;
+      created.push(tab);
+      switchToTab(tab.id);
+      await restorePane(tab, tab, spec.panes[0] ?? null);
+      // A split needs the tab's own session first; setTabLayout refuses
+      // a still-pending tab, which a failed primary restore leaves.
+      if (spec.layout !== 'single' && tab.mode !== 'pending' && tabs.has(tab.id)) {
+        await setTabLayout(tab, spec.layout);
+        tab.splitX = spec.splitX;
+        tab.splitY = spec.splitY;
+        applyPaneGridLayout(tab);
+        for (let i = 0; i < tab.extraPanes.length; i += 1) {
+          if (!tabs.has(tab.id)) break;
+          switchToTab(tab.id);
+          await restorePane(tab, tab.extraPanes[i], spec.panes[i + 1] ?? null);
+        }
+        if (tabs.has(tab.id)) focusPane(tab, Math.min(spec.focusedPaneIndex, tab.extraPanes.length));
+      }
+    }
+  } finally {
+    restoringWorkspace = false;
+  }
+  const wanted = snapshot.activeTab >= 0 ? created[snapshot.activeTab] : null;
+  const active = wanted && tabs.has(wanted.id) ? wanted : created.find((tab) => tabs.has(tab.id));
+  if (active) switchToTab(active.id);
+  persistWorkspaceSoon();
+  flashStatus(`Reopened ${describeWorkspace(snapshot)}`);
+}
+
+async function restorePane(tab: Tab, session: Session, spec: PaneSpec | null) {
+  if (!spec) return;
+  pendingPaneTarget = session === tab ? null : session;
+  try {
+    switch (spec.kind) {
+      case 'local':
+        await startLocalShellInActiveTab(spec.shell, spec.label, spec.dir);
+        return;
+      case 'serial':
+        skipSerialSavePrompt = true;
+        await connectSerialInActiveTab(spec.port, spec.baud);
+        session.sessionProfileId = spec.sessionProfileId;
+        return;
+      case 'rdp':
+        skipRDPSavePrompt = true;
+        await connectRDPInActiveTab(spec.profile);
+        session.sessionProfileId = spec.profile.id || null;
+        return;
+      case 'vnc':
+        skipVNCSavePrompt = true;
+        await connectVNCInActiveTab(spec.profile);
+        session.sessionProfileId = spec.profile.id || null;
+        return;
+      case 'editor': {
+        createEditorForSession(session, tab);
+        const pane = editorPanes.get(session.id);
+        if (!pane) return;
+        if (spec.folder) await openFolder(pane, spec.folder);
+        for (const file of spec.files) await openLocalFile(file, pane);
+        const active = spec.activeFile ? findOpenDoc(spec.activeFile, true, null) : null;
+        if (active) setActiveDoc(pane, active.id);
+        return;
+      }
+      case 'ssh':
+        await restoreSSHPane(tab, session, spec);
+        return;
+    }
+  } catch (err) {
+    flashStatus(`Could not reopen ${spec.label}: ${err}`, true);
+  } finally {
+    pendingPaneTarget = null;
+  }
+}
+
+type SSHPaneSpec = Extract<PaneSpec, { kind: 'ssh' }>;
+
+// An SSH pane comes back as its terminal with a "not connected yet"
+// panel, then connects. If that needs a password nobody stored, the
+// panel stays with R to try again, so a tab set full of hosts never
+// stacks a dozen prompts on top of each other.
+async function restoreSSHPane(tab: Tab, session: Session, spec: SSHPaneSpec) {
+  session.mode = 'ssh';
+  session.label = spec.label;
+  session.sessionProfileId = spec.sessionProfileId;
+  session.status = 'disconnected';
+  session.origin = spec;
+  createTerminalForSession(session, tab);
+  session.reconnect = () => connectRestoredSSH(session, spec);
+  showDisconnectPanel(session, `Reopened from your last session: ${spec.user}@${spec.host}.`, 'info');
+  await connectRestoredSSH(session, spec);
+}
+
+async function connectRestoredSSH(session: Session, spec: SSHPaneSpec) {
+  const req: ConnectRequest = {
+    host: spec.host, port: spec.port, user: spec.user,
+    keyPath: spec.keyPath, useAgent: spec.useAgent, internalAgent: spec.internalAgent,
+    x11: spec.x11, jumpHost: spec.jumpHost, terminalSpeed: spec.terminalSpeed,
+  };
+  const usesPassword = !spec.keyPath && !spec.useAgent && !spec.internalAgent;
+  if (usesPassword) {
+    const cacheKey = passwordCacheKey(spec.host, spec.port, spec.user);
+    let password = passwordCache.get(cacheKey) ?? '';
+    if (!password && appSettings.passwordStoreEnabled && spec.sessionProfileId) {
+      password = await App.GetSessionPassword(spec.sessionProfileId).catch(() => '');
+    }
+    if (!password) {
+      const typed = await promptForPassword(`${spec.user}@${spec.host}`);
+      if (typed === null) return;
+      password = typed;
+    }
+    req.password = password;
+  }
+  clearDisconnectPanel(session);
+  await reconnectSSH(session, req, 'Connected.');
+  if (session.status === 'connected' && req.password) {
+    passwordCache.set(passwordCacheKey(spec.host, spec.port, spec.user), req.password);
+  }
+}
+
+// A password for one host, asked in a dialog rather than the picker,
+// which is one form for one connection at a time. Resolves null when
+// cancelled.
+function promptForPassword(target: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'password';
+    input.placeholder = 'password';
+    input.style.cssText = 'width:100%;box-sizing:border-box;';
+    const dialog = buildDialog({
+      title: `Password for ${target}`,
+      onDismiss: () => resolve(null),
+      fill: (body) => {
+        dialogText(body, 'This session was reopened from your last launch. Enter its password to connect.');
+        body.appendChild(input);
+      },
+      actions: [
+        { label: 'Cancel', kind: 'secondary', run: () => resolve(null) },
+        { label: 'Connect', run: () => resolve(input.value) },
+      ],
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const value = input.value;
+      dialog.close();
+      resolve(value);
+    });
+    input.focus();
+  });
+}
+
+// Home's offer to reopen the previous launch's tabs.
+function renderHomeRestoreOffer() {
+  const section = document.getElementById('home-restore-section')!;
+  const snapshot = pendingWorkspaceRestore;
+  if (!snapshot) {
+    section.style.display = 'none';
+    return;
+  }
+  section.style.display = 'block';
+  const card = document.getElementById('home-restore-card')!;
+  card.innerHTML = '';
+  const text = document.createElement('div');
+  text.className = 'home-restore-text';
+  const when = homeRelativeTime(snapshot.savedAt);
+  text.textContent = `${describeWorkspace(snapshot)}${when ? ` · ${when}` : ''}`;
+  const actions = document.createElement('div');
+  actions.className = 'home-restore-actions';
+  const reopen = document.createElement('button');
+  reopen.textContent = 'Reopen';
+  reopen.onclick = () => { void restoreWorkspace(snapshot); };
+  const dismiss = document.createElement('button');
+  dismiss.className = 'secondary';
+  dismiss.textContent = 'Not now';
+  dismiss.onclick = () => {
+    pendingWorkspaceRestore = null;
+    section.style.display = 'none';
+    persistWorkspaceSoon();
+  };
+  const always = document.createElement('label');
+  always.className = 'home-restore-always';
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.onchange = () => setRestoreMode(box.checked ? 'always' : 'ask');
+  always.append(box, ' Always reopen automatically');
+  actions.append(reopen, dismiss, always);
+  card.append(text, actions);
+}
+
 renderLocalShellProfileList();
 renderFolderList();
 renderLocalShellProfilesMenu();

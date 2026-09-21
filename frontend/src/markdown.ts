@@ -336,6 +336,15 @@ export function countWords(text: string): number {
 // same order the reading view renders checkboxes in. Fenced code is
 // skipped so a "- [ ]" inside an example is not counted. Returns the
 // zero-based line and the column of the character inside the brackets.
+//
+// This has to count exactly what the renderer draws, or a tick lands
+// on the wrong task. Two places the two used to disagree: a task inside
+// a blockquote or a callout is rendered as a checkbox (the quoted text
+// is lexed like any other block) but its "> " prefix was not allowed
+// here, and "- [ ]" with nothing after the box is not a task to marked
+// (its rule wants text after the space) but was counted here.
+const TASK_LINE_RE = /^((?:[ \t]{0,3}>[ \t]?)*[ \t]*(?:[-*+]|\d+[.)])[ \t]+\[)([ xX])\](?= +\S)/;
+
 export function taskMarkerAt(text: string, index: number): { line: number; column: number; checked: boolean } | null {
   const lines = text.split(/\r?\n/);
   let fence: string | null = null;
@@ -349,7 +358,7 @@ export function taskMarkerAt(text: string, index: number): { line: number; colum
       continue;
     }
     if (fence) continue;
-    const task = /^(\s*(?:[-*+]|\d+[.)])\s+\[)([ xX])\]/.exec(line);
+    const task = TASK_LINE_RE.exec(line);
     if (!task) continue;
     if (seen === index) return { line: i, column: task[1].length, checked: task[2] !== ' ' };
     seen += 1;
