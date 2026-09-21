@@ -69,7 +69,7 @@ describe('parsePaneSpec', () => {
     const pane = parsePaneSpec({ kind: 'ssh', host: 'h', user: 'u', password: 'hunter2' });
     expect(pane).toEqual({
       kind: 'ssh', label: 'u@h', host: 'h', port: 22, user: 'u',
-      keyPath: undefined, useAgent: undefined, internalAgent: undefined, x11: undefined,
+      keyPath: undefined, useAgent: undefined, internalAgent: undefined, forwardAgent: undefined, x11: undefined,
       jumpHost: undefined, terminalSpeed: undefined, sessionProfileId: null,
     });
     expect(JSON.stringify(pane)).not.toContain('hunter2');

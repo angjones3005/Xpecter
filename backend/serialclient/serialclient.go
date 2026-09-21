@@ -7,6 +7,7 @@ package serialclient
 
 import (
 	"sync/atomic"
+	"time"
 
 	"go.bug.st/serial"
 )
@@ -75,6 +76,17 @@ func (s *Session) Close() error {
 	s.closing.Store(true)
 	return s.port.Close()
 }
+
+// SetDTR and SetRTS drive the two modem-control lines a console cable
+// carries. Some devices hold their console silent until DTR is raised,
+// some bootloaders are reset by toggling it, and a few want RTS
+// asserted before they will talk at all.
+func (s *Session) SetDTR(on bool) error { return s.port.SetDTR(on) }
+func (s *Session) SetRTS(on bool) error { return s.port.SetRTS(on) }
+
+// SendBreak holds the line in the break condition for the given time,
+// which is how a console server or a router in ROMMON is interrupted.
+func (s *Session) SendBreak(d time.Duration) error { return s.port.Break(d) }
 
 // ListPorts returns available serial port device paths (e.g. "COM3" on
 // Windows, "/dev/ttyUSB0" on Linux), for a future port-picker UI.

@@ -2,7 +2,7 @@
 
 Xpecter is a desktop terminal for people who spend the day on remote machines and network hardware. One window holds SSH sessions, local shells, serial consoles, Telnet and Mosh, saved Remote Desktop and VNC sessions, a code editor that works on local and remote files, and a handful of network tools. It runs the same way on Windows, macOS and Linux.
 
-This guide covers everything the app does and how to use it, as of v3.4.0. It is written for someone who has never opened Xpecter. If you only want the short version, read [At a glance](#at-a-glance) and [Your first connection](#your-first-connection).
+This guide covers everything the app does and how to use it, as of v3.8.0. It is written for someone who has never opened Xpecter. If you only want the short version, read [At a glance](#at-a-glance) and [Your first connection](#your-first-connection).
 
 ---
 
@@ -244,20 +244,30 @@ Create folders from Sessions > New Folder or the 📁 button. Folders nest. Drag
 
 Pinned sessions sit at the top of the sidebar and lead the Home tab, so the machines you reach for every day are one click away on a cold start.
 
+### Layouts
+
+Sessions > **Save Tab Set as Layout…** saves the tabs that are open, with their splits and what is in each pane, under a name. Sessions > **Open Layout…** and the **Layouts** section on Home reopen one, connecting each pane again; the Home cards also rename (✎) and delete (✕). A layout stores what is needed to start each thing, never a password or output, and travels with an exported configuration.
+
 ### Tags
 
 The Edit session dialog takes comma-separated tags. Tags are trimmed and de-duplicated, and both the sidebar filter and Quick connect search them.
 
+A tag can carry a colour. **Settings > Tag colours** lists them: `prod` and `production` start red, `staging` orange, `dev`, `lab` and `test` green, and any tag can be added, recoloured or removed. A session with a coloured tag shows it as a pill in the sidebar, on its tab and on its pane header, so a terminal on a production box says so in the corner of your eye.
+
+A tag can also be a **guard**; `prod` and `production` are, by default. In a session with a guarded tag every multi-line paste and every command snippet asks first, whatever the paste warning is set to, and the prompt names the tag and the session. Ordinary typing is never interrupted.
+
 ### The Edit session dialog
 
-Right-click > Edit session. **Basic settings** has the name and the fields for the session's type. **Advanced settings** adds the key path, both agent options, device kind, jump host, terminal speed, RDP display options, the folder, and tags.
+Right-click > Edit session. **Basic settings** has the name and the fields for the session's type. **Advanced settings** adds the key path, both agent options and **Forward the agent to the host** (see Agent forwarding), device kind, jump host, terminal speed, RDP display options, the folder, tags, and the **Port forwards** the session starts with (see Port forwarding).
 
 ### Importing sessions
 
 - **Settings > Import from MobaXterm…** reads `.mxtsessions` and `.ini` files, mapping names, hosts, users, ports and key paths. Passwords are deliberately skipped.
 - **Settings > Import from SSH config…** reads an OpenSSH `~/.ssh/config` and saves each concrete `Host` block as a session, carrying HostName, User, Port, IdentityFile and ProxyJump (which lands in the jump-host field). Wildcard-only blocks such as `Host *` are rules rather than hosts and are skipped.
 
-Both report how many sessions were imported.
+- **Settings > Import from PuTTY…** (Windows) reads PuTTY's saved sessions from the registry: host, port, user, key file, agent settings, X11, a proxy of the SSH-jump kind, and serial sessions with their line and speed. Telnet, rlogin and raw sessions are skipped, as is Default Settings. PuTTY stores no passwords, so none are imported, and a key in PuTTY's own .ppk format is left out because Xpecter reads OpenSSH keys: that session is set to use the agent, so run Pageant, or convert the key in PuTTYgen (Conversions > Export OpenSSH key) and set its path in the Edit session dialog.
+
+All three report how many sessions were imported.
 
 ### Local shells and Folders sections
 
@@ -271,6 +281,8 @@ Both report how many sessions were imported.
 
 **Colorize terminal output** (on by default) colors plain output the way an operator reads it: words that mean something worked, failed or wants attention; interface names in long and short forms; IPv4, IPv6 and MAC addresses with prefix lengths; `%FACILITY-severity-MNEMONIC` log tags; URLs; Windows and POSIX paths; ISO-8601, syslog and IOS timestamps; sizes, rates, percentages and hex. It works the same on Linux hosts, switches, PowerShell, Command Prompt and serial consoles. Text the far end already colored is left exactly as sent, so prompts, pagers and vim are never recolored.
 
+**Your own rules.** Settings > **Highlight rules** adds patterns of your own, each with one of the built-in colour categories. A **words** rule is a comma-separated list matched whole (`CRIT, DOWN, c++`); a **regex** rule is a regular expression. Your rules win over the built-in ones where they overlap, apply to every terminal at once, and persist between launches.
+
 ### Links
 
 Hover a URL in output to underline it and see where it goes. **Ctrl+click** (Cmd+click on macOS) opens it in your browser. A plain click never opens anything, so finishing a selection cannot launch a browser.
@@ -278,6 +290,10 @@ Hover a URL in output to underline it and see where it goes. **Ctrl+click** (Cmd
 ### Find in output
 
 **Ctrl+Shift+F**, or Terminal > **Find in Output…**, opens a find bar over the focused terminal. Every match in the scrollback is highlighted and the current one is counted; Enter and Shift+Enter step through them, **Aa** matches case, **.\*** reads the text as a regular expression, and Escape returns to the prompt. The bar starts with whatever was selected in the terminal.
+
+### Send input to all panes
+
+View > **Send Input to All Panes**, or the ⇶ button on any pane header, makes a split tab broadcast: what you type or paste into one pane goes to every terminal pane in the tab, so the same command runs on four switches at once. The pane headers show it while it is on, and the same command turns it off. Broadcasting is per tab and is off for every new tab. Pastes and snippets still go through the paste guard, once.
 
 ### Scrollback
 
@@ -296,6 +312,10 @@ Terminals keep 10,000 lines by default. Change it in Settings, from 1,000 to 100
 ### Zoom and fullscreen
 
 Ctrl+= and Ctrl+- zoom the focused terminal's font, Ctrl+0 resets it. F11 toggles fullscreen.
+
+### Serial console controls
+
+A serial session has a bar between its header and the terminal. **Enter sends** picks CR, LF or CR+LF, since a switch wants CR while some devices insist on both. **Local echo** shows what you type on a device that does not echo it. **DTR** and **RTS** toggle the two modem-control lines, **Break** holds the line in break for a quarter second, and **Hex** shows what arrives as a hex dump beside the text of the bytes, for the moments when the terminal is making a mess of a binary stream. The bar's choices apply to pastes as well as typing.
 
 ### Saving output and logging
 
@@ -340,6 +360,7 @@ Click the folder button on the document strip, then **Open Folder…**. The fold
 - **Delete.** Every row has a delete action, and the open file can be deleted from the palette. Nothing goes to a recycle bin, so the confirmation names the full path and, for a folder, counts what is going with it. An unmodified buffer on a deleted file closes; a buffer with unsaved changes stays open, because it is now the only copy.
 - **Resize.** Drag the tree's edge to give long filenames room; double-click the edge to reset. The width is one setting shared by every pane and remembered between launches.
 - **It keeps up.** A file added to an open folder by anything else, a build, a download, a shell in the next pane, appears on its own. Only the folders on screen are watched, so a collapsed busy directory costs nothing.
+- **Find in files.** The 🔍 button on the tree header, **Ctrl+Shift+F** with the caret in the editor, or **Find in Files…** in the palette searches the whole folder for text or a regular expression, matching case or not. Results take the tree's place, grouped by file with the line number and the matching line; click one to open the file at that line. Version-control folders, `node_modules`, build output, files over 2 MB and binary files are skipped, and a search stops early after a thousand hits and says so. Escape brings the tree back.
 - **Show in File Explorer.** The tree header has a button (⧉) that opens the folder in your system's file manager: File Explorer on Windows, Finder on macOS, whatever the desktop uses on Linux. Right-click any row for the same action: a folder opens as itself, a file opens its folder with the file selected. The same command is on the folder menu, on a document tab's right-click menu, in the command palette, and on each pinned folder in the sidebar.
 
 The folder menu also has **Refresh folder**, **Show in File Explorer**, **Close folder**, **Pin this folder to the sidebar**, and a list of pinned folders to jump between.
@@ -399,13 +420,17 @@ With an SSH session focused, the sidebar's **Remote files** section shows that h
 
 - **Navigate** by clicking folders; `📁 ..` goes up.
 - **Open** a file by clicking it. It opens in an editor pane, and Ctrl+S writes it back to the host. PDFs and images open in Xpecter's viewers straight from the host.
+- **Save as root.** When Ctrl+S is refused because your login cannot write the file, Xpecter offers to save it through `sudo`: the buffer goes to a temporary file on the host and one sudo command copies it over the original, keeping the file's owner and mode. The dialog asks for the sudo password, prefilled with the session's own where it is known, and shows sudo's own complaint if it refuses.
 - **Shift-click or middle-click** a file to open it with the system's default application instead. Xpecter downloads a private temporary copy, preserving its timestamp, and hands it to the platform handler.
+- **Edit externally.** A file's ✎↗ action downloads it and opens it in the system's default application for that kind of file. Xpecter keeps watching the copy, and every save there is uploaded straight back to the host, with a note in the status bar each time. The copy is removed when the session closes.
 - **Upload** by dragging files from your desktop or file manager onto the list, or with the header's ⤒ button, which opens a file dialog and streams each file from disk with a progress bar under the list. Either way the remote file keeps the local modification time where the server supports it.
 - **Download** a file with its ⤓ action, which asks where to save it. A folder's ⤓ downloads the whole folder, into a place you choose, as a folder of the same name; a folder already there by that name is refused rather than merged into. Progress shows under the list, and a finished download says where it went. Every file lands under a temporary name and is renamed when complete, so a download cut short never leaves a truncated file wearing the real name.
 - **Create** a file or folder in the current directory from the header, or inside any folder row. A new file opens for editing straight away.
 - **Rename** any row in place. A taken name is refused rather than overwritten. Renaming an open file retargets its buffer.
 - **Delete** any file or directory. SFTP has no trash and it is somebody else's machine, so the dialog says so and counts what a directory holds before you confirm.
 - The list **re-reads itself** on a slower clock than the local tree, so a file written by the session in the terminal beside it shows up without a manual refresh. It pauses when the section is closed, the window is in the background, or the browser is pointed at a host that is not the focused tab.
+
+**Following the shell.** With **Follow the shell's directory** on (Settings > Terminal, on by default), the list follows the directory the shell's prompt is in, provided the shell announces it. Most do not out of the box: View > **Shell Integration…** shows the one line to add to `.bashrc`, `.zshrc` or fish's config, with a Copy button for each. It is the standard OSC 7 escape, which other terminals read too.
 
 Dragging a file out of the list onto the desktop is not something the window can do; the ⤓ action is the download.
 
@@ -415,9 +440,19 @@ Dragging a file out of the list onto the desktop is not something the window can
 
 ### Port forwarding
 
-Tools > **Port forwarding…** binds a local port and tunnels it through a live SSH session to a `host:port` reachable from the far side, so a remote service is reachable as if it were local. Pick the session in **Through:**, enter the local port, remote host and remote port, and click **Add forward**. Active forwards are listed as `localhost:port → host:port via session`, each with a stop action. A forward lives as long as its session and is torn down with it. Terminal > **New Local Port Forward…** does the same thing through a series of prompts.
+Tools > **Port forwarding…** starts a tunnel through a live SSH session. Pick the session in **Through:**, the kind, and the addresses, and click **Add forward**. Three kinds:
 
-Only local forwards (the `-L` kind) exist today. Remote and dynamic SOCKS forwards are not yet available.
+- **Local port →** binds `127.0.0.1:port` here and tunnels it to a `host:port` reachable from the far side, so a remote service is reachable as if it were local (`ssh -L`).
+- **SOCKS proxy on** binds a local port as a SOCKS5 proxy. Point a browser or any SOCKS-aware program at it and its connections leave from the host, so the whole far network is reachable (`ssh -D`).
+- **Host port →** asks the host to listen on a port and delivers each connection to an address here (`ssh -R`). Whether that port is reachable from beyond the host itself is the server's `GatewayPorts` setting.
+
+Active forwards are listed with a stop action. A forward lives as long as its session and is torn down with it. Terminal > **New Local Port Forward…** does the local kind through a series of prompts.
+
+**Saved with the session.** The 📌 action beside a forward adds it to the saved session it runs through, and the Edit session dialog's **Port forwards** list edits the set directly. Saved forwards start on their own every time the session connects, and one that cannot start (its port is taken, most often) is reported on the terminal without failing the connection.
+
+### Agent forwarding
+
+Tick **Forward the agent to the host** on a session that authenticates with your SSH agent, and programs on the host can use your local keys: `git pull` from a private repository, or a second hop to a machine behind it. Forwarding is requested when the shell starts; if the host refuses it, the session says so on the terminal and carries on without it. Turn it on only for hosts you trust, since root on that host can use your agent while the session is open.
 
 ### Network tools
 
@@ -464,6 +499,9 @@ Settings is one scrolling dialog. Everything here persists between launches.
 | Show tab numbers | Off |
 | SSH keepalive (prevent idle disconnects) | On |
 | Keep app open when last tab closes | Off |
+| Cursor style (block, underline, bar) | Block |
+| Cursor blink | Off |
+| Follow the shell's directory in Remote files | On |
 
 **Clipboard & paste**
 
@@ -482,9 +520,13 @@ Settings is one scrolling dialog. Everything here persists between launches.
 
 Turning keychain saving off forgets every saved password.
 
+**Highlight rules**: patterns of your own for output highlighting, each with a colour category. See Output highlighting.
+
+**Tag colours**: the colour and the guard for each tag. See Tags.
+
 **Session logging**: Log directory (Choose…), and Disable session logging once one is set. Off until a directory is chosen.
 
-**Configuration**: Export configuration…, Import configuration…, Export encrypted configuration…, Import encrypted configuration…, Import from MobaXterm…, Import from SSH config…, Restore from backup…, Reset appearance settings to defaults, Erase all saved data…. See the next two sections.
+**Configuration**: Export configuration…, Import configuration…, Export encrypted configuration…, Import encrypted configuration…, Import from MobaXterm…, Import from SSH config…, Import from PuTTY…, Restore from backup…, Reset appearance settings to defaults, Erase all saved data…. See the next two sections.
 
 **About**: the version, and Check for updates….
 
@@ -510,6 +552,8 @@ View > **Keyboard Shortcuts…** lists every binding. Click one to rebind it, pr
 
 **Panes**: Alt+Arrow moves focus between panes.
 
+**Tabs** (fixed): Ctrl+Tab and Ctrl+Shift+Tab step to the next and previous tab; Ctrl+1 to Ctrl+8 jump to that tab and Ctrl+9 to the last one.
+
 **Editor** (fixed, active when an editor pane has the caret)
 
 | Action | Keys |
@@ -517,6 +561,7 @@ View > **Keyboard Shortcuts…** lists every binding. Click one to rebind it, pr
 | New file / Open file / Save / Save as / Close file | Ctrl+N / Ctrl+O / Ctrl+S / Ctrl+Shift+S / Ctrl+W |
 | Go to file / Command palette / All editor commands | Ctrl+P / Ctrl+Shift+P / F1 |
 | Find / Replace / Go to line | Ctrl+F / Ctrl+H / Ctrl+G |
+| Find in files | Ctrl+Shift+F |
 | Next / previous document | Ctrl+PageDown / Ctrl+PageUp |
 | Toggle word wrap | Alt+Z |
 
@@ -589,7 +634,7 @@ If you turn on **Remember SSH passwords in the OS keychain**, a saved SSH sessio
 - **Telnet and Mosh** run your system's `telnet` and `mosh` clients, which must be installed.
 - **X11 forwarding** needs a local X server running.
 - **Remote Desktop and VNC** are drawn by the platform's own client, not inside the Xpecter window. The client must be installed (on Linux, FreeRDP or Remmina; a VNC viewer on every platform).
-- **Port forwarding** is local (`-L`) only. Remote and dynamic SOCKS forwards are planned.
+- **ZMODEM** transfers (`sz`/`rz` over the terminal) are not supported; the SFTP browser and its transfer actions are the way to move files. Font ligatures are not rendered either.
 - **No drag-and-drop download** from the remote browser yet; upload only.
 - **Windows shells** need Windows 10 1809 or newer.
 - **Detachable tabs and multiple windows** are limited; Terminal > New Window opens a second app window, but tabs cannot be dragged between windows.
@@ -599,4 +644,4 @@ If you turn on **Remember SSH passwords in the OS keychain**, a saved SSH sessio
 
 ## Reporting problems
 
-Xpecter is developed in the open at [github.com/angjones3005/Xpecter](https://github.com/angjones3005/Xpecter). If something breaks, feels missing, or works differently from what you expected, open an issue there. "This crashed" and "I wish X worked like Y" are both useful. Include your platform, the Xpecter version from Settings > About, and what kind of session you were in.
+Xpecter is developed in the open at [github.com/angjones3005/Xpecter](https://github.com/angjones3005/Xpecter). If something breaks, feels missing, or works differently from what you expected, open an issue there. "This crashed" and "I wish X worked like Y" are both useful. Include your platform, the Xpecter version from Settings > About, and what kind of session you were in. View > **Open Log Folder** opens the folder holding `xpecter.log`, which records connections, transfers and any error the window caught; attach it when something went wrong without an explanation.

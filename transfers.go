@@ -92,9 +92,11 @@ func (r *transferReporter) finish(err error) {
 	if err != nil {
 		r.p.State = "failed"
 		r.p.Error = err.Error()
+		logf("transfer", "%s of %s failed: %v", r.p.Direction, r.p.Name, err)
 	} else {
 		r.p.State = "done"
 		r.p.Done = r.p.Total
+		logf("transfer", "%s of %s done (%d bytes)", r.p.Direction, r.p.Name, r.p.Total)
 	}
 	r.emit()
 }

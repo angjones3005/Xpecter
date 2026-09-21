@@ -61,7 +61,11 @@ type Config struct {
 	Passphrase    string
 	UseAgent      bool
 	InternalAgent bool
-	X11           bool
+	// ForwardAgent asks the host to forward the agent this connection
+	// authenticated with (ssh's -A), so a key kept on this machine
+	// answers on the next hop. Needs UseAgent; ignored otherwise.
+	ForwardAgent bool
+	X11          bool
 	// IgnoreKeyPermWarning skips the KeyPermissionWarning check below,
 	// set only after the user has explicitly acknowledged it once
 	// (SPE-65). Xpecter didn't create the user's key file, so this is a
@@ -92,6 +96,11 @@ type Session struct {
 	id        string
 	client    *ssh.Client
 	agentConn net.Conn
+	// forwardAgent is Config.ForwardAgent carried to StartShell, where
+	// the request is made; agentForwardNote is what went wrong with it,
+	// if anything, for the caller to show rather than fail over.
+	forwardAgent     bool
+	agentForwardNote string
 	// sess and stdin exist once StartShell has run. They are written
 	// there and read by Write, Resize and Close, each of which arrives
 	// on its own goroutine, so they are guarded.
@@ -676,6 +685,7 @@ func Dial(cfg Config) (*Session, error) {
 	sess := &Session{
 		id: idgen.New(), client: client, agentConn: agentConn,
 		usedLegacyCompat: usedLegacyCompat, termSpeed: cfg.TerminalSpeed, jumpClient: jump,
+		forwardAgent: cfg.ForwardAgent && agentConn != nil,
 	}
 	if !cfg.DisableKeepalive {
 		go sess.keepaliveLoop()
@@ -905,6 +915,11 @@ func (s *Session) probe() probeResult {
 func (s *Session) ID() string             { return s.id }
 func (s *Session) SSHClient() *ssh.Client { return s.client }
 
+// AgentForwardNote is what StartShell has to say about agent
+// forwarding: "" when it was not asked for or was set up, otherwise
+// why it is not in effect.
+func (s *Session) AgentForwardNote() string { return s.agentForwardNote }
+
 // StartShell opens an interactive shell on the session. onData streams
 // output as it arrives; onClose fires exactly once, when the read loop
 // stops for any reason (clean remote close, network drop, or a
@@ -952,6 +967,17 @@ func (s *Session) StartShell(cols, rows int, onData func([]byte), onClose func(C
 	if err != nil {
 		_ = sess.Close()
 		return err
+	}
+	// Agent forwarding is asked for before the shell starts, the way
+	// ssh -A does it. A refusal is not a reason to have no shell: the
+	// note is kept for the caller to show, and the session carries on
+	// without forwarding.
+	if s.forwardAgent {
+		if err := agent.ForwardToAgent(s.client, agent.NewClient(s.agentConn)); err != nil {
+			s.agentForwardNote = "Agent forwarding is not available on this connection: " + err.Error()
+		} else if err := agent.RequestAgentForwarding(sess); err != nil {
+			s.agentForwardNote = "The host refused agent forwarding: " + err.Error()
+		}
 	}
 	if err := sess.Shell(); err != nil {
 		_ = sess.Close()

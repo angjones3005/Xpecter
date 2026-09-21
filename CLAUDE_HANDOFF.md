@@ -23,6 +23,22 @@ The next product phase should focus on:
 
 Turn Xpecter from a working utility into a tool people want to keep open all day.
 
+## Status as of v3.8.0 (2026-09-21)
+
+What has shipped against this backlog since it was written, by item:
+
+1. Session workflow ergonomics: session restore on launch (tabs, panes, editors, shells, consoles), named layouts, the pane-fill menu, send input to all panes, forwards and agent forwarding saved with a session, PuTTY import alongside MobaXterm and SSH config.
+2. Visual system: one dialog definition and one compact control style everywhere, tag colours on tabs, pane headers and sidebar rows, cursor style and blink settings.
+3. Home experience: pinned and recent sessions, Quick connect, the restore offer, saved layouts as cards, the shortcut strip.
+4. Keyboard-first: Ctrl+Tab and Ctrl+1 to 9 tab switching, Alt+Arrow pane focus, find in output (Ctrl+Shift+F), find in files, rebindable shortcuts.
+5. Search and recall: the sidebar filter over name, host, port and tags; Quick connect search; find in output; find in files; recent sessions.
+6. Settings: a grouped dialog with risky options separated; highlight rules and tag colours as their own groups; import, export, encrypted bundles, backups and reset in one place.
+7. Terminal smoothness: bracketed paste, paste line delay, activity and bell markers with OS notifications, custom highlight rules, serial console controls (line ending, local echo, DTR and RTS, break, hex view).
+8. Recovery and error clarity: the Session stopped panel with reconnect, save and close; the application log (View > Open Log Folder); agent-forwarding and saved-forward failures reported on the terminal instead of failing the connection; the production tag guard on pastes and snippets.
+9. Remote file editing: downloads and uploads with progress, edit externally with upload on every save, save as root through sudo, the browser following the shell via OSC 7 with a Shell Integration dialog.
+
+Still open from the original direction: detected serial ports as a dropdown, tabs between windows, drag-out downloads from the remote browser, ZMODEM (needs a binary-safe terminal path), font ligatures (the addon is not usable in the WebView). Ticket ids in code are SPE-nnn; the highest cited is SPE-132.
+
 ## Backlog
 
 ### 1) Improve session workflow ergonomics

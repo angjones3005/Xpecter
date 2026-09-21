@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 )
@@ -347,4 +348,69 @@ func TestImportMergeRepointsGroupLinksAfterReroll(t *testing.T) {
 			t.Errorf("group id %q appears %d times", id, n)
 		}
 	}
+}
+
+// A named layout travels with the rest of the configuration: exported,
+// replaced, merged with a fresh id when it collides, and cleared by a
+// reset. Its snapshot is opaque to this package and must come back
+// byte for byte.
+func TestLayoutsRoundTripThroughBundles(t *testing.T) {
+	isolateConfig(t)
+	snapshot := json.RawMessage(`{"version":1,"tabs":[{"label":"rack","panes":[{"kind":"local","shell":"pwsh.exe","dir":""}]}]}`)
+	if err := SaveLayouts([]Layout{{ID: "lay-1", Name: "Lab rack", Snapshot: snapshot}}); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := ExportBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Layouts) != 1 || compactJSON(t, bundle.Layouts[0].Snapshot) != compactJSON(t, snapshot) {
+		t.Fatalf("exported layouts = %+v", bundle.Layouts)
+	}
+
+	// Merging the export back in collides on the id and keeps both.
+	if err := ImportBundle(bundle, ImportMerge); err != nil {
+		t.Fatal(err)
+	}
+	layouts, err := LoadLayouts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(layouts) != 2 || layouts[0].ID == layouts[1].ID {
+		t.Fatalf("after merge: %+v", layouts)
+	}
+
+	// Replacing installs exactly the bundle's one.
+	if err := ImportBundle(bundle, ImportReplace); err != nil {
+		t.Fatal(err)
+	}
+	layouts, err = LoadLayouts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(layouts) != 1 || layouts[0].Name != "Lab rack" || compactJSON(t, layouts[0].Snapshot) != compactJSON(t, snapshot) {
+		t.Fatalf("after replace: %+v", layouts)
+	}
+
+	if _, err := ResetAll(); err != nil {
+		t.Fatal(err)
+	}
+	layouts, err = LoadLayouts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(layouts) != 0 {
+		t.Fatalf("after reset: %+v", layouts)
+	}
+}
+
+// The snapshot is stored indented like every other config file, so it
+// is compared by content rather than by bytes.
+func compactJSON(t *testing.T, raw json.RawMessage) string {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
 }

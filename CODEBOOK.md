@@ -49,8 +49,9 @@ The frontend has unit tests too (`npm test` in `frontend/`, Vitest),
 for the pure pieces that were pulled out of `main.ts` so they could be
 tested: ANSI colour-state reading (`ansi.ts`), shell quoting
 (`shellquote.ts`), the Markdown task-marker scan (`markdown.ts`),
-paste line splitting (`paste.ts`) and the saved-workspace format
-(`workspace.ts`).
+paste line splitting (`paste.ts`), the saved-workspace format
+(`workspace.ts`), tag colours and guards (`tags.ts`), custom highlight
+rules (`highlightrules.ts`) and the OSC 7 and hex-dump helpers (`osc.ts`).
 `check.ps1` and CI run them between eslint and the Vite build. Anything
 that touches the DOM stays in `main.ts` and is exercised in the running
 app instead.
@@ -92,7 +93,7 @@ build artifact. Run `npm run build` in `frontend/` first.
 
 CI works around this by scoping its Go job to `./backend/...`, which has
 the side effect that **the root package's own tests never run in CI**.
-`app_test.go` is only exercised locally, by `scripts/check.ps1`.
+The root package's tests (`app_test.go`, `forwards_test.go`, `putty_test.go`, `search_test.go`, `sudosave_test.go` and the rest) are only exercised locally, by `scripts/check.ps1`.
 
 ### `./...` walks into `frontend/node_modules`
 

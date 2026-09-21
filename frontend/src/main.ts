@@ -17,6 +17,9 @@ import { quoteForShell } from './shellquote';
 import { chunkPasteLines, countPasteLines, normalizePasteNewlines } from './paste';
 import { describeWorkspace, parseWorkspaceSnapshot, WORKSPACE_STORAGE_KEY, type PaneSpec, type TabSpec, type WorkspaceSnapshot } from './workspace';
 import { SearchAddon } from '@xterm/addon-search';
+import { isGuarded, normaliseTag, parseTagStyles, serializeTagStyles, tagStyleFor, TAG_STYLES_STORAGE_KEY, type TagStyles } from './tags';
+import { compileCustomRule, parseCustomRules, CUSTOM_RULE_CATEGORIES, HIGHLIGHT_RULES_STORAGE_KEY, type CustomHighlightRule } from './highlightrules';
+import { hexDump, parseOsc7 } from './osc';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import JsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
 import CssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker';
@@ -45,7 +48,7 @@ import '@fontsource/victor-mono/400.css';
 import '@fontsource/victor-mono/700.css';
 import '@fontsource/ubuntu-mono/400.css';
 import '@fontsource/ubuntu-mono/700.css';
-import type { RemoteFile, LocalFile, Folder, ConnectRequest, SessionProfile, SessionGroup, SessionClosedEvent, Settings, UpdateInfo, LocalShellProfile, RDPLaunch, VNCLaunch, TransferProgress } from '../wailsjs.d.ts';
+import type { RemoteFile, LocalFile, Folder, ConnectRequest, SessionProfile, SessionGroup, SessionClosedEvent, Settings, UpdateInfo, LocalShellProfile, RDPLaunch, VNCLaunch, TransferProgress, SavedForward, Layout as SavedLayout, SearchResult, SearchHit } from '../wailsjs.d.ts';
 
 
 // The app was renamed from Specter to Xpecter, and every localStorage
@@ -1734,6 +1737,19 @@ interface Session {
   // the next launch. Never carries a password. null until connected,
   // and always null for an editor, whose state is read off the pane.
   origin: PaneSpec | null;
+  // The console controls of a serial session (line ending, local echo,
+  // the DTR and RTS lines, hex view); null for every other kind.
+  serial: SerialOptions | null;
+}
+
+// What the serial bar under a console's header drives.
+interface SerialOptions {
+  eol: 'CR' | 'LF' | 'CRLF';
+  localEcho: boolean;
+  dtr: boolean;
+  rts: boolean;
+  hex: boolean;
+  hexOffset: number;
 }
 
 // A split pane alongside a tab's primary session. Same shape as
@@ -1764,6 +1780,9 @@ interface Tab extends Session {
   splitX: number;
   splitY: number;
   isHome: boolean;
+  // Typed input goes to every pane of the tab, not just the focused
+  // one: the same command on four switches at once.
+  broadcast: boolean;
 }
 
 const tabs = new Map<string, Tab>();
@@ -1776,6 +1795,32 @@ let workspacePersistTimer: ReturnType<typeof setTimeout> | null = null;
 // declined. While it stands, an empty tab set does not overwrite it.
 let pendingWorkspaceRestore: WorkspaceSnapshot | null = null;
 let restoringWorkspace = false;
+
+// Saved sessions by id, refreshed whenever the sidebar or Home lists
+// them, so a live session can be asked about its profile's tags and
+// forwards without another round trip.
+let profilesById = new Map<string, SessionProfile>();
+const tagStyles: TagStyles = parseTagStyles(localStorage.getItem(TAG_STYLES_STORAGE_KEY));
+const customHighlightRules: CustomHighlightRule[] = parseCustomRules(localStorage.getItem(HIGHLIGHT_RULES_STORAGE_KEY));
+let cursorStyleSetting: 'block' | 'underline' | 'bar' = (() => {
+  const stored = localStorage.getItem('xpecter-cursor-style');
+  return stored === 'underline' || stored === 'bar' ? stored : 'block';
+})();
+let cursorBlinkEnabled = localStorage.getItem('xpecter-cursor-blink') === 'on';
+let followShellDirEnabled = localStorage.getItem('xpecter-follow-shell-dir') !== 'off';
+
+function profileFor(session: Session): SessionProfile | undefined {
+  return session.sessionProfileId ? profilesById.get(session.sessionProfileId) : undefined;
+}
+
+function isSessionGuarded(session: Session): boolean {
+  return isGuarded(profileFor(session)?.tags, tagStyles);
+}
+
+function guardTagOf(session: Session): string {
+  const tags = profileFor(session)?.tags ?? [];
+  return tags.find((tag) => tagStyles[normaliseTag(tag)]?.guard) ?? 'guarded';
+}
 let activeTabId: string | null = null;
 let tabCounter = 0;
 
@@ -1810,6 +1855,7 @@ function createPendingTab(): Tab {
     hasActivity: false,
     bellPending: false,
     origin: null,
+    serial: null,
     layout: 'single',
     extraPanes: [],
     focusedPaneIndex: 0,
@@ -1817,6 +1863,7 @@ function createPendingTab(): Tab {
     splitX: 0.5,
     splitY: 0.5,
     isHome: false,
+    broadcast: false,
   };
   tabs.set(tab.id, tab);
   return tab;
@@ -1851,6 +1898,47 @@ function paneIndexOf(tab: Tab, session: Session): number {
 // addition, not a safety/correctness feature, so it follows the
 // opt-in convention rather than the default-on one.
 let showTabNumbersEnabled = localStorage.getItem('xpecter-show-tab-numbers') === 'on';
+
+// The tag colour a tab wears: that of the first of its sessions to have
+// a styled tag.
+function tabTagStyle(tab: Tab): { tag: string; style: { colour: string; guard: boolean } } | null {
+  for (const session of allSessions(tab)) {
+    const styled = tagStyleFor(profileFor(session)?.tags, tagStyles);
+    if (styled) return styled;
+  }
+  return null;
+}
+
+// Ctrl+Tab and Ctrl+Shift+Tab walk the tabs; Ctrl+1 to Ctrl+9 jump to
+// one, with 9 meaning the last, the way every browser reads it. Handled
+// wherever the keystroke lands, since none of these mean anything to a
+// shell or to Monaco.
+function tabSwitchShortcut(e: KeyboardEvent): boolean {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey) return false;
+  if (e.key === 'Tab') {
+    switchTabByOffset(e.shiftKey ? -1 : 1);
+    return true;
+  }
+  if (e.shiftKey) return false;
+  const digit = Number(e.key);
+  if (!Number.isInteger(digit) || digit < 1 || digit > 9) return false;
+  switchToTabNumber(digit);
+  return true;
+}
+
+function switchTabByOffset(delta: number) {
+  const ids = Array.from(tabs.keys());
+  if (ids.length < 2 || !activeTabId) return;
+  const index = ids.indexOf(activeTabId);
+  switchToTab(ids[(index + delta + ids.length) % ids.length]);
+}
+
+function switchToTabNumber(n: number) {
+  const ids = Array.from(tabs.keys());
+  if (ids.length === 0) return;
+  const id = n === 9 ? ids[ids.length - 1] : ids[n - 1];
+  if (id && id !== activeTabId) switchToTab(id);
+}
 
 function renderTabBar() {
   // Every change to the tab set passes through here, which makes it the
@@ -1908,6 +1996,16 @@ function renderTabBar() {
     const label = document.createElement('span');
       label.textContent = tab.isHome ? '⌂ Home' : tab.mode === 'editor' ? editorTabLabel(tab) : (tab.mode === 'local' ? '💻 ' : tab.mode === 'ssh' ? '🌐 ' : tab.mode === 'serial' ? '🔌 ' : tab.mode === 'rdp' ? '🪟 ' : tab.mode === 'vnc' ? '🖥 ' : '') + tab.label + editorDirtyMarker(tab);
     el.appendChild(label);
+
+    const tagged = tabTagStyle(tab);
+    if (tagged) {
+      const pill = document.createElement('span');
+      pill.className = 'tab-tag';
+      pill.style.background = tagged.style.colour;
+      pill.textContent = tagged.tag.toUpperCase();
+      pill.title = `Tagged ${tagged.tag}`;
+      el.appendChild(pill);
+    }
 
     // Something happened in a tab that is not the one on screen: a
     // dot for output, a bell for the bell. Cleared by looking at it.
@@ -2066,7 +2164,7 @@ async function closeSessionBackend(s: Session) {
     // down with the session rather than left as a dead open port.
     await stopForwardsForSession(s.backendId);
     await tellBackend(() => App.CloseSSH(s.backendId!));
-    runtime.EventsOff('ssh:data:' + s.backendId, 'ssh:closed:' + s.backendId);
+    runtime.EventsOff('ssh:data:' + s.backendId, 'ssh:closed:' + s.backendId, 'ssh:notice:' + s.backendId);
   }
   if (s.mode === 'local' && s.backendId) {
     await tellBackend(() => App.CloseLocalTerminal(s.backendId!));
@@ -2163,7 +2261,11 @@ async function closePane(tab: Tab, paneIndex: number) {
   }
   await closeSessionBackend(pane);
   tab.extraPanes.splice(paneIndex - 1, 1);
-  if (tab.extraPanes.length === 0) tab.layout = 'single';
+  if (tab.extraPanes.length === 0) {
+    tab.layout = 'single';
+    // Nothing left to broadcast to; a later split starts quiet.
+    setBroadcast(tab, false);
+  }
   if (tab.focusedPaneIndex >= tab.extraPanes.length + 1) {
     tab.focusedPaneIndex = tab.extraPanes.length;
   }
@@ -2205,6 +2307,7 @@ function createEmptyPane(tab: Tab): Pane {
     hasActivity: false,
     bellPending: false,
     origin: null,
+    serial: null,
   };
 }
 
@@ -2301,6 +2404,28 @@ function buildPaneHeader(session: Session, tab: Tab): HTMLDivElement {
   labelEl.className = 'pane-header-label';
   labelEl.textContent = session.label;
   header.appendChild(labelEl);
+  // The colour of the session's first coloured tag, and its name, so a
+  // pane on a prod box says so on the pane itself.
+  const tagged = tagStyleFor(profileFor(session)?.tags, tagStyles);
+  if (tagged) {
+    header.classList.add('tagged');
+    header.style.setProperty('--tag-colour', tagged.style.colour);
+    const pill = document.createElement('span');
+    pill.className = 'pane-tag';
+    pill.style.background = tagged.style.colour;
+    pill.textContent = tagged.tag.toUpperCase() + (tagged.style.guard ? ' ⚠' : '');
+    pill.title = tagged.style.guard ? `Tagged ${tagged.tag}: pastes and snippets ask first` : `Tagged ${tagged.tag}`;
+    header.appendChild(pill);
+  }
+  const broadcastEl = document.createElement('span');
+  broadcastEl.className = 'pane-broadcast' + (tab.broadcast ? ' on' : '');
+  broadcastEl.textContent = '⇶';
+  broadcastEl.title = 'Send input to all panes in this tab';
+  broadcastEl.onclick = (e) => {
+    e.stopPropagation();
+    toggleBroadcast(tab);
+  };
+  header.appendChild(broadcastEl);
   const closeEl = document.createElement('span');
   closeEl.className = 'pane-header-close';
   closeEl.textContent = '\u2715';
@@ -2667,9 +2792,51 @@ function setupCustomScrollbar(session: Session) {
 let warnMultilinePasteEnabled = localStorage.getItem('xpecter-warn-multiline-paste') !== 'off';
 
 function writeToSession(session: Session, data: string) {
-  if (session.mode === 'local' && session.backendId) App.WriteLocalTerminal(session.backendId, data);
-  if (session.mode === 'ssh' && session.backendId) App.WriteSSH(session.backendId, data);
-  if (session.mode === 'serial' && session.backendId) App.WriteSerial(session.backendId, data);
+  if (!session.backendId) return;
+  if (session.mode === 'serial') {
+    // The serial bar's line ending and local echo apply to everything
+    // typed or pasted into a console.
+    const options = session.serial;
+    if (options) {
+      if (options.eol !== 'CR') data = data.replace(/\r/g, options.eol === 'LF' ? '\n' : '\r\n');
+      if (options.localEcho) session.term?.write(data.replace(/\r\n?|\n/g, '\r\n'));
+    }
+    App.WriteSerial(session.backendId, data);
+    return;
+  }
+  if (session.mode === 'local') App.WriteLocalTerminal(session.backendId, data);
+  if (session.mode === 'ssh') App.WriteSSH(session.backendId, data);
+}
+
+// The sessions a keystroke or a paste into session reaches: itself,
+// or every live terminal pane of its tab while the tab is broadcasting.
+function inputTargets(session: Session): Session[] {
+  const tab = tabs.get(session.ownerTabId);
+  if (!tab?.broadcast) return [session];
+  if (tab.extraPanes.length === 0) {
+    // Un-split since it was switched on: it is off again.
+    setBroadcast(tab, false);
+    return [session];
+  }
+  return allSessions(tab).filter((s) => s.term && s.backendId && !s.stopped && s.mode !== 'editor');
+}
+
+function setBroadcast(tab: Tab, on: boolean) {
+  tab.broadcast = on;
+  for (const s of allSessions(tab)) {
+    s.container?.classList.toggle('broadcasting', on);
+    s.container?.querySelector('.pane-broadcast')?.classList.toggle('on', on);
+  }
+}
+
+function toggleBroadcast(tab: Tab) {
+  if (tab.isHome) return;
+  if (tab.extraPanes.length === 0) {
+    flashStatus('Split the tab first: broadcasting sends input to every pane in it', true);
+    return;
+  }
+  setBroadcast(tab, !tab.broadcast);
+  flashStatus(tab.broadcast ? `Sending input to all ${allSessions(tab).length} panes of ${tab.label}` : 'Input goes to the focused pane only');
 }
 
 // Line endings are translated on the way in (paste.ts): a terminal's
@@ -2709,11 +2876,21 @@ function pasteDelayLabel(ms: number): string {
 // separate command" is not true there. Where it is true, and on the
 // network hardware this guard was written for, nothing has bracketed
 // paste and the question still appears.
-function confirmMultilinePaste(text: string, willExecuteEachLine: boolean): Promise<{ ok: boolean; delayMs: number }> {
+function confirmMultilinePaste(text: string, willExecuteEachLine: boolean, targets: Session[], snippet = false): Promise<{ ok: boolean; delayMs: number }> {
   const lines = countPasteLines(text);
-  if (lines <= 1 || !warnMultilinePasteEnabled || !willExecuteEachLine) {
+  // A session tagged with a guard (prod, by default) is always asked
+  // about anything that will press Enter, one copied line with its
+  // newline included, and about every snippet, however the warning is
+  // set: the point of the tag is that nothing runs there by accident.
+  // Every pane a broadcasting tab would reach counts, not just the one
+  // in front.
+  const guardedTargets = targets.filter(isSessionGuarded);
+  const guarded = guardedTargets.length > 0;
+  const ask = guarded ? /[\r\n]/.test(text) || snippet : lines > 1 && warnMultilinePasteEnabled && willExecuteEachLine;
+  if (!ask) {
     return Promise.resolve({ ok: true, delayMs: pasteLineDelayMs });
   }
+  const guardTag = guarded ? guardTagOf(guardedTargets[0]).toUpperCase() : '';
   return new Promise((resolve) => {
     const select = document.createElement('select');
     select.className = 'dialog-field';
@@ -2725,11 +2902,21 @@ function confirmMultilinePaste(text: string, willExecuteEachLine: boolean): Prom
     }
     select.value = String(pasteLineDelayMs);
     buildDialog({
-      title: `Paste ${lines} lines?`,
-      tone: 'warning',
+      title: guarded
+        ? `${snippet ? 'Run' : 'Paste'} ${lines === 1 ? 'this' : `${lines} lines`} into ${guardTag}?`
+        : `Paste ${lines} lines?`,
+      tone: guarded ? 'danger' : 'warning',
       onDismiss: () => resolve({ ok: false, delayMs: pasteLineDelayMs }),
       fill: (body) => {
-        dialogText(body, 'Each line may run as a separate command on the remote end.');
+        if (guarded) {
+          const note = document.createElement('div');
+          note.className = 'paste-guard-note';
+          const names = guardedTargets.map((s) => s.label).join(', ');
+          note.textContent = `${names} ${guardedTargets.length === 1 ? 'is' : 'are'} tagged ${guardTag}.`
+            + (targets.length > 1 ? ` This tab is broadcasting to ${targets.length} panes.` : '');
+          body.appendChild(note);
+        }
+        dialogText(body, snippet && lines === 1 ? 'This command will run on the remote end.' : 'Each line may run as a separate command on the remote end.');
         const preview = document.createElement('pre');
         preview.className = 'paste-preview';
         const shown = text.split(/\r\n|\r|\n/).slice(0, 6);
@@ -2775,10 +2962,13 @@ async function sendPaste(session: Session, normalized: string, delayMs: number, 
 // A clipboard paste: the text is what the user copied, and the program
 // on the other end decides what to do with it.
 async function pasteIntoSession(session: Session, text: string) {
-  const bracketed = !!session.term?.modes.bracketedPasteMode;
-  const { ok, delayMs } = await confirmMultilinePaste(text, !bracketed);
+  // A broadcasting tab pastes into every pane, each with its own idea
+  // of bracketed paste, and the guard looks at all of them.
+  const targets = inputTargets(session);
+  const bracketed = (s: Session) => !!s.term?.modes.bracketedPasteMode;
+  const { ok, delayMs } = await confirmMultilinePaste(text, !targets.every(bracketed), targets);
   if (!ok) return;
-  await sendPaste(session, normalizePasteNewlines(text), delayMs, bracketed);
+  await Promise.all(targets.map((target) => sendPaste(target, normalizePasteNewlines(text), delayMs, bracketed(target))));
 }
 
 // Text Xpecter is sending on the user's behalf to be run, currently
@@ -2786,9 +2976,10 @@ async function pasteIntoSession(session: Session, text: string) {
 // the text as literal input, which would leave a snippet sitting on the
 // prompt unexecuted rather than running it.
 async function sendTextToSession(session: Session, text: string) {
-  const { ok, delayMs } = await confirmMultilinePaste(text, true);
+  const targets = inputTargets(session);
+  const { ok, delayMs } = await confirmMultilinePaste(text, true, targets, true);
   if (!ok) return;
-  await sendPaste(session, normalizePasteNewlines(text), delayMs, false);
+  await Promise.all(targets.map((target) => sendPaste(target, normalizePasteNewlines(text), delayMs, false)));
 }
 
 // SPE-128: tears down a session's terminal view (terminal, scrollbar,
@@ -2805,7 +2996,8 @@ function disposeTerminalView(session: Session) {
   session.overlay = null;
   const termFrame = termFrameOf(session);
   // Disposing the terminal disposes the addons loaded into it; the bar
-  // goes with the frame.
+  // goes with the frame, and a console's controls with their own row.
+  session.container?.querySelector('.serial-bar')?.remove();
   session.term?.dispose();
   session.term = null;
   session.searchAddon = null;
@@ -3015,6 +3207,11 @@ function createTerminalForSession(session: Session, tab: Tab) {
   termHost.className = 'pane-term-host term-instance';
   termScroll.appendChild(termHost);
   termFrame.appendChild(termScroll);
+  // A console gets its controls between the header and the terminal.
+  if (session.mode === 'serial') {
+    if (!session.serial) session.serial = { eol: 'CR', localEcho: false, dtr: true, rts: true, hex: false, hexOffset: 0 };
+    wrapper.appendChild(buildSerialBar(session));
+  }
   wrapper.appendChild(termFrame);
   const container = termHost;
 
@@ -3024,6 +3221,8 @@ function createTerminalForSession(session: Session, tab: Tab) {
     fontSize: appSettings.fontSize || FONT_SIZE_DEFAULT,
     scrollback: activeScrollback(),
     theme: activeXtermTheme(),
+    cursorStyle: cursorStyleSetting,
+    cursorBlink: cursorBlinkEnabled,
   });
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
@@ -3058,6 +3257,18 @@ function createTerminalForSession(session: Session, tab: Tab) {
       navigator.clipboard.writeText(text).catch(() => {});
     } catch {
       // ignore malformed OSC 52 payloads
+    }
+    return true;
+  });
+
+  // OSC 7: a shell with shell integration reports its working directory
+  // on every prompt, and the remote browser follows it, so the listing
+  // beside the terminal is the directory the prompt is in.
+  term.parser.registerOscHandler(7, (data: string) => {
+    if (!followShellDirEnabled || session.mode !== 'ssh' || !session.backendId) return true;
+    const dir = parseOsc7(data);
+    if (dir && currentRemoteSessionId === session.backendId && currentRemotePath !== dir) {
+      void refreshFileList(dir, session.backendId);
     }
     return true;
   });
@@ -3172,6 +3383,7 @@ function createTerminalForSession(session: Session, tab: Tab) {
       focusAdjacentPane(tab, e.key as 'ArrowLeft' | 'ArrowRight' | 'ArrowUp' | 'ArrowDown');
       return false;
     }
+    if (e.type === 'keydown' && tabSwitchShortcut(e)) return false;
     return true;
   });
 
@@ -3197,9 +3409,7 @@ function createTerminalForSession(session: Session, tab: Tab) {
   }, true);
 
   term.onData((data) => {
-    if (session.mode === 'local' && session.backendId) App.WriteLocalTerminal(session.backendId, data);
-    if (session.mode === 'ssh' && session.backendId) App.WriteSSH(session.backendId, data);
-    if (session.mode === 'serial' && session.backendId) App.WriteSerial(session.backendId, data);
+    for (const target of inputTargets(session)) writeToSession(target, data);
   });
 
   session.term = term;
@@ -3211,6 +3421,66 @@ function createTerminalForSession(session: Session, tab: Tab) {
   session.container = wrapper;
   applyWallpaperToSession(session);
   setupCustomScrollbar(session);
+}
+
+// --- Serial console controls ---
+// What a console cable needs that SSH never does: which line ending
+// Enter sends (a switch wants CR, a Linux getty is happy with LF, some
+// modems insist on both), local echo for a device that does not echo,
+// the DTR and RTS lines, a break, and a hex view of what actually
+// arrived when the terminal is making a mess of it.
+
+function buildSerialBar(session: Session): HTMLDivElement {
+  const options = session.serial!;
+  const bar = document.createElement('div');
+  bar.className = 'serial-bar';
+  const eolLabel = document.createElement('label');
+  eolLabel.append('Enter sends ');
+  const eol = document.createElement('select');
+  for (const [value, text] of [['CR', 'CR'], ['LF', 'LF'], ['CRLF', 'CR+LF']]) {
+    const el = document.createElement('option');
+    el.value = value;
+    el.textContent = text;
+    eol.appendChild(el);
+  }
+  eol.value = options.eol;
+  eol.onchange = () => { options.eol = eol.value as SerialOptions['eol']; };
+  eolLabel.appendChild(eol);
+  const check = (text: string, title: string, get: () => boolean, set: (v: boolean) => void) => {
+    const label = document.createElement('label');
+    label.title = title;
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = get();
+    box.onchange = () => set(box.checked);
+    label.append(box, ` ${text}`);
+    return label;
+  };
+  const signals = () => {
+    if (!session.backendId) return;
+    App.SetSerialSignals(session.backendId, options.dtr, options.rts).catch((err) => flashStatus(`Could not set the line: ${err}`, true));
+  };
+  const brk = document.createElement('button');
+  brk.type = 'button';
+  brk.textContent = 'Break';
+  brk.title = 'Hold the line in break for a quarter second';
+  brk.onclick = () => {
+    if (!session.backendId) return;
+    App.SendSerialBreak(session.backendId).catch((err) => flashStatus(`Could not send a break: ${err}`, true));
+  };
+  bar.append(
+    eolLabel,
+    check('Local echo', 'Show what you type, for a device that does not echo it', () => options.localEcho, (v) => { options.localEcho = v; }),
+    check('DTR', 'Data Terminal Ready', () => options.dtr, (v) => { options.dtr = v; signals(); }),
+    check('RTS', 'Request To Send', () => options.rts, (v) => { options.rts = v; signals(); }),
+    brk,
+    check('Hex', 'Show incoming bytes as a hex dump', () => options.hex, (v) => {
+      options.hex = v;
+      options.hexOffset = 0;
+      session.term?.write(`\r\n\x1b[90m${v ? 'Hex view on' : 'Hex view off'}\x1b[0m\r\n`);
+    }),
+  );
+  return bar;
 }
 
 // --- Find in terminal output ---
@@ -3490,6 +3760,16 @@ interface EditorPane {
   // The cursor readout inside statusBar, rewritten in place as you
   // type rather than rebuilding the whole bar.
   positionEl: HTMLElement | null;
+  // Find in files, while its box is open on this pane's tree.
+  search?: TreeSearchState;
+}
+
+interface TreeSearchState {
+  query: string;
+  regex: boolean;
+  caseSensitive: boolean;
+  result: SearchResult | null;
+  running: boolean;
 }
 
 const editorPanes = new Map<string, EditorPane>();
@@ -5876,12 +6156,66 @@ async function saveDoc(doc: EditorDoc): Promise<boolean> {
     else if (doc.remoteSessionId) await App.WriteRemoteFile(doc.remoteSessionId, doc.path, doc.model.getValue());
     else return saveDocAs(doc);
   } catch (err) {
+    // A file the login user cannot write, on a host where sudo can:
+    // the one refusal worth offering a way round.
+    if (!doc.isLocal && doc.remoteSessionId && /permission denied/i.test(String(err))) {
+      return saveDocAsRoot(doc, doc.remoteSessionId);
+    }
     flashStatus(`Save failed: ${err}`, true);
     return false;
   }
   markDocSaved(doc);
   flashStatus(`Saved ${doc.title}`);
   return true;
+}
+
+// Offers to write a remote file as root through sudo (sudosave.go).
+// The password field starts with the session's own password when one
+// is known, since sudo usually wants the same one.
+function saveDocAsRoot(doc: EditorDoc, sessionId: string): Promise<boolean> {
+  const session = sessionByBackendId(sessionId);
+  const origin = session?.origin?.kind === 'ssh' ? session.origin : null;
+  const known = origin ? passwordCache.get(passwordCacheKey(origin.host, origin.port, origin.user)) ?? '' : '';
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'password';
+    input.placeholder = 'sudo password';
+    input.value = known;
+    input.style.cssText = 'width:100%;box-sizing:border-box;';
+    const attempt = async () => {
+      try {
+        await App.SaveRemoteFileAsRoot(sessionId, doc.path!, doc.model.getValue(), input.value);
+      } catch (err) {
+        flashStatus(`Save as root failed: ${err}`, true);
+        resolve(false);
+        return;
+      }
+      markDocSaved(doc);
+      flashStatus(`Saved ${doc.title} as root`);
+      resolve(true);
+    };
+    const dialog = buildDialog({
+      title: 'Save as root?',
+      tone: 'warning',
+      onDismiss: () => resolve(false),
+      fill: (body) => {
+        dialogText(body, `${doc.title} is not writable by your login. Xpecter can write it as root with sudo: the buffer goes to a temporary file on the host and one sudo command copies it over the original, keeping its owner and mode.`);
+        dialogField(body, 'Remote file', doc.path ?? '');
+        body.appendChild(input);
+      },
+      actions: [
+        { label: 'Cancel', kind: 'secondary', run: () => resolve(false) },
+        { label: 'Save as root', run: () => { void attempt(); } },
+      ],
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      dialog.close();
+      void attempt();
+    });
+    input.focus();
+  });
 }
 
 async function saveDocAs(doc: EditorDoc): Promise<boolean> {
@@ -6581,6 +6915,8 @@ async function chooseFolder(pane: EditorPane) {
 
 async function openFolder(pane: EditorPane, folder: string) {
   pane.folder = folder;
+  // A search belongs to the folder it ran in.
+  pane.search = undefined;
   pane.expanded = new Set([folder]);
   pane.treeCache.clear();
   pane.root.classList.add('has-folder');
@@ -6594,6 +6930,7 @@ async function openFolder(pane: EditorPane, folder: string) {
 
 function closeFolder(pane: EditorPane) {
   pane.folder = null;
+  pane.search = undefined;
   pane.expanded.clear();
   pane.treeCache.clear();
   pane.root.classList.remove('has-folder');
@@ -6841,10 +7178,22 @@ async function renderEditorTree(pane: EditorPane) {
   head.appendChild(treeAction('＋', `New file in ${baseName(folder)}`, () => { void createInTree(pane, folder, 'file'); }));
   head.appendChild(treeAction('⊞', `New folder in ${baseName(folder)}`, () => { void createInTree(pane, folder, 'folder'); }));
   head.appendChild(treeAction('⟳', 'Reread this folder from disk', () => { void refreshFolder(pane); }));
+  head.appendChild(treeAction('🔍', 'Find in files (Ctrl+Shift+F)', () => openTreeSearch(pane)));
   head.appendChild(treeAction('⧉', `${revealLabel()}: ${baseName(folder)}`, () => { void revealInFileManager(folder); }));
   head.appendChild(treeAction('\u{1F4C1}', 'Open a different folder', () => { void chooseFolder(pane); }));
   head.appendChild(treeAction('✕', 'Close this folder', () => closeFolder(pane)));
   pane.tree.appendChild(head);
+
+  // Find in files takes the tree's place while it is open: the box
+  // under the header, then the results, then nothing else.
+  if (pane.search) {
+    pane.tree.appendChild(buildTreeSearchRow(pane));
+    if (pane.search.result || pane.search.running) {
+      pane.tree.appendChild(buildSearchResults(pane));
+      syncWatchedDirs();
+      return;
+    }
+  }
 
   const body = document.createElement('div');
   pane.tree.appendChild(body);
@@ -6852,6 +7201,144 @@ async function renderEditorTree(pane: EditorPane) {
   // Every level the tree draws is cached by now, so this is the point
   // where the set of directories worth watching is actually known.
   syncWatchedDirs();
+}
+
+// --- Find in files ---
+// Monaco searches the buffer in front of you; this asks the whole
+// workspace folder. The backend walks it (search.go) and the results
+// take the tree's place until the box is closed.
+
+function openTreeSearch(pane: EditorPane) {
+  if (!pane.folder) {
+    flashStatus('Open a folder first: find in files searches the workspace folder', true);
+    return;
+  }
+  if (!pane.search) pane.search = { query: '', regex: false, caseSensitive: false, result: null, running: false };
+  void renderEditorTree(pane).then(() => {
+    const input = pane.tree.querySelector<HTMLInputElement>('.tree-search input');
+    input?.focus();
+    input?.select();
+  });
+}
+
+function closeTreeSearch(pane: EditorPane) {
+  pane.search = undefined;
+  void renderEditorTree(pane);
+  pane.editor.focus();
+}
+
+async function runTreeSearch(pane: EditorPane) {
+  const state = pane.search;
+  if (!state || !pane.folder || !state.query) return;
+  state.running = true;
+  state.result = null;
+  void renderEditorTree(pane);
+  try {
+    state.result = await App.SearchLocalFiles(pane.folder, state.query, state.regex, state.caseSensitive);
+  } catch (err) {
+    flashStatus(`Search failed: ${err}`, true);
+    state.result = { hits: [], truncated: false, files: 0 };
+  } finally {
+    state.running = false;
+  }
+  if (pane.search === state) void renderEditorTree(pane);
+}
+
+function buildTreeSearchRow(pane: EditorPane): HTMLDivElement {
+  const state = pane.search!;
+  const row = document.createElement('div');
+  row.className = 'tree-search';
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = 'Find in files (Enter to search)';
+  input.spellcheck = false;
+  input.value = state.query;
+  input.oninput = () => { state.query = input.value; };
+  input.onkeydown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void runTreeSearch(pane);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeTreeSearch(pane);
+    }
+  };
+  const toggle = (label: string, title: string, get: () => boolean, set: (v: boolean) => void) => {
+    const el = document.createElement('span');
+    el.className = 'term-find-toggle' + (get() ? ' on' : '');
+    el.textContent = label;
+    el.title = title;
+    el.onclick = () => {
+      set(!get());
+      el.classList.toggle('on', get());
+      if (state.result) void runTreeSearch(pane);
+      input.focus();
+    };
+    return el;
+  };
+  const close = document.createElement('span');
+  close.className = 'term-find-btn';
+  close.textContent = '✕';
+  close.title = 'Close (Escape)';
+  close.onclick = () => closeTreeSearch(pane);
+  row.append(
+    input,
+    toggle('Aa', 'Match case', () => state.caseSensitive, (v) => { state.caseSensitive = v; }),
+    toggle('.*', 'Regular expression', () => state.regex, (v) => { state.regex = v; }),
+    close,
+  );
+  return row;
+}
+
+function buildSearchResults(pane: EditorPane): HTMLDivElement {
+  const state = pane.search!;
+  const box = document.createElement('div');
+  const summary = document.createElement('div');
+  summary.className = 'search-summary';
+  box.appendChild(summary);
+  if (state.running || !state.result) {
+    summary.textContent = 'Searching…';
+    return box;
+  }
+  const { hits, truncated, files } = state.result;
+  const fileCount = new Set(hits.map((h) => h.path)).size;
+  summary.textContent = hits.length === 0
+    ? `No matches in ${files} files`
+    : `${hits.length}${truncated ? '+' : ''} matches in ${fileCount} files${truncated ? ' (stopped early; narrow the search)' : ''}`;
+  let current = '';
+  const folder = pane.folder ?? '';
+  for (const hit of hits) {
+    if (hit.path !== current) {
+      current = hit.path;
+      const file = document.createElement('div');
+      file.className = 'search-file';
+      file.textContent = isPathUnder(hit.path, folder) ? hit.path.slice(folder.length + 1) : hit.path;
+      file.title = hit.path;
+      box.appendChild(file);
+    }
+    const row = document.createElement('div');
+    row.className = 'search-hit';
+    const line = document.createElement('span');
+    line.className = 'search-line';
+    line.textContent = String(hit.line);
+    row.appendChild(line);
+    row.append(hit.text);
+    row.title = `${hit.path}:${hit.line}`;
+    row.onclick = () => { void openSearchHit(pane, hit); };
+    box.appendChild(row);
+  }
+  return box;
+}
+
+async function openSearchHit(pane: EditorPane, hit: SearchHit) {
+  await openLocalFile(hit.path, pane);
+  const doc = findOpenDoc(hit.path, true, null);
+  const owner = doc ? editorPanes.get(doc.ownerPaneId) : null;
+  if (!doc || !owner) return;
+  setActiveDoc(owner, doc.id);
+  owner.editor.setPosition({ lineNumber: hit.line, column: hit.column });
+  owner.editor.revealLineInCenter(hit.line);
+  owner.editor.focus();
 }
 
 function treeAction(glyph: string, title: string, run: () => void, tone?: 'danger'): HTMLSpanElement {
@@ -7622,6 +8109,7 @@ function openCommandPalette(pane: EditorPane) {
   if (pane.folder) {
     const folder = pane.folder;
     items.push(
+      { label: 'Find in Files…', hint: 'Ctrl+Shift+F', detail: folder, run: () => openTreeSearch(pane) },
       { label: 'Refresh Folder', detail: folder, run: () => { void refreshFolder(pane); } },
       { label: `Folder: ${revealLabel()}`, detail: folder, run: () => { void revealInFileManager(folder); } },
       { label: 'Close Folder', detail: folder, run: () => closeFolder(pane) },
@@ -7794,6 +8282,9 @@ function registerEditorKeybindings(pane: EditorPane) {
   // Code answers to as well. It displaces Monaco's own palette, which
   // stays reachable as an entry inside this one.
   bind(monaco.KeyCode.F1, (active) => openCommandPalette(active));
+  // Find in files, the chord VS Code uses for it. In a terminal pane the
+  // same chord finds in the scrollback; the two never meet.
+  bind(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyF, (active) => openTreeSearch(active));
   // An action rather than a bare command, so it also appears in
   // Monaco's right-click menu.
   pane.editor.addAction({
@@ -8099,6 +8590,11 @@ function renderFileList(entries: RemoteFile[], path: string, id: string) {
         });
       };
     }
+    if (!e.isDir) {
+      div.appendChild(remoteAction('✎↗', `Edit ${e.name} with the system application (each save uploads back)`, () => {
+        void editRemoteExternally(id, e.path);
+      }));
+    }
     div.appendChild(remoteAction('⤓', e.isDir ? `Download folder ${e.name}…` : `Download ${e.name}…`, () => {
       void (e.isDir ? downloadRemoteFolder(id, e.path) : downloadRemoteFile(id, e.path));
     }));
@@ -8115,6 +8611,24 @@ function renderFileList(entries: RemoteFile[], path: string, id: string) {
 // "transfer:progress" event drawn under the file list. Dragging a file
 // out of the list onto the desktop is not something a webview can do,
 // so a download is a button.
+
+// The file opens in whatever the system uses for it; every save there
+// goes back to the host, reported below.
+async function editRemoteExternally(id: string, remotePath: string) {
+  try {
+    await App.EditRemoteFileExternally(id, remotePath);
+    flashStatus(`Editing ${baseName(remotePath)} outside Xpecter; each save uploads back to the host`);
+  } catch (err) {
+    flashStatus(`Could not open ${baseName(remotePath)}: ${err}`, true);
+  }
+}
+
+runtime.EventsOn('remote:edit-uploaded', (payload: unknown) => {
+  const p = payload as { sessionId: string; path: string; name: string; error?: string };
+  if (p.error) flashStatus(`Upload of ${p.name} failed: ${p.error}`, true);
+  else flashStatus(`Uploaded ${p.name} to the host`);
+  if (currentRemoteSessionId === p.sessionId) void refreshFileList(currentRemotePath, p.sessionId);
+});
 
 async function downloadRemoteFile(id: string, remotePath: string) {
   try {
@@ -8538,7 +9052,7 @@ async function useSSHSession(s: SessionProfile) {
 
     (document.getElementById('passphrase') as HTMLInputElement).value = '';
 
-    await connectActiveTab({ host: s.host ?? '', port: s.port ?? 22, user: s.user ?? '', keyPath: s.keyPath, useAgent: s.useAgent, internalAgent: s.internalAgent, x11: s.x11, jumpHost: s.jumpHost, terminalSpeed: s.terminalSpeed });
+    await connectActiveTab({ host: s.host ?? '', port: s.port ?? 22, user: s.user ?? '', keyPath: s.keyPath, useAgent: s.useAgent, internalAgent: s.internalAgent, forwardAgent: s.useAgent && s.forwardAgent, x11: s.x11, jumpHost: s.jumpHost, terminalSpeed: s.terminalSpeed });
 
     const connected = paneTarget ?? tabs.get(activeTabId!);
 
@@ -9186,6 +9700,15 @@ function renderSessionRow(s: SessionProfile, depth: number, live: Map<string, Se
   name.textContent = s.name;
   row.appendChild(name);
 
+  const styled = tagStyleFor(s.tags, tagStyles);
+  if (styled) {
+    const pill = document.createElement('span');
+    pill.className = 'row-tag';
+    pill.style.background = styled.style.colour;
+    pill.textContent = styled.tag.toUpperCase();
+    row.appendChild(pill);
+  }
+
   // The address is the sidebar's biggest source of clutter and its
   // least used column: you pick a session by the name you gave it, and
   // the tooltip below still carries the address for when you don't. The
@@ -9413,7 +9936,9 @@ async function openSessionEditor(s: SessionProfile) {
     (document.getElementById('se-user') as HTMLInputElement).value = s.user ?? '';
     (document.getElementById('se-keypath') as HTMLInputElement).value = s.keyPath ?? '';
     (document.getElementById('se-use-ssh-agent') as HTMLInputElement).checked = !!s.useAgent;
+    (document.getElementById('se-forward-agent') as HTMLInputElement).checked = !!s.forwardAgent;
     (document.getElementById('se-use-internal-agent') as HTMLInputElement).checked = !!s.internalAgent;
+    renderEditorForwards(s.forwards ?? []);
 
     const deviceKindSelect = document.getElementById('se-devicekind-select') as HTMLSelectElement;
     const current = s.deviceKind === 'switch' || s.deviceKind === 'firewall' ? s.deviceKind : 'host';
@@ -9440,6 +9965,142 @@ async function openSessionEditor(s: SessionProfile) {
 function closeSessionEditor() {
   document.getElementById('session-editor-overlay')!.classList.remove('open');
   sessionEditorTarget = null;
+}
+
+// --- The session editor's forwards list ---
+// One row per forward the session starts with. The row's shape follows
+// its kind: a local forward has a remote host and port, a SOCKS proxy
+// only a local port, a remote forward the host's port and where it is
+// delivered here.
+
+const FORWARD_KINDS: { value: 'local' | 'dynamic' | 'remote'; label: string }[] = [
+  { value: 'local', label: 'Local port →' },
+  { value: 'dynamic', label: 'SOCKS proxy on' },
+  { value: 'remote', label: 'Host port →' },
+];
+
+function forwardKindOf(f: SavedForward): 'local' | 'dynamic' | 'remote' {
+  return f.kind === 'dynamic' || f.kind === 'remote' ? f.kind : 'local';
+}
+
+function describeForward(f: SavedForward): string {
+  switch (forwardKindOf(f)) {
+    case 'dynamic': return `SOCKS proxy on localhost:${f.localPort}`;
+    case 'remote': return `host:${f.remotePort} → ${f.localHost || '127.0.0.1'}:${f.localPort}`;
+    default: return `localhost:${f.localPort} → ${f.remoteHost}:${f.remotePort}`;
+  }
+}
+
+function renderEditorForwards(forwards: SavedForward[]) {
+  const list = document.getElementById('se-forwards-list')!;
+  list.innerHTML = '';
+  for (const f of forwards) list.appendChild(buildEditorForwardRow(f));
+}
+
+function buildEditorForwardRow(f: SavedForward): HTMLDivElement {
+  const row = document.createElement('div');
+  row.className = 'se-forward-row';
+  const kind = document.createElement('select');
+  kind.className = 'dialog-field';
+  for (const option of FORWARD_KINDS) {
+    const el = document.createElement('option');
+    el.value = option.value;
+    el.textContent = option.label;
+    kind.appendChild(el);
+  }
+  kind.value = forwardKindOf(f);
+  const field = (cls: string, placeholder: string, value: string | number | undefined, wide = false) => {
+    const el = document.createElement('input');
+    el.className = 'dialog-field ' + cls + (wide ? ' wide' : '');
+    el.placeholder = placeholder;
+    el.value = value === undefined || value === 0 ? '' : String(value);
+    return el;
+  };
+  const localPort = field('fw-local', 'local port', f.localPort);
+  const remoteHost = field('fw-rhost', 'remote host', f.remoteHost, true);
+  const remotePort = field('fw-rport', 'port', f.remotePort);
+  const localHost = field('fw-lhost', 'deliver to (127.0.0.1)', f.localHost, true);
+  const remove = document.createElement('span');
+  remove.className = 'rules-remove';
+  remove.textContent = '✕';
+  remove.title = 'Remove this forward';
+  remove.onclick = () => row.remove();
+  // The fields in the order each kind reads as a sentence. The others
+  // leave the row but keep their values, so switching the kind and back
+  // loses nothing.
+  const layout = () => {
+    row.innerHTML = '';
+    switch (kind.value) {
+      case 'dynamic':
+        row.append(kind, localPort, remove);
+        break;
+      case 'remote':
+        remotePort.placeholder = 'host port';
+        row.append(kind, remotePort, localHost, localPort, remove);
+        break;
+      default:
+        remotePort.placeholder = 'port';
+        row.append(kind, localPort, remoteHost, remotePort, remove);
+    }
+  };
+  kind.onchange = layout;
+  layout();
+  return row;
+}
+
+function readEditorForwards(): SavedForward[] {
+  const out: SavedForward[] = [];
+  for (const row of Array.from(document.querySelectorAll<HTMLDivElement>('#se-forwards-list .se-forward-row'))) {
+    const kind = (row.querySelector('select') as HTMLSelectElement).value as 'local' | 'dynamic' | 'remote';
+    const num = (cls: string) => parseInt((row.querySelector(`.${cls}`) as HTMLInputElement | null)?.value ?? '', 10) || 0;
+    const str = (cls: string) => ((row.querySelector(`.${cls}`) as HTMLInputElement | null)?.value ?? '').trim();
+    const f: SavedForward = { kind, localPort: num('fw-local') };
+    if (kind === 'local') {
+      f.remoteHost = str('fw-rhost');
+      f.remotePort = num('fw-rport');
+      if (!f.localPort || !f.remoteHost || !f.remotePort) continue;
+    } else if (kind === 'remote') {
+      f.remotePort = num('fw-rport');
+      f.localHost = str('fw-lhost') || undefined;
+      if (!f.localPort || !f.remotePort) continue;
+    } else if (!f.localPort) {
+      continue;
+    }
+    out.push(f);
+  }
+  return out;
+}
+
+document.getElementById('se-forward-add')!.addEventListener('click', () => {
+  document.getElementById('se-forwards-list')!.appendChild(buildEditorForwardRow({ kind: 'local' }));
+});
+
+// Starts the forwards saved with a session's profile once its shell is
+// up, and lists them in the manager. A forward that cannot start (its
+// port is taken, most often) is reported on the terminal rather than
+// failing the connection.
+async function startSavedForwards(session: Session) {
+  const profile = profileFor(session);
+  if (!profile?.forwards?.length || !session.backendId) return;
+  const backendId = session.backendId;
+  const started: string[] = [];
+  for (const f of profile.forwards) {
+    const kind = forwardKindOf(f);
+    try {
+      let id: string;
+      if (kind === 'dynamic') id = await App.StartDynamicForward(backendId, f.localPort ?? 0);
+      else if (kind === 'remote') id = await App.StartRemoteForward(backendId, f.remotePort ?? 0, f.localHost || '127.0.0.1', f.localPort ?? 0);
+      else id = await App.StartLocalForward(backendId, f.localPort ?? 0, f.remoteHost ?? '', f.remotePort ?? 0);
+      activeForwards.push({
+        id, kind, sessionBackendId: backendId, sessionLabel: session.label,
+        localPort: f.localPort ?? 0, remoteHost: f.remoteHost ?? '', remotePort: f.remotePort ?? 0, localHost: f.localHost,
+      });
+      started.push(describeForward(f));
+    } catch (err) {
+      session.term?.write(`\r\n\x1b[33mForward ${describeForward(f)} did not start: ${err}\x1b[0m\r\n`);
+    }
+  }
+  if (started.length) session.term?.write(`\r\n\x1b[90mForwarding: ${started.join('; ')}\x1b[0m\r\n`);
 }
 
 document.getElementById('session-editor-close')!.addEventListener('click', closeSessionEditor);
@@ -9493,7 +10154,10 @@ document.getElementById('se-save')!.addEventListener('click', async () => {
     const keyPath = (document.getElementById('se-keypath') as HTMLInputElement).value.trim();
     updated.keyPath = keyPath || undefined;
     updated.useAgent = (document.getElementById('se-use-ssh-agent') as HTMLInputElement).checked;
+    updated.forwardAgent = updated.useAgent && (document.getElementById('se-forward-agent') as HTMLInputElement).checked;
     updated.internalAgent = (document.getElementById('se-use-internal-agent') as HTMLInputElement).checked;
+    const forwards = readEditorForwards();
+    updated.forwards = forwards.length > 0 ? forwards : undefined;
     updated.deviceKind = (document.getElementById('se-devicekind-select') as HTMLSelectElement).value as 'host' | 'switch' | 'firewall';
     updated.jumpHost = (document.getElementById('se-jumphost') as HTMLInputElement).value.trim() || undefined;
     updated.terminalSpeed = Number((document.getElementById('se-termspeed') as HTMLSelectElement).value) || undefined;
@@ -10018,10 +10682,33 @@ const HIGHLIGHT_RULES: { category: HighlightCategory; pattern: string }[] = [
 
 // One alternation, one pass. The named groups say which rule won, and
 // are generated rather than spelled out so the rules stay a plain list.
-const HIGHLIGHT_RE = new RegExp(
-  HIGHLIGHT_RULES.map((rule, index) => `(?<h${index}>${rule.pattern})`).join('|'),
-  'gi',
-);
+// The rules in force: the person's own first, so they win where they
+// overlap the built-in ones, then the built-in list. Rebuilt whenever a
+// custom rule is added or removed.
+let activeHighlightRules: { category: HighlightCategory; pattern: string }[] = [];
+let HIGHLIGHT_RE = /$^/g;
+
+function rebuildHighlighting() {
+  const custom: { category: HighlightCategory; pattern: string }[] = [];
+  for (const rule of customHighlightRules) {
+    const pattern = compileCustomRule(rule);
+    if (pattern) custom.push({ category: rule.category, pattern });
+  }
+  activeHighlightRules = [...custom, ...HIGHLIGHT_RULES];
+  try {
+    HIGHLIGHT_RE = new RegExp(
+      activeHighlightRules.map((rule, index) => `(?<h${index}>${rule.pattern})`).join('|'),
+      'gi',
+    );
+  } catch {
+    // A custom rule that compiles alone but not in the alternation (a
+    // named group clashing with h0..hN, say): the built-in set stands.
+    activeHighlightRules = [...HIGHLIGHT_RULES];
+    HIGHLIGHT_RE = new RegExp(HIGHLIGHT_RULES.map((rule, index) => `(?<h${index}>${rule.pattern})`).join('|'), 'gi');
+    flashStatus('A custom highlight rule could not be combined with the others and was skipped', true);
+  }
+}
+rebuildHighlighting();
 
 // Which of the active scheme's ANSI colours each category borrows.
 // Picked to stay distinguishable across every bundled scheme rather
@@ -10084,12 +10771,12 @@ function highlightPlainText(text: string): string {
   return text.replace(HIGHLIGHT_RE, (match, ...args) => {
     const groups = args[args.length - 1] as Record<string, string | undefined> | undefined;
     if (!groups) return match;
-    for (let index = 0; index < HIGHLIGHT_RULES.length; index += 1) {
+    for (let index = 0; index < activeHighlightRules.length; index += 1) {
       if (groups[`h${index}`] === undefined) continue;
       // 39 restores the default foreground and nothing else. A full 0m
       // reset would also clear bold, and any background the far end had
       // set around this run.
-      return `\x1b[${palette[HIGHLIGHT_RULES[index].category]}m${match}\x1b[39m`;
+      return `\x1b[${palette[activeHighlightRules[index].category]}m${match}\x1b[39m`;
     }
     return match;
   });
@@ -10197,6 +10884,13 @@ function splitHighlightChunk(text: string): { ready: string; carry: string } {
 }
 
 function writeToTerminal(session: Session, data: string) {
+  // A console in hex view shows what arrived as bytes, not as text.
+  if (session.mode === 'serial' && session.serial?.hex) {
+    session.term!.write(hexDump(data, session.serial.hexOffset));
+    session.serial.hexOffset += data.length;
+    markActivity(session);
+    return;
+  }
   const combined = highlightEnabled ? session.highlightCarry + data : data;
   const chunk = highlightEnabled ? splitHighlightChunk(combined) : { ready: combined, carry: '' };
   session.highlightCarry = chunk.carry;
@@ -10378,6 +11072,7 @@ async function createNewFolder() {
 
 async function renderSessionList() {
   const [sessions, groups] = await Promise.all([App.ListSessions(), App.ListGroups()]);
+  profilesById = new Map(sessions.map((s) => [s.id, s]));
   const list = document.getElementById('session-list')!;
   list.innerHTML = '';
 
@@ -10892,6 +11587,7 @@ async function renderHomeView() {
     App.ListLocalShellProfiles(),
   ]);
   homeSessions = sessions;
+  profilesById = new Map(sessions.map((s) => [s.id, s]));
   const groupNames = new Map(groups.map((g) => [g.id, g.name]));
 
   // Same ordering the sidebar's own Recent block uses, just uncollapsed
@@ -10972,6 +11668,7 @@ async function renderHomeView() {
   }
 
   renderHomeRestoreOffer();
+  await renderHomeLayouts();
 
   const chips = document.getElementById('home-shell-chips')!;
   chips.innerHTML = '';
@@ -11285,6 +11982,11 @@ function clearConnectError() {
 function wireSSHEvents(session: Session, sessionId: string, req: ConnectRequest) {
   session.origin = sshOrigin(session, req);
   runtime.EventsOn('ssh:data:' + sessionId, (data: unknown) => writeToTerminal(session, data as string));
+  // Something the backend has to say about this session that is not
+  // output: agent forwarding refused, a saved forward that did not start.
+  runtime.EventsOn('ssh:notice:' + sessionId, (message: unknown) => {
+    session.term?.write(`\r\n\x1b[90m${String(message)}\x1b[0m\r\n`);
+  });
   runtime.EventsOn('ssh:closed:' + sessionId, (payload: unknown) => {
     // The backend closed this session's forwards along with it; the
     // manager's list follows, rather than showing them as active.
@@ -11359,6 +12061,7 @@ function sshOrigin(session: Session, req: ConnectRequest): PaneSpec {
     keyPath: req.keyPath || undefined,
     useAgent: req.useAgent || undefined,
     internalAgent: req.internalAgent || undefined,
+    forwardAgent: req.forwardAgent || undefined,
     x11: req.x11 || undefined,
     jumpHost: req.jumpHost || undefined,
     terminalSpeed: req.terminalSpeed || undefined,
@@ -11376,7 +12079,7 @@ async function reconnectSSH(session: Session, req: ConnectRequest, banner = 'Rec
     // life of the app holding this session and its terminal. The
     // backend closed the old id's forwards when it went; the manager's
     // list is caught up here.
-    runtime.EventsOff('ssh:data:' + staleId, 'ssh:closed:' + staleId);
+    runtime.EventsOff('ssh:data:' + staleId, 'ssh:closed:' + staleId, 'ssh:notice:' + staleId);
     await stopForwardsForSession(staleId);
   }
 
@@ -11440,6 +12143,7 @@ async function reconnectSSH(session: Session, req: ConnectRequest, banner = 'Rec
       showDisconnectPanel(session, String(err));
       return;
     }
+    void startSavedForwards(session);
     if (result.legacyCompat) notifyLegacyCompat(req.host);
   }
 }
@@ -11591,12 +12295,13 @@ async function runConnect(req: ConnectRequest) {
     // this connection, the file browser included, can go now.
     target.backendId = result.sessionId;
     if (target === focusedSession(ownerTab)) refreshFileList('.', result.sessionId);
+    void startSavedForwards(target);
     if (result.legacyCompat) notifyLegacyCompat(req.host);
 
     if (!skipSavePrompt) {
       const name = `${req.user}@${req.host}`;
       if (confirm(`Save this session as "${name}"?`)) {
-        await App.SaveSession({ id: '', name, host: req.host, port: req.port, user: req.user, keyPath: req.keyPath, useAgent: req.useAgent, internalAgent: req.internalAgent, x11: req.x11, jumpHost: req.jumpHost, terminalSpeed: req.terminalSpeed, deviceKind: currentDeviceKind() });
+        await App.SaveSession({ id: '', name, host: req.host, port: req.port, user: req.user, keyPath: req.keyPath, useAgent: req.useAgent, internalAgent: req.internalAgent, forwardAgent: req.forwardAgent, x11: req.x11, jumpHost: req.jumpHost, terminalSpeed: req.terminalSpeed, deviceKind: currentDeviceKind() });
         renderSessionList();
       }
     }
@@ -11624,8 +12329,9 @@ document.getElementById('connect')!.addEventListener('click', async () => {
     const passphrase = (document.getElementById('passphrase') as HTMLInputElement).value;
     const useAgent = (document.getElementById('use-ssh-agent') as HTMLInputElement).checked;
     const internalAgent = (document.getElementById('use-internal-agent') as HTMLInputElement).checked;
+    const forwardAgent = useAgent && (document.getElementById('forward-agent') as HTMLInputElement).checked;
     const x11 = (document.getElementById('x11-toggle') as HTMLInputElement).checked;
-    req = { host, port, user, keyPath, passphrase, useAgent, internalAgent, x11, jumpHost, terminalSpeed };
+    req = { host, port, user, keyPath, passphrase, useAgent, internalAgent, forwardAgent, x11, jumpHost, terminalSpeed };
   } else {
     const password = (document.getElementById('password') as HTMLInputElement).value;
     req = { host, port, user, password, jumpHost, terminalSpeed };
@@ -11755,7 +12461,7 @@ async function newLocalForward() {
     // Listed with the manager's own, so it can be seen and stopped there
     // and goes when its session does. A forward made here used to be
     // tracked by nothing, and its port stayed bound until the app quit.
-    activeForwards.push({ id, sessionBackendId: session.backendId, sessionLabel: session.label, localPort, remoteHost, remotePort });
+    activeForwards.push({ id, kind: 'local', sessionBackendId: session.backendId, sessionLabel: session.label, localPort, remoteHost, remotePort });
     flashStatus(`Forwarding localhost:${localPort} → ${remoteHost}:${remotePort} via ${session.label}`);
   } catch (err) {
     alert(`Could not start port forward: ${err}`);
@@ -11875,6 +12581,10 @@ document.addEventListener('keydown', (e) => {
   // terminal, so Ctrl+Shift+B toggled the sidebar shut and open again
   // and every zoom step was two.
   if ((e.target as HTMLElement | null)?.closest?.('.xterm')) return;
+  if (tabSwitchShortcut(e)) {
+    e.preventDefault();
+    return;
+  }
   if (shortcutMatches(e, 'sidebar')) {
     e.preventDefault();
     toggleSidebar();
@@ -12297,6 +13007,180 @@ bellNotifyToggle.addEventListener('change', () => {
 const restoreModeSelect = document.getElementById('restore-mode-select') as HTMLSelectElement;
 restoreModeSelect.value = restoreMode();
 restoreModeSelect.addEventListener('change', () => setRestoreMode(restoreModeSelect.value as RestoreMode));
+
+// Cursor shape and blink, applied to every terminal on screen.
+const cursorStyleSelect = document.getElementById('cursor-style-select') as HTMLSelectElement;
+cursorStyleSelect.value = cursorStyleSetting;
+cursorStyleSelect.addEventListener('change', () => {
+  const value = cursorStyleSelect.value;
+  cursorStyleSetting = value === 'underline' || value === 'bar' ? value : 'block';
+  localStorage.setItem('xpecter-cursor-style', cursorStyleSetting);
+  for (const tab of tabs.values()) for (const s of allSessions(tab)) if (s.term) s.term.options.cursorStyle = cursorStyleSetting;
+});
+const cursorBlinkToggle = document.getElementById('cursor-blink-toggle') as HTMLInputElement;
+cursorBlinkToggle.checked = cursorBlinkEnabled;
+cursorBlinkToggle.addEventListener('change', () => {
+  cursorBlinkEnabled = cursorBlinkToggle.checked;
+  localStorage.setItem('xpecter-cursor-blink', cursorBlinkEnabled ? 'on' : 'off');
+  for (const tab of tabs.values()) for (const s of allSessions(tab)) if (s.term) s.term.options.cursorBlink = cursorBlinkEnabled;
+});
+
+const followShellDirToggle = document.getElementById('follow-shell-dir-toggle') as HTMLInputElement;
+followShellDirToggle.checked = followShellDirEnabled;
+followShellDirToggle.addEventListener('change', () => {
+  followShellDirEnabled = followShellDirToggle.checked;
+  localStorage.setItem('xpecter-follow-shell-dir', followShellDirEnabled ? 'on' : 'off');
+});
+
+// --- Custom highlight rules and tag colours, in Settings ---
+
+function renderHighlightRulesList() {
+  const list = document.getElementById('highlight-rules-list')!;
+  list.innerHTML = '';
+  if (customHighlightRules.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'settings-note';
+    empty.textContent = 'No custom rules yet.';
+    list.appendChild(empty);
+  }
+  customHighlightRules.forEach((rule, index) => {
+    const row = document.createElement('div');
+    row.className = 'rules-row';
+    const swatch = document.createElement('span');
+    swatch.className = 'rules-swatch';
+    const colours = TERMINAL_COLOR_SCHEMES[currentColorScheme()];
+    swatch.style.background = colours[HIGHLIGHT_COLORS[rule.category]] ?? colours.white;
+    const pattern = document.createElement('span');
+    pattern.className = 'rules-pattern';
+    pattern.textContent = rule.pattern;
+    pattern.title = rule.pattern;
+    const kind = document.createElement('span');
+    kind.textContent = `${rule.kind === 'regex' ? 'regex' : 'words'} · ${rule.category}`;
+    kind.style.cssText = 'color:var(--text-dim);font-size:11px;white-space:nowrap;';
+    const remove = document.createElement('span');
+    remove.className = 'rules-remove';
+    remove.textContent = '✕';
+    remove.title = 'Remove this rule';
+    remove.onclick = () => {
+      customHighlightRules.splice(index, 1);
+      saveHighlightRules();
+    };
+    row.append(swatch, pattern, kind, remove);
+    list.appendChild(row);
+  });
+}
+
+function saveHighlightRules() {
+  localStorage.setItem(HIGHLIGHT_RULES_STORAGE_KEY, JSON.stringify(customHighlightRules));
+  rebuildHighlighting();
+  renderHighlightRulesList();
+}
+
+{
+  const category = document.getElementById('highlight-rule-category') as HTMLSelectElement;
+  for (const name of CUSTOM_RULE_CATEGORIES) {
+    const option = document.createElement('option');
+    option.value = name;
+    option.textContent = name;
+    category.appendChild(option);
+  }
+  category.value = 'bad';
+  const patternInput = document.getElementById('highlight-rule-pattern') as HTMLInputElement;
+  const kindSelect = document.getElementById('highlight-rule-kind') as HTMLSelectElement;
+  const add = () => {
+    const pattern = patternInput.value.trim();
+    if (!pattern) return;
+    const rule: CustomHighlightRule = { pattern, kind: kindSelect.value === 'regex' ? 'regex' : 'word', category: category.value as CustomHighlightRule['category'] };
+    if (!compileCustomRule(rule)) {
+      flashStatus('That regular expression does not compile', true);
+      return;
+    }
+    customHighlightRules.push(rule);
+    patternInput.value = '';
+    saveHighlightRules();
+  };
+  document.getElementById('highlight-rule-add')!.addEventListener('click', add);
+  patternInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      add();
+    }
+  });
+  renderHighlightRulesList();
+}
+
+function renderTagStylesList() {
+  const list = document.getElementById('tag-styles-list')!;
+  list.innerHTML = '';
+  const tags = Object.keys(tagStyles).sort();
+  for (const tag of tags) {
+    const style = tagStyles[tag];
+    const row = document.createElement('div');
+    row.className = 'rules-row';
+    const swatch = document.createElement('span');
+    swatch.className = 'rules-swatch';
+    swatch.style.background = style.colour;
+    const name = document.createElement('span');
+    name.className = 'rules-pattern';
+    name.textContent = tag;
+    const guard = document.createElement('label');
+    guard.style.cssText = 'font-size:11px;color:var(--text-dim);display:inline-flex;align-items:center;gap:3px;white-space:nowrap;';
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = style.guard;
+    box.onchange = () => {
+      tagStyles[tag] = { ...style, guard: box.checked };
+      saveTagStyles();
+    };
+    guard.append(box, ' ask before pasting');
+    const colour = document.createElement('input');
+    colour.type = 'color';
+    colour.value = style.colour;
+    colour.onchange = () => {
+      tagStyles[tag] = { ...tagStyles[tag], colour: colour.value };
+      saveTagStyles();
+    };
+    const remove = document.createElement('span');
+    remove.className = 'rules-remove';
+    remove.textContent = '✕';
+    remove.title = 'Remove this tag colour';
+    remove.onclick = () => {
+      delete tagStyles[tag];
+      saveTagStyles();
+    };
+    row.append(swatch, name, colour, guard, remove);
+    list.appendChild(row);
+  }
+}
+
+function saveTagStyles() {
+  localStorage.setItem(TAG_STYLES_STORAGE_KEY, serializeTagStyles(tagStyles));
+  renderTagStylesList();
+  renderTabBar();
+  void renderSessionList();
+}
+
+{
+  const nameInput = document.getElementById('tag-style-name') as HTMLInputElement;
+  const colourInput = document.getElementById('tag-style-colour') as HTMLInputElement;
+  const guardInput = document.getElementById('tag-style-guard') as HTMLInputElement;
+  const add = () => {
+    const tag = normaliseTag(nameInput.value);
+    if (!tag) return;
+    tagStyles[tag] = { colour: colourInput.value, guard: guardInput.checked };
+    nameInput.value = '';
+    guardInput.checked = false;
+    saveTagStyles();
+  };
+  document.getElementById('tag-style-add')!.addEventListener('click', add);
+  nameInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      add();
+    }
+  });
+  renderTagStylesList();
+}
 
 // SPE-79: unlike the toggles above, this one lives in the Go-backed
 // config.Settings (App.SaveSettings), not localStorage, since Connect()
@@ -12732,6 +13616,190 @@ document.getElementById('menu-find')!.addEventListener('click', () => {
   openFindBarForActiveTerminal();
 });
 
+document.getElementById('menu-broadcast')!.addEventListener('click', () => {
+  closeAllMenus();
+  const tab = activeTabId ? tabs.get(activeTabId) : null;
+  if (tab) toggleBroadcast(tab);
+});
+
+document.getElementById('menu-save-layout')!.addEventListener('click', () => {
+  closeAllMenus();
+  void saveCurrentLayout();
+});
+
+document.getElementById('menu-open-layout')!.addEventListener('click', () => {
+  closeAllMenus();
+  void openLayoutPicker();
+});
+
+document.getElementById('menu-shell-integration')!.addEventListener('click', () => {
+  closeAllMenus();
+  openShellIntegrationDialog();
+});
+
+document.getElementById('menu-open-log-folder')!.addEventListener('click', () => {
+  closeAllMenus();
+  App.OpenLogFolder().catch((err) => flashStatus(`Could not open the log folder: ${err}`, true));
+});
+
+// --- Named layouts ---
+// "Save this tab set as…": the workspace snapshot the restore feature
+// already writes, given a name and kept with the configuration, so a
+// rack of switches opens as the split it was arranged in.
+
+async function saveCurrentLayout() {
+  const snapshot = captureWorkspace();
+  if (snapshot.tabs.length === 0) {
+    flashStatus('Open something first: a layout is the set of tabs you have open', true);
+    return;
+  }
+  const name = prompt(`Save these ${describeWorkspace(snapshot)} as a layout named:`);
+  if (!name?.trim()) return;
+  try {
+    await App.SaveLayout({ id: '', name: name.trim(), snapshot });
+    flashStatus(`Saved layout ${name.trim()}`);
+    if (homeIsActive()) void renderHomeView();
+  } catch (err) {
+    flashStatus(`Could not save the layout: ${err}`, true);
+  }
+}
+
+async function openLayout(layout: SavedLayout) {
+  const snapshot = parseWorkspaceSnapshot(JSON.stringify(layout.snapshot));
+  if (!snapshot) {
+    flashStatus(`${layout.name} holds nothing that can be reopened`, true);
+    return;
+  }
+  await restoreWorkspace(snapshot);
+}
+
+async function openLayoutPicker() {
+  let layouts: SavedLayout[] = [];
+  try {
+    layouts = await App.ListLayouts();
+  } catch (err) {
+    flashStatus(`Could not list layouts: ${err}`, true);
+    return;
+  }
+  if (layouts.length === 0) {
+    flashStatus('No layouts saved yet: Sessions > Save Tab Set as Layout…', true);
+    return;
+  }
+  openQuickPick('Open layout', layouts.map((layout) => ({
+    label: layout.name,
+    detail: layoutSummary(layout),
+    run: () => { void openLayout(layout); },
+  })));
+}
+
+function layoutSummary(layout: SavedLayout): string {
+  const snapshot = parseWorkspaceSnapshot(JSON.stringify(layout.snapshot));
+  return snapshot ? describeWorkspace(snapshot) : 'empty';
+}
+
+async function renderHomeLayouts() {
+  const section = document.getElementById('home-layouts-section')!;
+  const grid = document.getElementById('home-layouts-grid')!;
+  let layouts: SavedLayout[] = [];
+  try {
+    layouts = await App.ListLayouts();
+  } catch {
+    layouts = [];
+  }
+  section.style.display = layouts.length > 0 ? 'block' : 'none';
+  grid.innerHTML = '';
+  for (const layout of layouts) {
+    const card = document.createElement('div');
+    card.className = 'home-card';
+    card.tabIndex = 0;
+    card.title = `Open ${layout.name}`;
+    const title = document.createElement('div');
+    title.className = 'home-card-title';
+    const name = document.createElement('span');
+    name.textContent = `⊞ ${layout.name}`;
+    name.style.cssText = 'flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;';
+    title.appendChild(name);
+    const rename = document.createElement('span');
+    rename.textContent = '✎';
+    rename.title = 'Rename';
+    rename.style.cssText = 'opacity:0.5;cursor:pointer;';
+    rename.onclick = async (e) => {
+      e.stopPropagation();
+      const next = prompt('Name for this layout:', layout.name);
+      if (!next?.trim() || next.trim() === layout.name) return;
+      await App.SaveLayout({ ...layout, name: next.trim() });
+      void renderHomeLayouts();
+    };
+    const remove = document.createElement('span');
+    remove.textContent = '✕';
+    remove.title = 'Delete this layout';
+    remove.style.cssText = 'opacity:0.5;cursor:pointer;margin-left:4px;';
+    remove.onclick = async (e) => {
+      e.stopPropagation();
+      if (!confirm(`Delete the layout "${layout.name}"? The sessions themselves are untouched.`)) return;
+      await App.DeleteLayout(layout.id);
+      void renderHomeLayouts();
+    };
+    title.append(rename, remove);
+    const sub = document.createElement('div');
+    sub.className = 'home-card-sub';
+    const when = homeRelativeTime(layout.savedAt);
+    sub.textContent = `${layoutSummary(layout)}${when ? ` · saved ${when}` : ''}`;
+    card.append(title, sub);
+    card.onclick = () => { void openLayout(layout); };
+    card.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        void openLayout(layout);
+      }
+    };
+    grid.appendChild(card);
+  }
+}
+
+// --- Shell integration ---
+// The one-liner that makes a shell report its directory (OSC 7), for
+// the remote browser to follow. Offered as text to copy rather than
+// installed by Xpecter: it is the person's shell config on the person's
+// host, and a terminal that edits it is a terminal nobody wants.
+
+const SHELL_INTEGRATION_SNIPPETS: { shell: string; text: string }[] = [
+  { shell: 'bash (~/.bashrc)', text: `__xpecter_cwd() { printf '\\e]7;file://%s%s\\e\\\\' "$HOSTNAME" "$PWD"; }\nPROMPT_COMMAND="__xpecter_cwd\${PROMPT_COMMAND:+;$PROMPT_COMMAND}"` },
+  { shell: 'zsh (~/.zshrc)', text: `__xpecter_cwd() { printf '\\e]7;file://%s%s\\e\\\\' "$HOST" "$PWD"; }\nprecmd_functions+=(__xpecter_cwd)` },
+  { shell: 'fish (~/.config/fish/config.fish)', text: `function __xpecter_cwd --on-variable PWD\n  printf '\\e]7;file://%s%s\\e\\\\' (hostname) "$PWD"\nend` },
+];
+
+function openShellIntegrationDialog() {
+  buildDialog({
+    title: 'Shell integration',
+    onDismiss: () => {},
+    fill: (body) => {
+      dialogText(body, 'Add one of these to the shell on the host and the Remote files section follows the directory your prompt is in. Nothing else changes: it is the standard OSC 7 escape, which other terminals read too.');
+      for (const snippet of SHELL_INTEGRATION_SNIPPETS) {
+        const head = document.createElement('div');
+        head.style.cssText = 'font-size:12px;font-weight:600;margin-top:8px;';
+        head.textContent = snippet.shell;
+        body.appendChild(head);
+        const block = document.createElement('div');
+        block.className = 'snippet-block';
+        const pre = document.createElement('pre');
+        pre.textContent = snippet.text;
+        const copy = document.createElement('button');
+        copy.type = 'button';
+        copy.textContent = 'Copy';
+        copy.onclick = () => {
+          void navigator.clipboard.writeText(snippet.text);
+          copy.textContent = 'Copied';
+          setTimeout(() => { copy.textContent = 'Copy'; }, 1500);
+        };
+        block.append(pre, copy);
+        body.appendChild(block);
+      }
+    },
+    actions: [{ label: 'Close', run: () => {} }],
+  });
+}
+
 document.getElementById('menu-clear-screen')!.addEventListener('click', async () => {
   closeAllMenus();
   const tab = activeTabId ? tabs.get(activeTabId) : null;
@@ -13097,6 +14165,13 @@ const SHORTCUT_GROUPS: { title: string; items: [ShortcutId | null, string][] }[]
     ],
   },
   {
+    title: 'Tabs',
+    items: [
+      [null, 'Ctrl+Tab / Ctrl+Shift+Tab: next / previous tab'],
+      [null, 'Ctrl+1 … Ctrl+8: that tab; Ctrl+9: the last tab'],
+    ],
+  },
+  {
     title: 'Text editor session',
     items: [
       [null, `New file (${SHORTCUT_MOD}+N)`],
@@ -13346,6 +14421,17 @@ document.getElementById('menu-import-mobaxterm')!.addEventListener('click', asyn
   }
 });
 
+document.getElementById('menu-import-putty')!.addEventListener('click', async () => {
+  closeAllMenus();
+  try {
+    const result = await App.ImportPuTTYSessions();
+    await renderSessionList();
+    alert(`Imported ${result.count} PuTTY session(s). Passwords are not imported (PuTTY does not store them), and .ppk key files are left out because Xpecter reads OpenSSH keys: those sessions use the agent, so run Pageant or convert the key with PuTTYgen.`);
+  } catch (err) {
+    alert(`PuTTY import failed: ${err}`);
+  }
+});
+
 document.getElementById('menu-import-sshconfig')!.addEventListener('click', async () => {
   closeAllMenus();
   try {
@@ -13562,11 +14648,13 @@ document.addEventListener('keydown', (e) => {
 // back an opaque id and offers no enumeration of its own.
 type ActiveForward = {
   id: string;
+  kind: 'local' | 'dynamic' | 'remote';
   sessionBackendId: string;
   sessionLabel: string;
   localPort: number;
   remoteHost: string;
   remotePort: number;
+  localHost?: string;
 };
 const activeForwards: ActiveForward[] = [];
 
@@ -13638,6 +14726,14 @@ function renderForwardManager() {
 
     const form = document.createElement('div');
     form.className = 'fwd-form';
+    const kind = document.createElement('select');
+    kind.className = 'dialog-field';
+    for (const option of FORWARD_KINDS) {
+      const el = document.createElement('option');
+      el.value = option.value;
+      el.textContent = option.label;
+      kind.appendChild(el);
+    }
     const local = fwdInput('fwd-local', 'Local port', true);
     const arrow = document.createElement('span');
     arrow.className = 'sep';
@@ -13647,17 +14743,36 @@ function renderForwardManager() {
     colon.className = 'sep';
     colon.textContent = ':';
     const rport = fwdInput('fwd-rport', 'port', true);
+    const lhost = fwdInput('fwd-lhost', 'deliver to (127.0.0.1)', false);
     const add = document.createElement('button');
     add.type = 'button';
     add.className = 'fwd-add';
     add.textContent = 'Add forward';
-    add.onclick = () => { void addForward(select.value, local, rhost, rport); };
-    form.append(local, arrow, rhost, colon, rport, add);
-    body.appendChild(form);
-
+    add.onclick = () => { void addForward(select.value, kind.value as 'local' | 'dynamic' | 'remote', local, rhost, rport, lhost); };
     const note = document.createElement('div');
     note.className = 'fwd-note';
-    note.textContent = 'Binds 127.0.0.1:<local> and forwards it through the session to <remote host>:<port>. Reach a service on the far network as if it were local.';
+    const layout = () => {
+      const k = kind.value;
+      // The fields in the order each kind reads: a local forward maps a
+      // local port to a remote address, a SOCKS proxy needs only a port,
+      // a remote forward maps a host port to a local address.
+      form.innerHTML = '';
+      if (k === 'dynamic') {
+        form.append(kind, local, add);
+        note.textContent = 'Binds 127.0.0.1:<local port> as a SOCKS5 proxy. Point a browser or any SOCKS-aware program at it and its connections leave from the host, so the whole far network is reachable.';
+      } else if (k === 'remote') {
+        rport.placeholder = 'host port';
+        form.append(kind, rport, arrow, lhost, colon, local, add);
+        note.textContent = 'Asks the host to listen on <host port> and delivers each connection to this machine. Whether the host port is reachable from beyond the host is the server\'s GatewayPorts setting.';
+      } else {
+        rport.placeholder = 'port';
+        form.append(kind, local, arrow, rhost, colon, rport, add);
+        note.textContent = 'Binds 127.0.0.1:<local> and forwards it through the session to <remote host>:<port>. Reach a service on the far network as if it were local.';
+      }
+    };
+    kind.onchange = layout;
+    layout();
+    body.appendChild(form);
     body.appendChild(note);
   }
 
@@ -13674,12 +14789,23 @@ function renderForwardManager() {
       row.className = 'fwd-row';
       const desc = document.createElement('span');
       desc.className = 'fwd-desc';
-      desc.append('localhost:');
-      const lp = document.createElement('b'); lp.textContent = String(fwd.localPort); desc.appendChild(lp);
-      desc.append(' → ');
-      const rt = document.createElement('b'); rt.textContent = `${fwd.remoteHost}:${fwd.remotePort}`; desc.appendChild(rt);
+      const text = document.createElement('b');
+      text.textContent = describeForward(fwd);
+      desc.appendChild(text);
       desc.append(`  via ${fwd.sessionLabel}`);
       row.appendChild(desc);
+      // A forward on a session that came from a saved profile can be
+      // kept with it, so it starts on its own next time.
+      const owner = sessionByBackendId(fwd.sessionBackendId);
+      const profile = owner ? profileFor(owner) : undefined;
+      if (profile) {
+        const keep = document.createElement('span');
+        keep.className = 'fwd-stop';
+        keep.textContent = '📌';
+        keep.title = `Start this forward every time ${profile.name} connects`;
+        keep.onclick = () => { void saveForwardWithProfile(profile, fwd); };
+        row.appendChild(keep);
+      }
       const stop = document.createElement('span');
       stop.className = 'fwd-stop';
       stop.textContent = '✕';
@@ -13692,28 +14818,55 @@ function renderForwardManager() {
   body.appendChild(list);
 }
 
-async function addForward(sessionBackendId: string, local: HTMLInputElement, rhost: HTMLInputElement, rport: HTMLInputElement) {
+async function addForward(sessionBackendId: string, kind: 'local' | 'dynamic' | 'remote', local: HTMLInputElement, rhost: HTMLInputElement, rport: HTMLInputElement, lhost: HTMLInputElement) {
   const localPort = parseInt(local.value, 10);
   const remoteHost = rhost.value.trim();
   const remotePort = parseInt(rport.value, 10);
-  if (!localPort || localPort < 1 || localPort > 65535) { flashStatus('A valid local port is required', true); return; }
-  if (!remoteHost) { flashStatus('A remote host is required', true); return; }
-  if (!remotePort || remotePort < 1 || remotePort > 65535) { flashStatus('A valid remote port is required', true); return; }
+  const localHost = lhost.value.trim() || '127.0.0.1';
+  const validPort = (n: number) => n >= 1 && n <= 65535;
+  if (!validPort(localPort)) { flashStatus('A valid local port is required', true); return; }
+  if (kind === 'local' && !remoteHost) { flashStatus('A remote host is required', true); return; }
+  if (kind !== 'dynamic' && !validPort(remotePort)) { flashStatus(`A valid ${kind === 'remote' ? 'host' : 'remote'} port is required`, true); return; }
   const session = liveSSHSessions().find((s) => s.backendId === sessionBackendId);
   if (!session) { flashStatus('That session is no longer connected', true); renderForwardManager(); return; }
+  const spec: SavedForward = { kind, localPort, remoteHost: kind === 'local' ? remoteHost : undefined, remotePort: kind === 'dynamic' ? undefined : remotePort, localHost: kind === 'remote' ? localHost : undefined };
   let id: string;
   try {
-    id = await App.StartLocalForward(sessionBackendId, localPort, remoteHost, remotePort);
+    if (kind === 'dynamic') id = await App.StartDynamicForward(sessionBackendId, localPort);
+    else if (kind === 'remote') id = await App.StartRemoteForward(sessionBackendId, remotePort, localHost, localPort);
+    else id = await App.StartLocalForward(sessionBackendId, localPort, remoteHost, remotePort);
   } catch (err) {
     flashStatus(`Could not start forward: ${err}`, true);
     return;
   }
-  activeForwards.push({ id, sessionBackendId, sessionLabel: session.label, localPort, remoteHost, remotePort });
+  activeForwards.push({ id, kind, sessionBackendId, sessionLabel: session.label, localPort, remoteHost, remotePort, localHost: kind === 'remote' ? localHost : undefined });
   local.value = '';
   rhost.value = '';
   rport.value = '';
-  flashStatus(`Forwarding localhost:${localPort} → ${remoteHost}:${remotePort}`);
+  lhost.value = '';
+  flashStatus(`Forwarding ${describeForward(spec)}`);
   renderForwardManager();
+}
+
+async function saveForwardWithProfile(profile: SessionProfile, fwd: ActiveForward) {
+  const spec: SavedForward = {
+    kind: fwd.kind, localPort: fwd.localPort,
+    remoteHost: fwd.kind === 'local' ? fwd.remoteHost : undefined,
+    remotePort: fwd.kind === 'dynamic' ? undefined : fwd.remotePort,
+    localHost: fwd.kind === 'remote' ? fwd.localHost : undefined,
+  };
+  const existing = profile.forwards ?? [];
+  if (existing.some((f) => describeForward(f) === describeForward(spec))) {
+    flashStatus(`${profile.name} already starts that forward`);
+    return;
+  }
+  try {
+    await App.SaveSession({ ...profile, forwards: [...existing, spec] });
+    await renderSessionList();
+    flashStatus(`${describeForward(spec)} will start with ${profile.name}`);
+  } catch (err) {
+    flashStatus(`Could not save the forward: ${err}`, true);
+  }
 }
 
 async function stopForwardEntry(id: string) {
@@ -13792,6 +14945,16 @@ runtime.EventsOn('app:close-requested', () => {
   })();
 });
 App.ArmCloseGuard();
+
+// What the page catches goes into the application log (applog.go),
+// where a "it just stopped working" has a chance of being read later.
+window.addEventListener('error', (event) => {
+  App.LogFromFrontend('error', `${event.message} (${event.filename}:${event.lineno}:${event.colno})`).catch(() => {});
+});
+window.addEventListener('unhandledrejection', (event) => {
+  const reason = event.reason instanceof Error ? `${event.reason.message}\n${event.reason.stack ?? ''}` : String(event.reason);
+  App.LogFromFrontend('error', `unhandled rejection: ${reason}`).catch(() => {});
+});
 
 // --- Reopening what was open ---
 // The tab set is written as it changes (renderTabBar asks for it) and
@@ -13982,7 +15145,7 @@ async function restoreSSHPane(tab: Tab, session: Session, spec: SSHPaneSpec) {
 async function connectRestoredSSH(session: Session, spec: SSHPaneSpec) {
   const req: ConnectRequest = {
     host: spec.host, port: spec.port, user: spec.user,
-    keyPath: spec.keyPath, useAgent: spec.useAgent, internalAgent: spec.internalAgent,
+    keyPath: spec.keyPath, useAgent: spec.useAgent, internalAgent: spec.internalAgent, forwardAgent: spec.forwardAgent,
     x11: spec.x11, jumpHost: spec.jumpHost, terminalSpeed: spec.terminalSpeed,
   };
   const usesPassword = !spec.keyPath && !spec.useAgent && !spec.internalAgent;

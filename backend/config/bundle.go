@@ -25,6 +25,9 @@ type ConfigBundle struct {
 	Groups             []SessionGroup      `json:"groups"`
 	LocalShellProfiles []LocalShellProfile `json:"localShellProfiles"`
 	Folders            []Folder            `json:"folders,omitempty"`
+	// Named tab sets. Absent from bundles written before they existed,
+	// which merge in as nothing.
+	Layouts []Layout `json:"layouts,omitempty"`
 }
 
 // ExportBundle gathers the current Settings, Sessions, Groups, and
@@ -51,6 +54,10 @@ func ExportBundle() (ConfigBundle, error) {
 	if err != nil {
 		return ConfigBundle{}, err
 	}
+	layouts, err := LoadLayouts()
+	if err != nil {
+		return ConfigBundle{}, err
+	}
 	return ConfigBundle{
 		Version:            configBundleVersion,
 		Settings:           settings,
@@ -58,6 +65,7 @@ func ExportBundle() (ConfigBundle, error) {
 		Groups:             groups,
 		LocalShellProfiles: profiles,
 		Folders:            folders,
+		Layouts:            layouts,
 	}, nil
 }
 
@@ -145,7 +153,10 @@ func ImportBundle(bundle ConfigBundle, mode ImportMode) error {
 		if err := SaveLocalShellProfiles(nonNil(bundle.LocalShellProfiles)); err != nil {
 			return err
 		}
-		return SaveFolders(nonNil(bundle.Folders))
+		if err := SaveFolders(nonNil(bundle.Folders)); err != nil {
+			return err
+		}
+		return SaveLayouts(nonNil(bundle.Layouts))
 	}
 
 	groups, err := LoadGroups()
@@ -222,7 +233,22 @@ func ImportBundle(bundle ConfigBundle, mode ImportMode) error {
 		}
 		folders = append(folders, f)
 	}
-	return SaveFolders(folders)
+	if err := SaveFolders(folders); err != nil {
+		return err
+	}
+
+	layouts, err := LoadLayouts()
+	if err != nil {
+		return err
+	}
+	existingLayoutIDs := idSet(layouts, func(l Layout) string { return l.ID })
+	for _, l := range bundle.Layouts {
+		if existingLayoutIDs[l.ID] {
+			l.ID = idgen.New()
+		}
+		layouts = append(layouts, l)
+	}
+	return SaveLayouts(layouts)
 }
 
 // ResetAll clears everything an export captures, returning this machine
@@ -257,6 +283,9 @@ func ResetAll() (string, error) {
 		return backup, err
 	}
 	if err := SaveFolders([]Folder{}); err != nil {
+		return backup, err
+	}
+	if err := SaveLayouts([]Layout{}); err != nil {
 		return backup, err
 	}
 	return backup, nil

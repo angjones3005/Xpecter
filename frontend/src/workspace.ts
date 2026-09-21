@@ -24,6 +24,7 @@ export type PaneSpec =
     keyPath?: string;
     useAgent?: boolean;
     internalAgent?: boolean;
+    forwardAgent?: boolean;
     x11?: boolean;
     jumpHost?: string;
     terminalSpeed?: number;
@@ -98,6 +99,7 @@ export function parsePaneSpec(value: unknown): PaneSpec | null {
         keyPath: optStr(value.keyPath),
         useAgent: optBool(value.useAgent),
         internalAgent: optBool(value.internalAgent),
+        forwardAgent: optBool(value.forwardAgent),
         x11: optBool(value.x11),
         jumpHost: optStr(value.jumpHost),
         terminalSpeed: typeof value.terminalSpeed === 'number' ? value.terminalSpeed : undefined,

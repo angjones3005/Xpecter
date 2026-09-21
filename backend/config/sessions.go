@@ -55,6 +55,27 @@ type SessionProfile struct {
 	// own icon regardless of this field. Plain string rather than a Go
 	// enum so new kinds can be added without a schema migration.
 	DeviceKind string `json:"deviceKind,omitempty"`
+	// ForwardAgent asks the host to forward this machine's SSH agent
+	// (ssh's -A), so a key kept here answers on the next hop from a
+	// bastion. Only meaningful with UseAgent.
+	ForwardAgent bool `json:"forwardAgent,omitempty"`
+	// Forwards are started every time this session connects, so a
+	// tunnel that is always wanted through a host does not have to be
+	// added by hand each time.
+	Forwards []SavedForward `json:"forwards,omitempty"`
+}
+
+// SavedForward is a port forward that belongs to a session and starts
+// with it. Kind is "local" (also the default when empty: LocalPort here
+// to RemoteHost:RemotePort from the host), "dynamic" (a SOCKS5 proxy on
+// LocalPort whose connections leave from the host) or "remote"
+// (RemotePort on the host, delivered to LocalHost:LocalPort here).
+type SavedForward struct {
+	Kind       string `json:"kind,omitempty"`
+	LocalPort  int    `json:"localPort,omitempty"`
+	RemoteHost string `json:"remoteHost,omitempty"`
+	RemotePort int    `json:"remotePort,omitempty"`
+	LocalHost  string `json:"localHost,omitempty"`
 }
 
 // SessionGroup is a folder for organizing sessions. ParentID enables

@@ -15,9 +15,11 @@ Xpecter is built to cover the SSH-and-serial-console workflow without the bloat 
 - A built-in file browser and Monaco-based code editor for remote files, with drag-and-drop upload
 - A PDF and image viewer in the same panes as the editor, for files here or on a host
 - Saved Remote Desktop (RDP) and VNC sessions, opened in your system's own client with the address, user and display filled in
-- SSH jump hosts (ProxyJump), a configurable terminal speed, a visual port-forwarding manager, Wake-on-LAN and a port scanner
-- Optional password saving in the OS keychain (off by default), and import from an OpenSSH `~/.ssh/config`
+- SSH jump hosts (ProxyJump), agent forwarding, a configurable terminal speed, a port-forwarding manager for local, SOCKS and remote forwards (saved with a session if you like), Wake-on-LAN and a port scanner
+- Optional password saving in the OS keychain (off by default), and import from an OpenSSH `~/.ssh/config`, MobaXterm or PuTTY
 - Session organization: folders, drag-and-drop, quick-connect search, recent sessions, tags
+- Named layouts that reopen a whole set of tabs and split panes, input broadcast to every pane in a tab, and tag colours with a guard that asks before anything is pasted into a production box
+- Find in files across a workspace folder, editing a remote file in any local application with upload on every save, and saving a remote file as root through sudo
 - Dark/Light theming
 - Clipboard sync between the local OS and remote sessions (OSC 52), plus optional auto-copy-on-select
 - A MobaXterm-style session picker and top menu bar (Terminal / Sessions / View / Tools / Settings)

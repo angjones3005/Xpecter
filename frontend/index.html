@@ -845,6 +845,60 @@
     .transfer-bar { height: 3px; margin-top: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
     .transfer-fill { height: 100%; background: var(--accent); transition: width 0.15s linear; }
 
+    /* Tag colours: a bar on the tab, a border on the pane header, a pill
+       on the sidebar row, and the guard badge. */
+    .tab .tab-tag { font-size: 9px; padding: 0 5px; border-radius: 999px; color: #fff; font-weight: 600; letter-spacing: 0.3px; }
+    .pane-header.tagged { border-left: 3px solid var(--tag-colour); }
+    .pane-header .pane-tag { font-size: 9px; padding: 0 5px; border-radius: 999px; color: #fff; font-weight: 600; margin-left: 6px; }
+    .side-row .row-tag { flex: 0 0 auto; font-size: 8.5px; padding: 0 4px; border-radius: 999px; color: #fff; font-weight: 600; margin-left: 4px; }
+    .pane-header .pane-broadcast { margin-left: auto; margin-right: 6px; cursor: pointer; opacity: 0.55; font-size: 12px; }
+    .pane-header .pane-broadcast:hover { opacity: 1; }
+    .pane-header .pane-broadcast.on { opacity: 1; color: var(--warning); }
+    .pane-wrapper.broadcasting .pane-header { background: color-mix(in srgb, var(--warning) 18%, var(--bg-alt)); }
+    .paste-guard-note { color: var(--danger); font-weight: 600; margin: 4px 0 8px; }
+
+    /* Settings sub-sections: the rule and tag lists. */
+    .settings-sub { margin: 6px 0 10px 18px; padding-left: 10px; border-left: 2px solid var(--border); }
+    .settings-sub-title { font-size: 11.5px; font-weight: 600; margin-bottom: 4px; color: var(--text-dim); }
+    .rules-list { display: flex; flex-direction: column; gap: 3px; margin-bottom: 6px; }
+    .rules-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+    .rules-row .rules-pattern { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono, monospace); }
+    .rules-row .rules-swatch { width: 12px; height: 12px; border-radius: 3px; flex: 0 0 auto; }
+    .rules-row .rules-remove { cursor: pointer; opacity: 0.6; }
+    .rules-row .rules-remove:hover { opacity: 1; color: var(--danger); }
+    .rules-add { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .rules-add input.dialog-field { flex: 1 1 200px; }
+
+    /* Session editor: the forwards list. */
+    .se-forwards { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+    .se-forwards-head { font-size: 11.5px; color: var(--text-dim); }
+    .se-forward-row { display: flex; align-items: center; gap: 4px; font-size: 12px; }
+    .se-forward-row input.dialog-field { width: 70px; }
+    .se-forward-row input.dialog-field.wide { width: 130px; }
+    .se-forward-row .rules-remove { cursor: pointer; opacity: 0.6; }
+
+    /* Find in files, inside the workspace tree. */
+    .tree-search { display: flex; align-items: center; gap: 4px; padding: 5px 8px; border-bottom: 1px solid var(--border); }
+    .tree-search input { flex: 1 1 auto; min-width: 0; padding: 3px 6px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; font: inherit; font-size: 12px; }
+    .tree-search input:focus { outline: none; border-color: var(--accent); }
+    .tree-search .term-find-toggle { font-size: 11px; }
+    .search-file { padding: 5px 8px 2px; font-size: 11.5px; font-weight: 600; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .search-hit { padding: 2px 8px 2px 16px; font-size: 12px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono, monospace); }
+    .search-hit:hover { background: var(--hover); }
+    .search-hit .search-line { color: var(--text-dim); margin-right: 6px; }
+    .search-summary { padding: 6px 8px; font-size: 11px; color: var(--text-dim); }
+
+    /* Serial console controls under the pane header. */
+    .serial-bar { display: flex; align-items: center; gap: 8px; padding: 3px 8px; font-size: 11px; background: var(--bg-alt); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+    .serial-bar label { display: inline-flex; align-items: center; gap: 3px; cursor: pointer; }
+    .serial-bar select { font: inherit; font-size: 11px; }
+    .serial-bar button { font: inherit; font-size: 11px; padding: 1px 8px; }
+
+    /* Shell integration dialog. */
+    .snippet-block { position: relative; margin: 6px 0 10px; }
+    .snippet-block pre { margin: 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; font-size: 11.5px; white-space: pre-wrap; word-break: break-all; }
+    .snippet-block button { position: absolute; top: 4px; right: 4px; font-size: 11px; padding: 1px 8px; }
+
     /* The multi-line paste question. */
     .paste-preview { max-height: 120px; overflow: auto; margin: 8px 0; padding: 6px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; font-size: 11.5px; color: var(--text-dim); white-space: pre; }
     .paste-delay-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
@@ -951,6 +1005,9 @@
         <div class="item" id="menu-new-session">New Session</div>
         <div class="item" id="menu-new-editor">New Text Editor</div>
         <div class="item" id="menu-new-folder">New Folder</div>
+        <div class="separator"></div>
+        <div class="item" id="menu-save-layout">Save Tab Set as Layout&hellip;</div>
+        <div class="item" id="menu-open-layout">Open Layout&hellip;</div>
       </div>
     </div>
     <div class="menu-item" data-menu="view">View
@@ -962,8 +1019,11 @@
         <div class="item" id="menu-layout-2h">Split Horizontal (2) <span style="opacity:0.5;font-size:11px;">Ctrl+Shift+Enter</span></div>
         <div class="item" id="menu-layout-4">4-Pane Grid</div>
         <div class="item" id="menu-toggle-fullscreen">Fullscreen <span style="opacity:0.5;font-size:11px;">F11</span></div>
+        <div class="item" id="menu-broadcast">Send Input to All Panes</div>
         <div class="separator"></div>
         <div class="item" id="menu-keyboard-shortcuts">Keyboard Shortcuts…</div>
+        <div class="item" id="menu-shell-integration">Shell Integration…</div>
+        <div class="item" id="menu-open-log-folder">Open Log Folder</div>
       </div>
     </div>
     <div class="menu-item" data-menu="tools">Tools
@@ -1074,7 +1134,38 @@
         </div>
         <div class="settings-note">How far back you can scroll in a terminal. Every retained line is held in memory for as long as the session is open, so the largest sizes cost real memory across a window full of panes. Lowering this discards anything already above the new limit.</div>
         <div class="settings-row"><label><input type="checkbox" id="highlight-toggle" checked /> Colorize terminal output</label></div>
+        <div class="settings-sub">
+          <div class="settings-sub-title">Custom highlight rules</div>
+          <div id="highlight-rules-list" class="rules-list"></div>
+          <div class="rules-add">
+            <input id="highlight-rule-pattern" class="dialog-field" placeholder="words, comma separated, or a regular expression" />
+            <select id="highlight-rule-kind" class="dialog-field"><option value="word">Words</option><option value="regex">Regex</option></select>
+            <select id="highlight-rule-category" class="dialog-field"></select>
+            <button id="highlight-rule-add" type="button">Add</button>
+          </div>
+          <div class="settings-note">Your rules are tried before the built-in ones, so they win where they overlap. Words match whole; a regular expression matches wherever it matches.</div>
+        </div>
+        <div class="settings-sub">
+          <div class="settings-sub-title">Tag colours</div>
+          <div id="tag-styles-list" class="rules-list"></div>
+          <div class="rules-add">
+            <input id="tag-style-name" class="dialog-field" placeholder="tag" />
+            <input id="tag-style-colour" type="color" value="#e5484d" />
+            <label><input id="tag-style-guard" type="checkbox" /> ask before pasting</label>
+            <button id="tag-style-add" type="button">Add</button>
+          </div>
+          <div class="settings-note">A session's tabs, pane header and sidebar row wear the colour of its first coloured tag. A tag that asks before pasting makes the terminal confirm every multi-line paste and every snippet sent to a session carrying it, however the paste warning is set.</div>
+        </div>
         <div class="settings-row"><label><input type="checkbox" id="show-tab-numbers-toggle" /> Show tab numbers</label></div>
+        <div class="settings-row"><label for="cursor-style-select">Cursor</label>
+          <select id="cursor-style-select">
+            <option value="block">Block</option>
+            <option value="underline">Underline</option>
+            <option value="bar">Bar</option>
+          </select>
+        </div>
+        <div class="settings-row"><label><input type="checkbox" id="cursor-blink-toggle" /> Blinking cursor</label></div>
+        <div class="settings-row"><label><input type="checkbox" id="follow-shell-dir-toggle" checked /> Remote files follow the shell's directory (needs shell integration)</label></div>
         <div class="settings-row"><label><input type="checkbox" id="ssh-keepalive-toggle" checked /> SSH keepalive (prevent idle disconnects)</label></div>
         <div class="settings-row"><label><input type="checkbox" id="keep-open-last-tab-toggle" /> Keep app open when last tab closes</label></div>
         <div class="settings-row"><label><input type="checkbox" id="bell-notify-toggle" checked /> Notify when a background terminal rings its bell</label></div>
@@ -1126,6 +1217,7 @@
         <div class="settings-action" id="menu-import-encrypted-config">Import encrypted configuration&hellip;</div>
         <div class="settings-action" id="menu-import-mobaxterm">Import from MobaXterm&hellip;</div>
         <div class="settings-action" id="menu-import-sshconfig">Import from SSH config&hellip;</div>
+        <div class="settings-action" id="menu-import-putty">Import from PuTTY&hellip;</div>
         <div class="settings-action" id="menu-restore-backup">Restore from backup&hellip;</div>
         <div class="settings-action danger" id="menu-reset-settings">Reset appearance settings to defaults</div>
         <div class="settings-action danger" id="menu-reset-all">Erase all saved data&hellip;</div>
@@ -1228,6 +1320,10 @@
           <div class="home-section" id="home-restore-section" style="display:none;">
             <div class="home-section-head">Pick up where you left off</div>
             <div id="home-restore-card" class="home-restore"></div>
+          </div>
+          <div class="home-section" id="home-layouts-section" style="display:none;">
+            <div class="home-section-head">Layouts</div>
+            <div id="home-layouts-grid" class="home-card-grid"></div>
           </div>
           <div class="home-section" id="home-pinned-section" style="display:none;">
             <div class="home-section-head">Pinned</div>
@@ -1374,6 +1470,7 @@
         </span>
         <span id="auth-key-fields" style="display:none;flex-direction:column;gap:8px;">
           <label><input id="use-ssh-agent" type="checkbox" /> Use SSH agent (OpenSSH / Pageant)</label>
+          <label><input id="forward-agent" type="checkbox" /> Forward the agent to the host (ssh -A)</label>
           <label><input id="use-internal-agent" type="checkbox" /> Use Xpecter memory agent</label>
           <input id="keyPath" placeholder="key path" readonly class="dialog-field" />
           <button id="browse-key">Browse…</button>
@@ -1482,7 +1579,13 @@
             <button id="se-clear-key" type="button">Clear</button>
           </div>
           <label><input id="se-use-ssh-agent" type="checkbox" /> Use SSH agent (OpenSSH / Pageant)</label>
+          <label><input id="se-forward-agent" type="checkbox" /> Forward the agent to the host (ssh -A)</label>
           <label><input id="se-use-internal-agent" type="checkbox" /> Use Xpecter memory agent</label>
+          <div class="se-forwards" id="se-forwards-block">
+            <div class="se-forwards-head">Port forwards started with this session</div>
+            <div id="se-forwards-list"></div>
+            <button id="se-forward-add" type="button">+ Add forward</button>
+          </div>
           <select id="se-devicekind-select" class="dialog-field">
             <option value="host">VM / Host</option>
             <option value="switch">Network switch</option>

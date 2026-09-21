@@ -82,6 +82,9 @@ type App struct {
 	// notificationsReady is whether the platform's notification service
 	// came up at startup; NotifyBell does nothing otherwise.
 	notificationsReady bool
+	// externalEdits are remote files being edited in another
+	// application and uploaded back on save. See remoteedit.go.
+	externalEdits externalEditor
 }
 
 // localForward is one bound local port and the session it forwards
@@ -91,6 +94,9 @@ type App struct {
 type localForward struct {
 	listener  net.Listener
 	sessionID string
+	// kind is "local", "dynamic" (a SOCKS5 proxy) or "remote" (a port
+	// the host listens on). See forwards.go for the last two.
+	kind string
 }
 
 func NewApp(startupDir string) *App {
@@ -107,6 +113,8 @@ func NewApp(startupDir string) *App {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	initAppLog()
+	logf("app", "Xpecter %s starting", Version)
 	_ = registerContextMenu()
 	cleanupStaleRemoteFiles()
 	cleanupStaleRDPFiles(rdpclient.TempDir())
@@ -144,6 +152,7 @@ func cleanupStaleRemoteFiles() {
 		// use a day later and was never removed by anything either.
 		swept := strings.HasPrefix(name, "xpecter-remote-file-") ||
 			strings.HasPrefix(name, "specter-remote-file-") ||
+			strings.HasPrefix(name, "xpecter-external-edit-") ||
 			strings.HasPrefix(name, "xpecter-update-")
 		if !entry.IsDir() || !swept {
 			continue
@@ -207,6 +216,9 @@ func (a *App) shutdown(ctx context.Context) {
 	if a.notificationsReady {
 		runtime.CleanupNotifications(ctx)
 	}
+	a.externalEdits.close()
+	logf("app", "shutting down")
+	closeAppLog()
 }
 
 // NotifyBell shows an operating-system notification for a terminal
@@ -435,6 +447,89 @@ func (a *App) CloseSerial(id string) error {
 	return sc.Close()
 }
 
+// SetSerialSignals drives a console's DTR and RTS lines; some devices
+// keep their console silent until one is raised.
+func (a *App) SetSerialSignals(id string, dtr bool, rts bool) error {
+	sc, ok := a.serials.get(id)
+	if !ok {
+		return fmt.Errorf("no such serial session: %s", id)
+	}
+	if err := sc.SetDTR(dtr); err != nil {
+		return err
+	}
+	return sc.SetRTS(rts)
+}
+
+// SendSerialBreak holds the line in break for a quarter second, the
+// way a console server interrupts a boot.
+func (a *App) SendSerialBreak(id string) error {
+	sc, ok := a.serials.get(id)
+	if !ok {
+		return fmt.Errorf("no such serial session: %s", id)
+	}
+	return sc.SendBreak(250 * time.Millisecond)
+}
+
+// --- Named layouts ---
+// A layout is a saved tab set; see backend/config/layouts.go.
+
+func (a *App) ListLayouts() ([]config.Layout, error) {
+	return config.LoadLayouts()
+}
+
+func layoutID(l config.Layout) string { return l.ID }
+
+func (a *App) SaveLayout(layout config.Layout) (config.Layout, error) {
+	layouts, err := config.LoadLayouts()
+	if err != nil {
+		return config.Layout{}, err
+	}
+	if layout.ID == "" {
+		layout.ID = idgen.New()
+	}
+	if strings.TrimSpace(layout.Name) == "" {
+		return config.Layout{}, errors.New("a layout needs a name")
+	}
+	if len(layout.Snapshot) == 0 {
+		return config.Layout{}, errors.New("a layout needs at least one tab")
+	}
+	layout.SavedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := config.SaveLayouts(config.UpsertByID(layouts, layout, layoutID)); err != nil {
+		return config.Layout{}, err
+	}
+	return layout, nil
+}
+
+func (a *App) DeleteLayout(id string) error {
+	layouts, err := config.LoadLayouts()
+	if err != nil {
+		return err
+	}
+	return config.SaveLayouts(config.RemoveByID(layouts, id, layoutID))
+}
+
+// ImportPuTTYSessions reads PuTTY's saved sessions from the registry
+// and adds them as saved sessions. See putty.go.
+func (a *App) ImportPuTTYSessions() (MobaImportResult, error) {
+	profiles, err := readPuTTYSessions()
+	if err != nil {
+		return MobaImportResult{}, err
+	}
+	if len(profiles) == 0 {
+		return MobaImportResult{}, fmt.Errorf("no importable PuTTY sessions found")
+	}
+	existing, err := config.LoadSessions()
+	if err != nil {
+		return MobaImportResult{}, err
+	}
+	existing = append(existing, profiles...)
+	if err := config.SaveSessions(existing); err != nil {
+		return MobaImportResult{}, err
+	}
+	logf("import", "imported %d PuTTY sessions", len(profiles))
+	return MobaImportResult{Path: "PuTTY", Count: len(profiles)}, nil
+}
+
 // ListSerialPorts returns available serial port device paths for a
 // future port-picker UI (manual entry is used for now).
 func (a *App) ListSerialPorts() ([]string, error) {
@@ -453,6 +548,9 @@ type ConnectRequest struct {
 	UseAgent      bool   `json:"useAgent,omitempty"`
 	InternalAgent bool   `json:"internalAgent,omitempty"`
 	X11           bool   `json:"x11,omitempty"`
+	// ForwardAgent asks the host to forward this machine's SSH agent
+	// (ssh's -A). Only meaningful with UseAgent.
+	ForwardAgent bool `json:"forwardAgent,omitempty"`
 	// JumpHost tunnels this connection through a bastion ("[user@]host[:port]").
 	JumpHost string `json:"jumpHost,omitempty"`
 	// TerminalSpeed sets the PTY baud (ispeed/ospeed); 0 is the default.
@@ -497,6 +595,7 @@ func (a *App) Connect(req ConnectRequest) (ConnectResult, error) {
 		Password: req.Password, KeyPath: req.KeyPath, Passphrase: req.Passphrase,
 		UseAgent:             req.UseAgent,
 		InternalAgent:        req.InternalAgent,
+		ForwardAgent:         req.ForwardAgent,
 		X11:                  req.X11,
 		JumpHost:             req.JumpHost,
 		TerminalSpeed:        req.TerminalSpeed,
@@ -529,11 +628,13 @@ func (a *App) Connect(req ConnectRequest) (ConnectResult, error) {
 				Host: changed.Host, Fingerprint: changed.NewFingerprint, KeyType: changed.KeyType,
 			}, nil
 		}
+		logf("ssh", "connect to %s@%s:%d failed: %v", req.User, req.Host, req.Port, err)
 		return ConnectResult{}, err
 	}
 
 	id := sess.ID()
 	a.sessions.put(id, sess)
+	logf("ssh", "connected to %s@%s:%d in %s (session %s)", req.User, req.Host, req.Port, time.Since(startedAt).Round(time.Millisecond), id)
 
 	// SPE-126: authenticated, but deliberately no shell yet.
 	// StartShellSSH below opens it, once the frontend has a real
@@ -579,12 +680,19 @@ func (a *App) StartShellSSH(id string, cols int, rows int, x11 bool) error {
 			_ = dead.Close()
 		}
 		a.closeForwardsFor(id)
+		a.stopExternalEditsFor(id)
+		logf("ssh", "session %s dropped: %s", id, closeErrorMessage(reason.Err))
 		runtime.EventsEmit(a.ctx, "ssh:closed:"+id, SessionClosedEvent{
 			EOF:     reason.EOF,
 			Message: closeErrorMessage(reason.Err),
 		})
 	}); err != nil {
+		logf("ssh", "shell on session %s failed: %v", id, err)
 		return err
+	}
+	if note := sess.AgentForwardNote(); note != "" {
+		logf("ssh", "session %s: %s", id, note)
+		runtime.EventsEmit(a.ctx, "ssh:notice:"+id, note)
 	}
 	if x11 {
 		if err := sess.EnableX11(); err != nil {
@@ -1992,10 +2100,12 @@ func (a *App) ResizeSSH(id string, cols, rows int) error {
 // was reported, and the tab it belonged to still has to be closable.
 func (a *App) CloseSSH(id string) error {
 	a.closeForwardsFor(id)
+	a.stopExternalEditsFor(id)
 	sess, ok := a.sessions.take(id)
 	if !ok {
 		return nil
 	}
+	logf("ssh", "session %s closed", id)
 	return sess.Close()
 }
 
@@ -2086,7 +2196,7 @@ func (a *App) StartLocalForward(sessionID string, localPort int, remoteHost stri
 		return "", err
 	}
 	forwardID := idgen.New()
-	a.forwards.put(forwardID, localForward{listener: listener, sessionID: sessionID})
+	a.forwards.put(forwardID, localForward{listener: listener, sessionID: sessionID, kind: "local"})
 	go func() {
 		for {
 			local, err := listener.Accept()

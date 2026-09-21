@@ -18,6 +18,51 @@ export interface ConnectRequest {
   // SPE-65: user already acknowledged the key-permission warning once
   // for this attempt.
   ignoreKeyPermWarning?: boolean;
+  // Ask the host to forward this machine's SSH agent (ssh -A). Only
+  // meaningful with useAgent.
+  forwardAgent?: boolean;
+}
+
+// A port forward saved with a session and started when it connects.
+// kind is "local" (also the default), "dynamic" (a SOCKS5 proxy on
+// localPort) or "remote" (remotePort on the host, delivered to
+// localHost:localPort here).
+export interface SavedForward {
+  kind?: 'local' | 'dynamic' | 'remote';
+  localPort?: number;
+  remoteHost?: string;
+  remotePort?: number;
+  localHost?: string;
+}
+
+// A named tab set (backend/config/layouts.go). snapshot is the
+// frontend's own workspace format, stored opaquely.
+export interface Layout {
+  id: string;
+  name: string;
+  snapshot: unknown;
+  savedAt?: string;
+}
+
+// One forward the backend is running (forwards.go).
+export interface ForwardInfo {
+  id: string;
+  sessionId: string;
+  kind: 'local' | 'dynamic' | 'remote';
+  address: string;
+}
+
+// Find in files (search.go).
+export interface SearchHit {
+  path: string;
+  line: number;
+  column: number;
+  text: string;
+}
+export interface SearchResult {
+  hits: SearchHit[];
+  truncated: boolean;
+  files: number;
 }
 export interface ConnectResult {
   sessionId?: string;
@@ -66,6 +111,8 @@ export interface SessionProfile {
   adminSession?: boolean;
   groupId?: string;
   tags?: string[];
+  forwardAgent?: boolean;
+  forwards?: SavedForward[];
   lastUsed?: string;
   // Keeps a session at the top of the sidebar and Home regardless of
   // when it was last used, for the sessions you open on a cold start.
@@ -245,6 +292,31 @@ export interface AppBindings {
   UploadLocalFiles(id: string, remoteDir: string): Promise<string[]>;
   // An OS notification for a bell in a terminal that is not on screen.
   NotifyBell(title: string, body: string): Promise<void>;
+  // Named tab sets.
+  ListLayouts(): Promise<Layout[]>;
+  SaveLayout(layout: Layout): Promise<Layout>;
+  DeleteLayout(id: string): Promise<void>;
+  // The other two shapes of tunnel (forwards.go), and what is running.
+  StartDynamicForward(sessionId: string, localPort: number): Promise<string>;
+  StartRemoteForward(sessionId: string, remotePort: number, localHost: string, localPort: number): Promise<string>;
+  ListForwards(): Promise<ForwardInfo[]>;
+  // Writes a remote file as root through sudo (sudosave.go).
+  SaveRemoteFileAsRoot(id: string, path: string, content: string, sudoPassword: string): Promise<void>;
+  // Opens a remote file with the system application and uploads it
+  // back on every save (remoteedit.go); reports on "remote:edit-uploaded".
+  EditRemoteFileExternally(id: string, remotePath: string): Promise<void>;
+  ExternalEditsFor(sessionId: string): Promise<string[]>;
+  // Find in files under a workspace folder (search.go).
+  SearchLocalFiles(root: string, query: string, regex: boolean, caseSensitive: boolean): Promise<SearchResult>;
+  // The application log (applog.go).
+  LogFromFrontend(level: string, message: string): Promise<void>;
+  LogFolder(): Promise<string>;
+  OpenLogFolder(): Promise<void>;
+  // PuTTY's saved sessions, from the registry (putty.go).
+  ImportPuTTYSessions(): Promise<MobaImportResult>;
+  // Serial console lines (serialclient.go).
+  SetSerialSignals(id: string, dtr: boolean, rts: boolean): Promise<void>;
+  SendSerialBreak(id: string): Promise<void>;
   // Raw bytes, base64-encoded, for the viewers that need the file
   // intact rather than as text. Both refuse a file too large to hold in
   // memory on both sides of the bridge at once.
